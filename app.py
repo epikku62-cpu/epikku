@@ -180,9 +180,9 @@ else:
             if not grok_key:
                 reply_text = "（サーバーの設定に XAI_API_KEY が登録されていないみたい…！管理画面から設定してね）"
             else:
-                # ユーザーのコンソール画面に一致する公式モデル名 grok-4.3 を指定
+                # xAIの標準APIで広く使われる grok-beta を指定
                 completion = client.chat.completions.create(
-                    model="grok-4.3", 
+                    model="grok-beta", 
                     messages=api_messages
                 )
                 
