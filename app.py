@@ -131,12 +131,12 @@ else:
                 
                 try:
                     response = client.images.generate(
-                        model="grok-2-image-gen",
+                        model="grok-imagine-image-2.0",   # 修正：現在の正式モデル名
                         prompt=full_prompt,
                         n=1,
                         size="1024x1024"
                     )
-                    image_url = response.data.url
+                    image_url = response.data[0].url   # 修正：正しく取り出す
                     st.session_state.messages.append({
                         "role": "assistant", 
                         "avatar": st.session_state.ai_icon, 
@@ -180,11 +180,11 @@ else:
             if not grok_key:
                 reply_text = "（サーバーの設定に XAI_API_KEY が登録されていないみたい…！管理画面から設定してね）"
             else:
-                # xAIの標準APIで広く使われる grok-beta を指定
-                completion = client.chat.completions.create(
-                    model="grok-4.6", 
-                    messages=api_messages
-                )
+                with st.spinner("考え中です…"):
+                    completion = client.chat.completions.create(
+                        model="grok-4.6", 
+                        messages=api_messages
+                    )
                 
                 # 安全なデータ抽出ガード
                 if hasattr(completion, 'choices') and completion.choices:
@@ -197,11 +197,13 @@ else:
             st.session_state.messages.append({"role": "assistant", "avatar": st.session_state.ai_icon, "content": reply_text})
                 
         except Exception as e:
-            error_reply = f"（エラー詳細：{e}）"
+            error_reply = f"（エラー詳細：{type(e).__name__}: {e}）"
             st.session_state.messages.append({"role": "assistant", "avatar": st.session_state.ai_icon, "content": error_reply})
+            st.error(f"APIエラーが発生しました: {e}")
 
         if st.session_state.level < 4:
             if st.session_state.exp >= TARGET_EXP:
                 st.session_state.level += 1
                 st.session_state.exp = 0
-        st.rerun()
+        
+        st.rerun()   # ← ここが重要：返事をすぐに表示させるために必須
