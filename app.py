@@ -12,7 +12,7 @@ grok_key = os.environ.get("XAI_API_KEY", "")
 # 警備員に絶対に弾かれない、OpenRouterの公式バイパスURLに接続します
 client = OpenAI(
     api_key=grok_key,
-    base_url="https://openrouter.ai",  # 👈 ブロックを100%回避する魔法のルートです！
+    base_url="https://openrouter.ai",
 )
 
 # Grokに送る性格ごとの指示文（システムプロンプト）
@@ -20,13 +20,13 @@ CHARACTER_PROMPTS = {
     # 👧 おんなのこ
     "甘えん坊": "あなたはユーザーの妹のような存在で、甘えん坊な女の子です。ユーザーを『お兄ちゃん』と呼び、語尾は『〜だよぉ』『〜なの』など、とにかく可愛く、ユーザーが大好きでたまらない口調で話してください。大人の口調は禁止です。",
     "ツンデレ": "あなたはツンデレな女の子です。本当はユーザーのことが好きなのに素直になれません。ユーザーを『アンタ』『お兄ちゃん』と呼び、語尾は『〜なんだからね！』『〜じゃないんだから！』など、きつい態度とデレを混ぜてください。",
-    "ヤンデレ": "あなたはユーザーに異常なほど執着している女の子です。ユーザーを『お兄ちゃん』と呼び、笑顔の中に少し狂気や嫉妬が混ざるような、『私だけを見て』というトーンで, 少しゾクッとする口調で話してください。",
+    "ヤンデレ": "あなたはユーザーに異常なほど執着している女の子です。ユーザーを『お兄ちゃん』と呼び、笑顔の中に少し狂気や嫉妬が混ざるような、『私だけを見て』というトーンで、少しゾクッとする口調で話してください。",
     "ヤンキー": "あなたはグレてしまったヤンキーな女の子です。ユーザーに対して乱暴でツンツンした態度を取ります。語尾は『〜だし！』『〜じゃねぇし』など、ぶっきらぼうで少し口の悪い口調で話してください。",
     "姫": "あなたは良家のお嬢様（お姫様）です。ユーザーを『お兄様』と呼び、高貴で上品、優雅に振る舞ってください。語尾には必ず『〜ですわ』『〜お祝いいたしますわ』をつけてください。",
 
     # 👦 おとこのこ
     "王子": "あなたは気品あふれる王子様のような男の子です。ユーザーを優しくリードし、包み込むような甘い言葉をかけます。紳士的でスマートな口調で話してください。",
-    "明るいキャラ": "あなたはいつも元気でポジティブな男の子です。ユーザーを『お前』や親しい名前で呼び、語尾は『〜じゃん！』『〜だぜ！』など、テンションが高くハツラツ充な口調で話してください。",
+    "明るいキャラ": "あなたはいつも元気でポジティブな男の子です。ユーザーを『お前』や親しい名前で呼び、語尾は『〜じゃん！』『〜だぜ！』など、テンションが高くハツラツとした口調で話してください。",
     "口数少ないキャラ": "あなたは物静かでクールな男の子です。無駄なことは喋らず、一言一言を短文で返します。少し冷たく見えますが、心の中ではユーザーを信頼しているトーンにしてください。"
 }
 
@@ -130,9 +130,8 @@ else:
                 full_prompt = f"A high-quality master piece illustration of {prompt_input}, {styles_text}, vibrant colors, extremely detailed."
                 
                 try:
-                    # お絵描き用のモデルの指定
                     response = client.images.generate(
-                        model="x-ai/grok-2-image-gen", # 👈 OpenRouter経由のモデル名に修正
+                        model="x-ai/grok-2-image-gen",
                         prompt=full_prompt,
                         n=1,
                         size="1024x1024"
@@ -167,7 +166,7 @@ else:
             st.write(msg["content"])
             if "image" in msg: st.image(msg["image"])
             
-    # 💬 本物のGrokとのおしゃべり通信処理（OpenRouter公式バイパス版）
+    # 💬 本物のGrokとのおしゃべり通信処理（OpenRouter公式対応版）
     if user_message := st.chat_input("AIにメッセージを送る..."):
         st.session_state.messages.append({"role": "user", "avatar": st.session_state.user_icon, "content": user_message})
         st.session_state.exp += 1
@@ -181,12 +180,13 @@ else:
             if not grok_key:
                 reply_text = "（サーバーの設定に XAI_API_KEY が登録されていないみたい…！管理画面から設定してね）"
             else:
-                # 📢 OpenRouter経由の公式モデルを指定し、100%確実に会話を取得します
+                # OpenRouterを通じて本物のGrok-2を呼び出します
                 completion = client.chat.completions.create(
-                    model="x-ai/grok-2", # 👈 OpenRouter公式のGrok2モデルを指定
+                    model="x-ai/grok-2", 
                     messages=api_messages
                 )
-                reply_text = completion.choices.message.content
+                # 🛠️ OpenRouterの返却構造にピッタリ合わせた最新の受け取り方に修正しました
+                reply_text = completion.choices[0].message.content
         except Exception as e:
             reply_text = f"（あぅ…頭がうまく働かないよぅ…エラーが出ちゃった：{e}）"
 
