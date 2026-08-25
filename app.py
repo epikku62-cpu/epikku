@@ -182,7 +182,7 @@ else:
             else:
                 # xAIの標準APIで広く使われる grok-beta を指定
                 completion = client.chat.completions.create(
-                    model="grok-beta", 
+                    model="grok-4.6", 
                     messages=api_messages
                 )
                 
