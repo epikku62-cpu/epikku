@@ -5,8 +5,8 @@ from openai import OpenAI
 
 st.set_page_config(page_title="AI育成お絵描きサイト", page_icon="🎨")
 
-# 🔒 Secretsのキー名がズレていても絶対に画面が赤くならないように安全対策をしました！
-# もし金庫に見つからなければ、空白文字を入れるようにしてエラーを強制回避します。
+# 🔒 GitHubの警告を回避！金庫から安全にキーを読み込みます
+# 大文字でも小文字でもどちらでも読み込めるように超安全な対策にしました
 grok_key = st.secrets.get("XAI_API_KEY", st.secrets.get("xai_api_key", ""))
 
 # 2026年最新のGrok公式接続仕様
@@ -181,7 +181,6 @@ else:
         
         # Grokに接続して返信をもらう
         try:
-            # もしAPIキーが空っぽのときは警告テキストを出すようにガード
             if not grok_key:
                 reply_text = "（ひみつの金庫（Secrets）に APIキーが登録されていないみたい…！『Manage app』の設定から XAI_API_KEY を登録してね）"
             else:
