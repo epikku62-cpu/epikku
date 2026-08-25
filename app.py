@@ -5,13 +5,13 @@ from openai import OpenAI
 
 st.set_page_config(page_title="AI育成お絵描きサイト", page_icon="🎨")
 
-# 🔒 【本番セキュリティ＆最新ブロック回避仕様】
+# 🔒 【本番セキュリティ＆2026年最新xAI公式URL対応】
 grok_key = st.secrets.get("XAI_API_KEY", st.secrets.get("xai_api_key", ""))
 
-# 2026年最新のxAI公式推奨エンドポイントに最適化しました
+# xAIの仕様変更に伴い、OpenAI互換ルートで確実にAIの頭脳へ接続する正しい本番URLです。
 client = OpenAI(
     api_key=grok_key,
-    base_url="https://x.ai",
+    base_url="https://api.x.ai/v1",  # 👈 エンドポイントを最新の正しい公式URLに固定しました！
 )
 
 # Grokに送る性格ごとの指示文（システムプロンプト）
@@ -86,7 +86,7 @@ else:
     with st.sidebar:
         st.markdown(f"### 📊 【 {st.session_state.ai_name} 】のステータス")
         st.write(f"**タイプ:** {st.session_state.ai_type} ({st.session_state.ai_gender})")
-        st.metric(label="現在のレベル", value=f"Lv.{st.session_state.level} / 999")
+        st.markdown(f"**現在のレベル:** Lv.{st.session_state.level} / 999")
         if st.session_state.level < 4:
             st.write(f"あと {TARGET_EXP - st.session_state.exp} 回でLvアップ")
             st.progress(st.session_state.exp / TARGET_EXP)
@@ -183,11 +183,9 @@ else:
             if not grok_key:
                 reply_text = "（ひみつの金庫（Secrets）に APIキーが登録されていないみたい…！『Manage app』の設定から XAI_API_KEY を登録してね）"
             else:
-                # 本番サーバー用の標準フラグ「grok-2」を確実に通す設定です
                 completion = client.chat.completions.create(
                     model="grok-2",  
-                    messages=api_messages,
-                    extra_headers={"User-Agent": "StreamlitApp/1.0"} # 👈 CloudflareのBot誤検知を回避するヘッダーを追加
+                    messages=api_messages
                 )
                 reply_text = completion.choices.message.content
         except Exception as e:
