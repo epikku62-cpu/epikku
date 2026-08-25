@@ -1,12 +1,14 @@
 import streamlit as st
 import random
+import os  # 👈 Renderの金庫（Environment Variables）を読み込むためのライブラリ
 from PIL import Image
 from openai import OpenAI
 
 st.set_page_config(page_title="AI育成お絵描きサイト", page_icon="🎨")
 
-# 🔒 【本番セキュリティ設計】金庫（Secrets）から安全にキーを読み込みます
-grok_key = st.secrets.get("XAI_API_KEY", st.secrets.get("xai_api_key", ""))
+# 🔒 【Render専用・本番セキュリティ設計】
+# 以前の古い「st.secrets」を完全に廃止し、Renderの金庫から安全にキーを引っ張る記述に統一しました。
+grok_key = os.environ.get("XAI_API_KEY", "")
 
 # 2026年最新のxAI公式推奨エンドポイント
 client = OpenAI(
@@ -181,15 +183,13 @@ else:
         # Grokに接続して返信をもらう
         try:
             if not grok_key:
-                reply_text = "（ひみつの金庫（Secrets）に APIキーが登録されていないみたい…！『Manage app』の設定から XAI_API_KEY を登録してね）"
+                reply_text = "（ひみつの金庫（Environment Variables）に APIキーが登録されていないみたい…！管理画面の Settings から設定してね）"
             else:
-                # 📢 最も互換性が高く、受け取り方がハッキリしている「grok-beta」で確実に会話を受け取ります
                 completion = client.chat.completions.create(
                     model="grok-beta",  
                     messages=api_messages
                 )
-                # 🛠️ 最新のデータ受け取り構造（.choices[0].message.content）に完全修正しました！
-                reply_text = completion.choices[0].message.content
+                reply_text = completion.choices.message.content
         except Exception as e:
             reply_text = f"（あぅ…頭がうまく働かないよぅ…エラーが出ちゃった：{e}）"
 
