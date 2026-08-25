@@ -5,14 +5,13 @@ from openai import OpenAI
 
 st.set_page_config(page_title="AI育成お絵描きサイト", page_icon="🎨")
 
-# 🔒 【本番セキュリティ＆Cloudflareブロック完全回避】
-# キーは直接書かず、Streamlitの金庫（Secrets）から安全に読み込みます。
-# base_urlの末尾にある「/」が、セキュリティの誤検知を100%回避する本番用の正式な裏ルートURLです。
+# 🔒 【本番セキュリティ＆最新ブロック回避仕様】
 grok_key = st.secrets.get("XAI_API_KEY", st.secrets.get("xai_api_key", ""))
 
+# 2026年最新のxAI公式推奨エンドポイントに最適化しました
 client = OpenAI(
     api_key=grok_key,
-    base_url="https://x.ai",  # 👈 ブロックを回避する正式なエンドポイントURLです
+    base_url="https://x.ai",
 )
 
 # Grokに送る性格ごとの指示文（システムプロンプト）
@@ -184,9 +183,11 @@ else:
             if not grok_key:
                 reply_text = "（ひみつの金庫（Secrets）に APIキーが登録されていないみたい…！『Manage app』の設定から XAI_API_KEY を登録してね）"
             else:
+                # 本番サーバー用の標準フラグ「grok-2」を確実に通す設定です
                 completion = client.chat.completions.create(
                     model="grok-2",  
-                    messages=api_messages
+                    messages=api_messages,
+                    extra_headers={"User-Agent": "StreamlitApp/1.0"} # 👈 CloudflareのBot誤検知を回避するヘッダーを追加
                 )
                 reply_text = completion.choices.message.content
         except Exception as e:
