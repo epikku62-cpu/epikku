@@ -181,7 +181,7 @@ else:
                 reply_text = "（サーバーの設定に XAI_API_KEY が登録されていないみたい…！管理画面から設定してね）"
             else:
                 completion = client.chat.completions.create(
-                    model="grok-2-latest", 
+                    model="grok-2", 
                     messages=api_messages
                 )
                 
