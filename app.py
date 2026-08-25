@@ -5,13 +5,13 @@ from openai import OpenAI
 
 st.set_page_config(page_title="AI育成お絵描きサイト", page_icon="🎨")
 
-# 🔒 【本番セキュリティ＆2026年最新xAI公式URL対応】
+# 🔒 【本番セキュリティ設計】金庫（Secrets）から安全にキーを読み込みます
 grok_key = st.secrets.get("XAI_API_KEY", st.secrets.get("xai_api_key", ""))
 
-# xAIの仕様変更に伴い、OpenAI互換ルートで確実にAIの頭脳へ接続する正しい本番URLです。
+# 2026年最新のxAI公式推奨エンドポイント
 client = OpenAI(
     api_key=grok_key,
-    base_url="https://api.x.ai/v1",  # 👈 エンドポイントを最新の正しい公式URLに固定しました！
+    base_url="https://api.x.ai/v1",
 )
 
 # Grokに送る性格ごとの指示文（システムプロンプト）
@@ -183,8 +183,9 @@ else:
             if not grok_key:
                 reply_text = "（ひみつの金庫（Secrets）に APIキーが登録されていないみたい…！『Manage app』の設定から XAI_API_KEY を登録してね）"
             else:
+                # 📢 最も安定して稼働している「grok-beta」モデルに差し替えました
                 completion = client.chat.completions.create(
-                    model="grok-2",  
+                    model="grok-beta",  
                     messages=api_messages
                 )
                 reply_text = completion.choices.message.content
