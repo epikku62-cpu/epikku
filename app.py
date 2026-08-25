@@ -6,13 +6,13 @@ from openai import OpenAI
 
 st.set_page_config(page_title="AI育成お絵描きサイト", page_icon="🎨")
 
-# 🔒 【本番セキュリティ＆OpenRouter最強ブロック回避仕様】
+# 🔒 【本番セキュリティ仕様：Grok本家公式エンドポイント接続】
 grok_key = os.environ.get("XAI_API_KEY", "")
 
-# 警備員に絶対に弾かれない、OpenRouterの公式バイパスURLに接続します
+# Grok（xAI）の公式OpenAI互換エンドポイントに接続します
 client = OpenAI(
     api_key=grok_key,
-    base_url="https://openrouter.ai",
+    base_url="https://api.x.ai/v1",
 )
 
 # Grokに送る性格ごとの指示文（システムプロンプト）
@@ -25,7 +25,7 @@ CHARACTER_PROMPTS = {
     "姫": "あなたは良家のお嬢様（お姫様）です。ユーザーを『お兄様』と呼び、高貴で上品、優雅に振る舞ってください。語尾には必ず『〜ですわ』『〜お祝いいたしますわ』をつけてください。",
 
     # 👦 おとこのこ
-    "王子": "あなたは気品あふれる王子様のような男の子です。ユーザーを優しくリードし、包み込むような甘い言葉をかけます。紳士的でスマートな口調で話してください。",
+    "王子": "あなたは気品あふれる王子様のような男の子です。ユーザーを優しくリードし、包み込むような甘い言葉をかけます。紳士적でスマートな口調で話してください。",
     "明るいキャラ": "あなたはいつも元気でポジティブな男の子です。ユーザーを『お前』や親しい名前で呼び、語尾は『〜じゃん！』『〜だぜ！』など、テンションが高くハツラツとした口調で話してください。",
     "口数少ないキャラ": "あなたは物静かでクールな男の子です。無駄なことは喋らず、一言一言を短文で返します。少し冷たく見えますが、心の中ではユーザーを信頼しているトーンにしてください。"
 }
@@ -166,7 +166,7 @@ else:
             st.write(msg["content"])
             if "image" in msg: st.image(msg["image"])
             
-    # 💬 本物のGrokとのおしゃべり通信処理（鉄壁の受け取りガード版）
+    # 💬 本物のGrokとのおしゃべり通信処理
     if user_message := st.chat_input("AIにメッセージを送る..."):
         st.session_state.messages.append({"role": "user", "avatar": st.session_state.user_icon, "content": user_message})
         st.session_state.exp += 1
@@ -181,24 +181,26 @@ else:
                 reply_text = "（サーバーの設定に XAI_API_KEY が登録されていないみたい…！管理画面から設定してね）"
             else:
                 completion = client.chat.completions.create(
-                    model="x-ai/grok-2", 
+                    model="grok-2-latest", 
                     messages=api_messages
                 )
                 
-                # 🛡️ 返ってきたデータが本物の文字オブジェクト（正常系）か、エラー文字列（異常系）かを自動で検知してガードします
+                # 安全なデータ抽出ガード
                 if hasattr(completion, 'choices') and completion.choices:
                     reply_text = completion.choices[0].message.content
                 elif isinstance(completion, dict) and "choices" in completion:
                     reply_text = completion["choices"][0]["message"]["content"]
                 else:
-                    # もしOpenRouter側でクレジット（残高）が足りないなどのエラー文が返ってきた場合は、その中身をそのまま親切に日本語で出力します
-                    reply_text = f"（OpenRouterから文字データではなく、エラーメッセージが届いているみたい。中身：{str(completion)}）"
+                    reply_text = f"（予期せぬデータが返ってきました：{str(completion)}）"
                     
+            st.session_state.messages.append({"role": "assistant", "avatar": st.session_state.ai_icon, "content": reply_text})
+                
         except Exception as e:
-            reply_text = f"（あぅ…頭がうまく働かないよぅ…エラーが出ちゃった：{e}）"
+            error_reply = f"（あぅ…頭がうまく働かないよぅ…エラーが出ちゃった：{e}）"
+            st.session_state.messages.append({"role": "assistant", "avatar": st.session_state.ai_icon, "content": error_reply})
 
         if st.session_state.level < 4:
             if st.session_state.exp >= TARGET_EXP:
                 st.session_state.level += 1
                 st.session_state.exp = 0
-
+        st.rerun()
