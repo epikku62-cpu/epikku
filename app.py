@@ -11,7 +11,7 @@ grok_key = st.secrets.get("XAI_API_KEY", st.secrets.get("xai_api_key", ""))
 # 2026年最新のxAI公式推奨エンドポイント
 client = OpenAI(
     api_key=grok_key,
-    base_url="https://api.x.ai/v1",
+    base_url="https://x.ai",
 )
 
 # Grokに送る性格ごとの指示文（システムプロンプト）
@@ -123,7 +123,7 @@ else:
             prompt_input = st.text_input("どんな絵を描く？", placeholder="例：可愛い魔法使いの女の子など")
             if st.button("🎨 イラストを生成する！") and prompt_input.strip() != "":
                 st.session_state.image_count += 1
-                styles_text = ", ".join(st.session_state.learned_styles) if st.session_styles else "beautiful anime style"
+                styles_text = ", ".join(st.session_state.learned_styles) if st.session_state.learned_styles else "beautiful anime style"
                 st.session_state.messages.append({"role": "user", "avatar": st.session_state.user_icon, "content": f"【お絵描きリクエスト】: {prompt_input}"})
                 
                 full_prompt = f"A high-quality master piece illustration of {prompt_input}, {styles_text}, vibrant colors, extremely detailed."
@@ -183,12 +183,13 @@ else:
             if not grok_key:
                 reply_text = "（ひみつの金庫（Secrets）に APIキーが登録されていないみたい…！『Manage app』の設定から XAI_API_KEY を登録してね）"
             else:
-                # 📢 2026年現在の正式本番用モデル「grok-4.3」に完全差し替えしました
+                # 📢 最も互換性が高く、受け取り方がハッキリしている「grok-beta」で確実に会話を受け取ります
                 completion = client.chat.completions.create(
-                    model="grok-4.3",  
+                    model="grok-beta",  
                     messages=api_messages
                 )
-                reply_text = completion.choices.message.content
+                # 🛠️ 最新のデータ受け取り構造（.choices[0].message.content）に完全修正しました！
+                reply_text = completion.choices[0].message.content
         except Exception as e:
             reply_text = f"（あぅ…頭がうまく働かないよぅ…エラーが出ちゃった：{e}）"
 
