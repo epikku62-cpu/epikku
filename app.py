@@ -166,7 +166,7 @@ else:
             st.write(msg["content"])
             if "image" in msg: st.image(msg["image"])
             
-    # 💬 本物のGrokとのおしゃべり通信処理（OpenRouter公式対応版）
+    # 💬 本物のGrokとのおしゃべり通信処理（鉄壁の受け取りガード版）
     if user_message := st.chat_input("AIにメッセージを送る..."):
         st.session_state.messages.append({"role": "user", "avatar": st.session_state.user_icon, "content": user_message})
         st.session_state.exp += 1
@@ -180,13 +180,20 @@ else:
             if not grok_key:
                 reply_text = "（サーバーの設定に XAI_API_KEY が登録されていないみたい…！管理画面から設定してね）"
             else:
-                # OpenRouterを通じて本物のGrok-2を呼び出します
                 completion = client.chat.completions.create(
                     model="x-ai/grok-2", 
                     messages=api_messages
                 )
-                # 🛠️ OpenRouterの返却構造にピッタリ合わせた最新の受け取り方に修正しました
-                reply_text = completion.choices[0].message.content
+                
+                # 🛡️ 返ってきたデータが本物の文字オブジェクト（正常系）か、エラー文字列（異常系）かを自動で検知してガードします
+                if hasattr(completion, 'choices') and completion.choices:
+                    reply_text = completion.choices[0].message.content
+                elif isinstance(completion, dict) and "choices" in completion:
+                    reply_text = completion["choices"][0]["message"]["content"]
+                else:
+                    # もしOpenRouter側でクレジット（残高）が足りないなどのエラー文が返ってきた場合は、その中身をそのまま親切に日本語で出力します
+                    reply_text = f"（OpenRouterから文字データではなく、エラーメッセージが届いているみたい。中身：{str(completion)}）"
+                    
         except Exception as e:
             reply_text = f"（あぅ…頭がうまく働かないよぅ…エラーが出ちゃった：{e}）"
 
@@ -195,5 +202,3 @@ else:
                 st.session_state.level += 1
                 st.session_state.exp = 0
 
-        st.session_state.messages.append({"role": "assistant", "avatar": st.session_state.ai_icon, "content": reply_text})
-        st.rerun()
