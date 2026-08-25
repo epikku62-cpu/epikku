@@ -123,7 +123,7 @@ else:
             prompt_input = st.text_input("どんな絵を描く？", placeholder="例：可愛い魔法使いの女の子など")
             if st.button("🎨 イラストを生成する！") and prompt_input.strip() != "":
                 st.session_state.image_count += 1
-                styles_text = ", ".join(st.session_state.learned_styles) if st.session_state.learned_styles else "beautiful anime style"
+                styles_text = ", ".join(st.session_state.learned_styles) if st.session_styles else "beautiful anime style"
                 st.session_state.messages.append({"role": "user", "avatar": st.session_state.user_icon, "content": f"【お絵描きリクエスト】: {prompt_input}"})
                 
                 full_prompt = f"A high-quality master piece illustration of {prompt_input}, {styles_text}, vibrant colors, extremely detailed."
@@ -183,9 +183,9 @@ else:
             if not grok_key:
                 reply_text = "（ひみつの金庫（Secrets）に APIキーが登録されていないみたい…！『Manage app』の設定から XAI_API_KEY を登録してね）"
             else:
-                # 📢 最も安定して稼働している「grok-beta」モデルに差し替えました
+                # 📢 2026年現在の正式本番用モデル「grok-4.3」に完全差し替えしました
                 completion = client.chat.completions.create(
-                    model="grok-beta",  
+                    model="grok-4.3",  
                     messages=api_messages
                 )
                 reply_text = completion.choices.message.content
