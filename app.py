@@ -1,4 +1,3 @@
-
 import streamlit as st
 import random
 from PIL import Image
@@ -168,7 +167,7 @@ else:
         st.session_state.messages.append({"role": "user", "avatar": st.session_state.user_icon, "content": user_message})
         st.session_state.exp += 1
         
-        # Grok（LLM）にお喋りさせるためのメッセージリストを作成
+        # Grokにお喋りさせるためのメッセージリストを作成
         api_messages = [{"role": "system", "content": CHARACTER_PROMPTS[st.session_state.ai_type]}]
         
         # 過去のチャット履歴を結合（画像リクエスト以外）
@@ -178,11 +177,12 @@ else:
         
         # Grokに接続して返信をもらう
         try:
+            # 2026年最新の安定モデル名「grok-2」に修正しました
             completion = client.chat.completions.create(
-                model="grok-beta",  
+                model="grok-2",  
                 messages=api_messages
             )
-            reply_text = completion.choices[0].message.content
+            reply_text = completion.choices.message.content
         except Exception as e:
             reply_text = f"（あぅ…頭がうまく働かないよぅ…エラーが出ちゃった：{e}）"
 
@@ -195,4 +195,3 @@ else:
         # メッセージを追加して画面を更新
         st.session_state.messages.append({"role": "assistant", "avatar": st.session_state.ai_icon, "content": reply_text})
         st.rerun()
-
