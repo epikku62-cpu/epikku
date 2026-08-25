@@ -25,7 +25,7 @@ CHARACTER_PROMPTS = {
     "姫": "あなたは良家のお嬢様（お姫様）です。ユーザーを『お兄様』と呼び、高貴で上品、優雅に振る舞ってください。語尾には必ず『〜ですわ』『〜お祝いいたしますわ』をつけてください。",
 
     # 👦 おとこのこ
-    "王子": "あなたは気品あふれる王子様のような男の子です。ユーザーを優しくリードし、包み込むような甘い言葉をかけます。紳士적でスマートな口調で話してください。",
+    "王子": "あなたは気品あふれる王子様のような男の子です。ユーザーを優しくリードし、包み込むような甘い言葉をかけます。紳士的でスマートな口調で話してください。",
     "明るいキャラ": "あなたはいつも元気でポジティブな男の子です。ユーザーを『お前』や親しい名前で呼び、語尾は『〜じゃん！』『〜だぜ！』など、テンションが高くハツラツとした口調で話してください。",
     "口数少ないキャラ": "あなたは物静かでクールな男の子です。無駄なことは喋らず、一言一言を短文で返します。少し冷たく見えますが、心の中ではユーザーを信頼しているトーンにしてください。"
 }
@@ -131,7 +131,7 @@ else:
                 
                 try:
                     response = client.images.generate(
-                        model="x-ai/grok-2-image-gen",
+                        model="grok-2-image-gen",
                         prompt=full_prompt,
                         n=1,
                         size="1024x1024"
@@ -180,8 +180,9 @@ else:
             if not grok_key:
                 reply_text = "（サーバーの設定に XAI_API_KEY が登録されていないみたい…！管理画面から設定してね）"
             else:
+                # 正しい公式モデル名 grok-2 を指定
                 completion = client.chat.completions.create(
-                    model="grok-4.6", 
+                    model="grok-2", 
                     messages=api_messages
                 )
                 
@@ -191,12 +192,13 @@ else:
                 elif isinstance(completion, dict) and "choices" in completion:
                     reply_text = completion["choices"][0]["message"]["content"]
                 else:
-                    reply_text = f"（予期せぬデータが返ってきました：{str(completion)}）"
+                    reply_text = f"（予期せぬデータ形式です：{str(completion)}）"
                     
             st.session_state.messages.append({"role": "assistant", "avatar": st.session_state.ai_icon, "content": reply_text})
                 
         except Exception as e:
-            error_reply = f"（あぅ…頭がうまく働かないよぅ…エラーが出ちゃった：{e}）"
+            # 万が一エラーが起きても必ず画面に表示されるようにします
+            error_reply = f"（エラー詳細：{e}）"
             st.session_state.messages.append({"role": "assistant", "avatar": st.session_state.ai_icon, "content": error_reply})
 
         if st.session_state.level < 4:
