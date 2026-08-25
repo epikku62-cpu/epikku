@@ -180,9 +180,9 @@ else:
             if not grok_key:
                 reply_text = "（サーバーの設定に XAI_API_KEY が登録されていないみたい…！管理画面から設定してね）"
             else:
-                # 正しい公式モデル名 grok-2 を指定
+                # ユーザーのコンソール画面に一致する公式モデル名 grok-4.3 を指定
                 completion = client.chat.completions.create(
-                    model="grok-2", 
+                    model="grok-4.3", 
                     messages=api_messages
                 )
                 
@@ -197,7 +197,6 @@ else:
             st.session_state.messages.append({"role": "assistant", "avatar": st.session_state.ai_icon, "content": reply_text})
                 
         except Exception as e:
-            # 万が一エラーが起きても必ず画面に表示されるようにします
             error_reply = f"（エラー詳細：{e}）"
             st.session_state.messages.append({"role": "assistant", "avatar": st.session_state.ai_icon, "content": error_reply})
 
