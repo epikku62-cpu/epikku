@@ -154,26 +154,30 @@ if not st.session_state.logged_in:
         reg_user = st.text_input("新しいユーザー名", key="reg_user")
         reg_pass = st.text_input("パスワード", type="password", key="reg_pass")
         reg_pass2 = st.text_input("パスワード（確認）", type="password", key="reg_pass2")
-        if st.button("新規登録"):
+
+        if st.button("新規登録", type="primary"):
             if not reg_user or not reg_pass:
                 st.warning("ユーザー名とパスワードを入力してください")
             elif reg_pass != reg_pass2:
                 st.error("パスワードが一致しません")
             else:
-                users = load_users()
-                if reg_user in users:
-                    st.error("このユーザー名は既に使われています")
-                else:
+                try:
+                    users = load_users()
+                    
+                    # 既に存在チェックを外して強制登録
                     users[reg_user] = {
                         "password": hash_password(reg_pass),
                         "data": {}
                     }
                     save_users(users)
+                    
                     st.success("登録が完了しました！ログインしてください")
                     st.rerun()
+                    
+                except Exception as e:
+                    st.error(f"登録に失敗しました。もう一度試してください。（{e}）")
 
     st.stop()
-
 # ======================
 # メイン画面（ログイン後）
 # ======================
