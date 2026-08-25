@@ -1,19 +1,15 @@
 
 import streamlit as st
 import random
-import os
 from PIL import Image
 from openai import OpenAI
 
 st.set_page_config(page_title="AI育成お絵描きサイト", page_icon="🎨")
 
-# 🌟 獲得したGrokのAPIキーをここに組み込んでいます
-GROK_API_KEY = ""
-
-# 本番サーバーからは、細工なしの公式ルートで100%安全にGrokに接続できます
+# 2026年最新のGrok公式接続仕様（金庫から安全にキーを読み込みます）
 client = OpenAI(
-    api_key=GROK_API_KEY,
-    base_url="https://x.ai",  # 👈 Grok公式の正しいエンドポイントURLに修正しました
+    api_key=st.secrets["XAI_API_KEY"],
+    base_url="https://x.ai",
 )
 
 # Grokに送る性格ごとの指示文（システムプロンプト）
@@ -173,19 +169,17 @@ else:
         st.session_state.exp += 1
         
         # Grok（LLM）にお喋りさせるためのメッセージリストを作成
-        # 1. 先頭に選択された性格の「システム指示（System Prompt）」を仕込む
         api_messages = [{"role": "system", "content": CHARACTER_PROMPTS[st.session_state.ai_type]}]
         
-        # 2. 過去のチャット履歴を結合（お絵描きリクエストという文字は除外して会話に集中させる）
+        # 過去のチャット履歴を結合（画像リクエスト以外）
         for msg in st.session_state.messages:
             if "【お絵描きリクエスト】" not in msg["content"]:
                 api_messages.append({"role": msg["role"], "content": msg["content"]})
         
-        # 3. Grokに接続して返信をもらう
+        # Grokに接続して返信をもらう
         try:
-            # 元の固定テキスト返信から、本物のGrokが選ばれた性格を演じて返信するリアルな処理に変更しました！
             completion = client.chat.completions.create(
-                model="grok-beta",  # またはお使いのgrokモデル名
+                model="grok-beta",  
                 messages=api_messages
             )
             reply_text = completion.choices[0].message.content
@@ -201,3 +195,4 @@ else:
         # メッセージを追加して画面を更新
         st.session_state.messages.append({"role": "assistant", "avatar": st.session_state.ai_icon, "content": reply_text})
         st.rerun()
+
