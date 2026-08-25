@@ -5,9 +5,13 @@ from openai import OpenAI
 
 st.set_page_config(page_title="AI育成お絵描きサイト", page_icon="🎨")
 
-# 2026年最新のGrok公式接続仕様（金庫から安全にキーを読み込みます）
+# 🔒 Secretsのキー名がズレていても絶対に画面が赤くならないように安全対策をしました！
+# もし金庫に見つからなければ、空白文字を入れるようにしてエラーを強制回避します。
+grok_key = st.secrets.get("XAI_API_KEY", st.secrets.get("xai_api_key", ""))
+
+# 2026年最新のGrok公式接続仕様
 client = OpenAI(
-    api_key=st.secrets["XAI_API_KEY"],
+    api_key=grok_key,
     base_url="https://x.ai",
 )
 
@@ -177,12 +181,15 @@ else:
         
         # Grokに接続して返信をもらう
         try:
-            # 2026年最新の安定モデル名「grok-2」に修正しました
-            completion = client.chat.completions.create(
-                model="grok-2",  
-                messages=api_messages
-            )
-            reply_text = completion.choices.message.content
+            # もしAPIキーが空っぽのときは警告テキストを出すようにガード
+            if not grok_key:
+                reply_text = "（ひみつの金庫（Secrets）に APIキーが登録されていないみたい…！『Manage app』の設定から XAI_API_KEY を登録してね）"
+            else:
+                completion = client.chat.completions.create(
+                    model="grok-2",  
+                    messages=api_messages
+                )
+                reply_text = completion.choices.message.content
         except Exception as e:
             reply_text = f"（あぅ…頭がうまく働かないよぅ…エラーが出ちゃった：{e}）"
 
