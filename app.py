@@ -141,20 +141,18 @@ def analyze_image_style(uploaded_file):
 
         completion = client.chat.completions.create(
             model="grok-4-fast",
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": prompt},
-                        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_base64}"}}
-                    ]
-                }
-            ],
+            messages=[{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_base64}"}}
+                ]
+            }],
             max_tokens=100
         )
         return completion.choices[0].message.content.strip()
     except Exception as e:
-        return f"分析に失敗しました（{e}）"
+        return f"分析失敗（{e}）"
 
 def analyze_character(uploaded_file):
     try:
@@ -168,20 +166,18 @@ def analyze_character(uploaded_file):
 
         completion = client.chat.completions.create(
             model="grok-4-fast",
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": prompt},
-                        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_base64}"}}
-                    ]
-                }
-            ],
+            messages=[{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_base64}"}}
+                ]
+            }],
             max_tokens=120
         )
         return completion.choices[0].message.content.strip()
     except Exception as e:
-        return f"分析に失敗しました（{e}）"
+        return f"分析失敗（{e}）"
 
 # セッション初期化
 if "logged_in" not in st.session_state:
@@ -401,19 +397,19 @@ else:
                     leveled_up = True
                     
                     if st.session_state.level == 2:
-                        unlock_message = "🎉 レベル2になりました！\nAIがあなたの好みを積極的に聞いてくるようになります。"
+                        unlock_message = "🎉 レベル2になりました！"
                     elif st.session_state.level == 3:
-                        unlock_message = "🎉 レベル3になりました！\n【学習モード】が解放されました！"
+                        unlock_message = "🎉 レベル3になりました！【学習モード】が解放されました！"
                     elif st.session_state.level == 4:
                         st.session_state.points += 80
-                        unlock_message = "🎉 レベル4になりました！\n【画像生成モード】が解放されました！\n80ポイントをプレゼントします！"
+                        unlock_message = "🎉 レベル4になりました！【画像生成モード】が解放されました！80ptプレゼント！"
             else:
                 if st.session_state.exp >= 20:
                     st.session_state.level += 1
                     st.session_state.exp = 0
                     st.session_state.points += 5
                     leveled_up = True
-                    unlock_message = f"🎉 レベルアップ！ Lv.{st.session_state.level} になりました！\n5ポイントをプレゼントします！"
+                    unlock_message = f"🎉 レベルアップ！ Lv.{st.session_state.level}！5ptプレゼント！"
 
             if leveled_up and unlock_message:
                 st.session_state.messages.append({
@@ -431,7 +427,6 @@ else:
             else:
                 level_note = "レベル4以上。絵を描ける。"
 
-            # ===== 会話がおかしくならないように強化したプロンプト =====
             system_prompt = f"""あなたは「{st.session_state.ai_name}」。{base}
 {gender_note}
 {level_note}
@@ -441,7 +436,6 @@ else:
 - ユーザーがすでに話した内容を覚えて、自然に会話を続けること。
 - 同じ質問を連続でしないこと。
 - 短く自然に返事すること。
-- ユーザーの話に合わせて話題を広げること。
 """
 
             recent_messages = st.session_state.messages[-8:]
@@ -553,25 +547,33 @@ else:
         else:
             st.write("あなたが育てたAIにイラストを描いてもらおう")
             
-            # 生成モード選択
-            gen_mode = st.radio(
-                "生成方法を選んでね",
-                [
-                    "通常生成",
-                    "参照画像を使う",
-                    "マスクで部分変更（実験的）",
-                    "精密：絵柄だけ使う",
-                    "精密：キャラだけ使う"
-                ]
-            )
+            prompt_input = st.text_area("何を描く？", height=100, placeholder="例：赤い瞳の魔法少女が爆発魔法を唱えている")
             
-            prompt_input = st.text_area("何を描く？ / どう変更する？", height=100, placeholder="例：赤い瞳の魔法少女、座っているポーズ")
+            st.markdown("### 参照画像（複数可）")
             
-            ref_image = None
-            if gen_mode != "通常生成":
-                ref_image = st.file_uploader("参照する画像をアップロード", type=["png", "jpg", "jpeg"], key="ref_upload")
-                if ref_image:
-                    st.image(ref_image, width=250)
+            col_a, col_b = st.columns(2)
+            
+            with col_a:
+                st.markdown("**絵柄参照**")
+                style_ref = st.file_uploader("絵柄を参照する画像", type=["png", "jpg", "jpeg"], key="style_ref")
+                style_strength = st.slider("絵柄の強度", 1, 10, 7, key="style_str")
+                if style_ref:
+                    st.image(style_ref, width=180)
+            
+            with col_b:
+                st.markdown("**キャラ参照**")
+                char_ref = st.file_uploader("キャラを参照する画像", type=["png", "jpg", "jpeg"], key="char_ref")
+                char_strength = st.slider("キャラの強度", 1, 10, 7, key="char_str")
+                if char_ref:
+                    st.image(char_ref, width=180)
+            
+            st.markdown("**全体ベース参照（任意）**")
+            base_ref = st.file_uploader("全体の雰囲気を参照する画像", type=["png", "jpg", "jpeg"], key="base_ref")
+            base_strength = st.slider("ベースの強度", 1, 10, 5, key="base_str")
+            if base_ref:
+                st.image(base_ref, width=180)
+            
+            st.markdown("---")
             
             col1, col2 = st.columns(2)
             with col1:
@@ -597,60 +599,67 @@ else:
             
             cost = 10 if "低画質" in quality else 20
             cost += size_cost
-            if gen_mode != "通常生成":
-                cost += 5  # 参照系は少し追加
+            if style_ref or char_ref or base_ref:
+                cost += 5
             
             st.info(f"選択中の解像度: **{res_text}**")
             st.write(f"**消費ポイント: {cost} pt**（所持: {st.session_state.points} pt）")
             
             if st.button("🎨 イラストを生成する", type="primary", use_container_width=True):
-                if not prompt_input.strip() and gen_mode == "通常生成":
+                if not prompt_input.strip():
                     st.warning("描く内容を入力してください")
                 elif st.session_state.points < cost:
                     st.error(f"ポイントが足りません（必要: {cost}pt）")
-                elif gen_mode != "通常生成" and ref_image is None:
-                    st.warning("参照画像をアップロードしてください")
                 else:
                     st.session_state.points -= cost
                     st.session_state.exp += 2
                     
-                    # 学習内容
-                    style_parts = []
-                    if st.session_state.learned_styles:
-                        style_parts.append("Art styles: " + " / ".join(st.session_state.learned_styles[-3:]))
-                    if st.session_state.learned_preferences:
-                        style_parts.append("User preferences: " + " / ".join(st.session_state.learned_preferences[-3:]))
-                    
-                    base_style = ". ".join(style_parts) if style_parts else "beautiful anime style"
-                    
-                    aspect_prompt = {
-                        "縦長": ", vertical composition, portrait orientation",
-                        "横長": ", horizontal composition, landscape orientation",
-                        "正方形": ", square composition"
-                    }.get(aspect, "")
-                    
-                    full_prompt = ""
-                    
                     try:
                         with st.spinner("生成中です...しばらくお待ちください"):
-                            if gen_mode == "通常生成":
-                                full_prompt = f"{base_style}, {prompt_input}{aspect_prompt}, highly detailed, masterpiece"
+                            prompt_parts = []
                             
-                            elif gen_mode == "参照画像を使う":
-                                style_desc = analyze_image_style(ref_image)
-                                full_prompt = f"Based on the reference image style ({style_desc}), {prompt_input}{aspect_prompt}, highly detailed"
+                            # 絵柄参照
+                            if style_ref:
+                                style_desc = analyze_image_style(style_ref)
+                                if style_strength >= 8:
+                                    prompt_parts.append(f"Strictly and strongly follow this exact art style: {style_desc}")
+                                elif style_strength >= 5:
+                                    prompt_parts.append(f"Follow this art style closely: {style_desc}")
+                                else:
+                                    prompt_parts.append(f"Slightly influenced by this art style: {style_desc}")
                             
-                            elif gen_mode == "マスクで部分変更（実験的）":
-                                style_desc = analyze_image_style(ref_image)
-                                full_prompt = f"Edit the reference image. Keep the overall composition and only change the described parts: {prompt_input}. Style: {style_desc}{aspect_prompt}"
+                            # キャラ参照
+                            if char_ref:
+                                char_desc = analyze_character(char_ref)
+                                if char_strength >= 8:
+                                    prompt_parts.append(f"Use this exact character appearance very strongly: {char_desc}")
+                                elif char_strength >= 5:
+                                    prompt_parts.append(f"Use this character appearance: {char_desc}")
+                                else:
+                                    prompt_parts.append(f"Loosely based on this character: {char_desc}")
                             
-                            elif gen_mode == "精密：絵柄だけ使う":
-                                style_desc = analyze_image_style(ref_image)
-                                full_prompt = f"Strictly use only this art style: {style_desc}. Do not copy the character. Draw: {prompt_input}{aspect_prompt}, highly detailed"
+                            # ベース参照
+                            if base_ref:
+                                base_desc = analyze_image_style(base_ref)
+                                if base_strength >= 7:
+                                    prompt_parts.append(f"Overall atmosphere strongly based on: {base_desc}")
+                                else:
+                                    prompt_parts.append(f"Overall atmosphere influenced by: {base_desc}")
                             
-                            elif gen_mode == "精密：キャラだけ使う":
-                                char_desc = analyze_character(ref_image)
-                                full_prompt = f"Use this exact character appearance: {char_desc}. Draw the character in a new scene: {prompt_input}{aspect_prompt}, highly detailed"
+                            # 学習内容も追加
+                            if st.session_state.learned_styles:
+                                prompt_parts.append("Learned styles: " + " / ".join(st.session_state.learned_styles[-2:]))
+                            if st.session_state.learned_preferences:
+                                prompt_parts.append("User preferences: " + " / ".join(st.session_state.learned_preferences[-2:]))
+                            
+                            aspect_prompt = {
+                                "縦長": ", vertical composition, portrait orientation",
+                                "横長": ", horizontal composition, landscape orientation",
+                                "正方形": ", square composition"
+                            }.get(aspect, "")
+                            
+                            style_instruction = ". ".join(prompt_parts) if prompt_parts else "beautiful anime style"
+                            full_prompt = f"{style_instruction}. {prompt_input}{aspect_prompt}, highly detailed, masterpiece"
                             
                             model_name = "grok-imagine-image" if "低画質" in quality else "grok-imagine-image-quality"
                             
@@ -665,8 +674,7 @@ else:
                             "url": image_url,
                             "prompt": prompt_input,
                             "cost": cost,
-                            "resolution": res_text,
-                            "mode": gen_mode
+                            "resolution": res_text
                         }
                         
                         st.session_state.generated_history.insert(0, {
@@ -674,14 +682,13 @@ else:
                             "url": image_url,
                             "cost": cost,
                             "time": datetime.now().strftime("%Y-%m-%d %H:%M"),
-                            "resolution": res_text,
-                            "mode": gen_mode
+                            "resolution": res_text
                         })
                         
                         st.session_state.messages.append({
                             "role": "assistant",
                             "avatar": st.session_state.ai_icon,
-                            "content": f"できたよ！（{gen_mode} / {cost}pt消費）",
+                            "content": f"できたよ！（{cost}pt消費）",
                             "image": image_url
                         })
                         
@@ -701,7 +708,7 @@ else:
             if st.session_state.last_generated_image:
                 st.markdown("---")
                 st.subheader("最新の生成結果")
-                st.caption(f"モード: {st.session_state.last_generated_image.get('mode', '通常')} ｜ プロンプト: {st.session_state.last_generated_image['prompt']}")
+                st.caption(f"プロンプト: {st.session_state.last_generated_image['prompt']}")
                 st.caption(f"解像度: {st.session_state.last_generated_image.get('resolution', '')} ｜ 消費: {st.session_state.last_generated_image['cost']}pt")
                 st.image(st.session_state.last_generated_image["url"], use_container_width=True)
 
@@ -713,7 +720,7 @@ else:
             st.write("まだ生成した画像がありません")
         else:
             for item in st.session_state.generated_history:
-                with st.expander(f"{item['time']} - {item.get('mode', '通常')} - {item['prompt'][:30]}..."):
+                with st.expander(f"{item['time']} - {item['prompt'][:40]}..."):
                     st.write(f"プロンプト: {item['prompt']}")
                     st.write(f"解像度: {item.get('resolution', '不明')} ｜ 消費ポイント: {item['cost']}pt")
                     st.image(item["url"], use_container_width=True)
