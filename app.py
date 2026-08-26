@@ -77,7 +77,7 @@ def update_personality():
     
     try:
         completion = client.chat.completions.create(
-            model="grok-4.6",
+            model="grok-4-fast",  # 速いモデルを使用
             messages=[{"role": "user", "content": prompt}],
             max_tokens=15
         )
@@ -194,7 +194,6 @@ if st.session_state.ai_name is None:
             st.session_state.ai_type = "中立"
             st.session_state.ai_icon = "👧" if gender == "おんなのこ" else "👦"
             
-            # 最初の案内メッセージを追加
             st.session_state.messages = [{
                 "role": "assistant",
                 "avatar": st.session_state.ai_icon,
@@ -238,7 +237,6 @@ else:
             st.write("・レベル4で画像生成が解放される")
             st.write("・好きなキャラや絵柄をたくさん教えてあげてね")
 
-        # レベル3：画像学習
         if st.session_state.level == 3:
             st.markdown("### 🖼️ 画像学習モード")
             uploaded_file = st.file_uploader("好きな絵柄の画像をアップロード", type=["png", "jpg", "jpeg"], key="style_upload")
@@ -271,7 +269,6 @@ else:
                     save_current_user_data()
                     st.rerun()
 
-        # レベル4以降：画像生成
         if st.session_state.level >= 4:
             st.markdown("### 🎨 画像生成モード")
             
@@ -399,9 +396,8 @@ else:
             st.balloons()
             st.success(f"レベルアップ！ Lv.{st.session_state.level}")
 
-        # ===== 短く自然なシステムプロンプト =====
+        # 短くしたシステムプロンプト
         base = CHARACTER_PROMPTS.get(st.session_state.ai_type, CHARACTER_PROMPTS["中立"])
-        
         gender_note = "女の子らしい可愛い口調で話して。" if st.session_state.ai_gender == "おんなのこ" else "男の子らしい口調で話して。"
         
         if st.session_state.level < 4:
@@ -412,11 +408,10 @@ else:
         system_prompt = f"""あなたは「{st.session_state.ai_name}」。{base}
 {gender_note}
 {level_note}
-ユーザーの好きなキャラ・アニメ・絵柄を自然に聞いて、覚えよう。
+ユーザーの好きなキャラ・アニメ・絵柄を自然に聞いて。
 短く自然に会話して。"""
 
-        # 履歴を直近8件に制限
-        recent_messages = st.session_state.messages[-8:]
+        recent_messages = st.session_state.messages[-6:]  # さらに履歴を減らす
         api_messages = [{"role": "system", "content": system_prompt}]
         for msg in recent_messages:
             if "【お絵描きリクエスト】" not in msg.get("content", ""):
@@ -427,10 +422,11 @@ else:
                 reply = "（APIキーが設定されていません）"
             else:
                 with st.spinner("考え中..."):
+                    # ★ ここが重要：速いモデルに変更
                     completion = client.chat.completions.create(
-                        model="grok-4.6",
+                        model="grok-4-fast",  # 速いモデル
                         messages=api_messages,
-                        max_tokens=300
+                        max_tokens=250
                     )
                 reply = completion.choices[0].message.content
 
@@ -444,11 +440,26 @@ else:
                 update_personality()
 
         except Exception as e:
-            st.session_state.messages.append({
-                "role": "assistant",
-                "avatar": st.session_state.ai_icon,
-                "content": f"（エラー: {e}）"
-            })
+            # 速いモデルが使えない場合のフォールバック
+            try:
+                with st.spinner("考え中..."):
+                    completion = client.chat.completions.create(
+                        model="grok-4.6",
+                        messages=api_messages,
+                        max_tokens=250
+                    )
+                reply = completion.choices[0].message.content
+                st.session_state.messages.append({
+                    "role": "assistant",
+                    "avatar": st.session_state.ai_icon,
+                    "content": reply
+                })
+            except Exception as e2:
+                st.session_state.messages.append({
+                    "role": "assistant",
+                    "avatar": st.session_state.ai_icon,
+                    "content": f"（エラー: {e2}）"
+                })
 
         if not st.session_state.is_premium and st.session_state.ad_count >= 10:
             st.session_state.ad_count = 0
