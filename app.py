@@ -161,13 +161,13 @@ if not st.session_state.logged_in:
                     st.session_state.learned_styles = []
                     st.session_state.image_count = 0
                     st.session_state.messages = []
-                    st.session_state.points = 50
+                    st.session_state.points = 0          # ← 新規登録ボーナスなし
                     st.session_state.is_premium = False
                     st.session_state.ad_count = 0
                     st.session_state.user_icon = "👤"
                     st.session_state.ai_icon = "👧"
 
-                    st.success("登録完了！自動でログインしました（新規ボーナス50ポイント付与）")
+                    st.success("登録完了！自動でログインしました")
                     st.rerun()
                 except Exception as e:
                     st.error(f"登録に失敗しました。（{e}）")
@@ -255,11 +255,11 @@ else:
                 st.session_state.level += 1
                 st.session_state.exp = 0
                 if st.session_state.level == 4:
-                    st.session_state.points += 30
+                    st.session_state.points += 80  # ← レベル4到達ボーナス80pt
                     st.session_state.messages.append({
                         "role": "assistant",
                         "avatar": st.session_state.ai_icon,
-                        "content": "🎉 レベル4になったよ！画像生成ができるようになった！おめでとうポイント30ptプレゼント！"
+                        "content": "🎉 レベル4になったよ！画像生成ができるようになった！おめでとうポイント80ptプレゼント！"
                     })
         else:
             if st.session_state.exp >= 20:
