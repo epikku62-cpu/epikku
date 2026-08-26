@@ -2,8 +2,10 @@ import streamlit as st
 import os
 import json
 import hashlib
+import random
 from openai import OpenAI
 from datetime import datetime
+from PIL import Image
 
 st.set_page_config(page_title="AI育成お絵描きサイト", page_icon="🎨", layout="wide")
 
@@ -228,10 +230,132 @@ else:
             st.write("- Lv.3：画像学習可能")
             st.write("- Lv.4：画像生成解放")
 
+        # ===== レベル3：画像学習 =====
+        if st.session_state.level == 3:
+            st.markdown("### 🖼️ 画像学習モード")
+            st.caption("好きな絵柄の画像をアップロードして覚えさせよう")
+            uploaded_file = st.file_uploader("画像を選んでね", type=["png", "jpg", "jpeg"], key="style_upload")
+            
+            if uploaded_file is not None:
+                if st.button("この画像を学習させる！", type="primary"):
+                    tags = [
+                        "アニメ調の可愛い絵柄",
+                        "淡い水彩画風の綺麗タッチ",
+                        "パステルカラーの柔らかい色使い",
+                        "鮮やかでコントラストの強いイラスト",
+                        "繊細な線の美しい絵柄"
+                    ]
+                    tag = random.choice(tags)
+                    
+                    st.session_state.learned_styles.append(tag)
+                    st.session_state.exp += 1
+                    
+                    st.session_state.messages.append({
+                        "role": "assistant",
+                        "avatar": st.session_state.ai_icon,
+                        "content": f"🖼️ この絵柄、いいね！『{tag}』として覚えたよ！"
+                    })
+                    
+                    if st.session_state.exp >= 5:
+                        st.session_state.level = 4
+                        st.session_state.exp = 0
+                        st.session_state.points += 80
+                        st.session_state.messages.append({
+                            "role": "assistant",
+                            "avatar": st.session_state.ai_icon,
+                            "content": "🎉 レベル4になったよ！画像生成ができるようになった！おめでとうポイント80ptプレゼント！"
+                        })
+                    
+                    save_current_user_data()
+                    st.success(f"『{tag}』を学習しました！")
+                    st.rerun()
+
+        # ===== レベル4以降：画像生成 =====
+        if st.session_state.level >= 4:
+            st.markdown("### 🎨 画像生成モード")
+            
+            prompt_input = st.text_input("何を描く？", placeholder="例：可愛い魔法使いの女の子")
+            
+            quality = st.radio(
+                "画質を選んでね",
+                ["低画質（10pt）", "中画質（15pt）", "高画質（20pt）"],
+                horizontal=True
+            )
+            
+            if st.button("🎨 イラストを生成する！", type="primary"):
+                if not prompt_input.strip():
+                    st.warning("何を描くか入力してください")
+                else:
+                    # ポイント消費量を決定
+                    if "低画質" in quality:
+                        cost = 10
+                        model_name = "grok-imagine-image"
+                    elif "中画質" in quality:
+                        cost = 15
+                        model_name = "grok-imagine-image-2.0"
+                    else:
+                        cost = 20
+                        model_name = "grok-imagine-image-quality"
+                    
+                    if st.session_state.points < cost:
+                        st.error(f"ポイントが足りません！（必要: {cost}pt / 所持: {st.session_state.points}pt）")
+                    else:
+                        st.session_state.points -= cost
+                        st.session_state.exp += 2  # 画像生成は2カウント
+                        
+                        styles_text = ", ".join(st.session_state.learned_styles) if st.session_state.learned_styles else "beautiful anime style"
+                        full_prompt = f"A high-quality illustration of {prompt_input}, {styles_text}, vibrant colors, extremely detailed"
+                        
+                        st.session_state.messages.append({
+                            "role": "user",
+                            "avatar": st.session_state.user_icon,
+                            "content": f"【お絵描きリクエスト】: {prompt_input}（{quality}）"
+                        })
+                        
+                        try:
+                            with st.spinner("絵を描いています..."):
+                                response = client.images.generate(
+                                    model=model_name,
+                                    prompt=full_prompt,
+                                    n=1
+                                )
+                                image_url = response.data[0].url
+                            
+                            st.session_state.messages.append({
+                                "role": "assistant",
+                                "avatar": st.session_state.ai_icon,
+                                "content": f"🎨 『{prompt_input}』を描いたよ！（{cost}pt消費）",
+                                "image": image_url
+                            })
+                        except Exception as e:
+                            st.session_state.points += cost  # 失敗したらポイントを戻す
+                            st.session_state.messages.append({
+                                "role": "assistant",
+                                "avatar": st.session_state.ai_icon,
+                                "content": f"⚠️ 描くのに失敗しちゃった…ポイントは戻したよ。エラー: {e}"
+                            })
+                        
+                        # レベルアップ判定
+                        if st.session_state.exp >= 20:
+                            st.session_state.level += 1
+                            st.session_state.exp = 0
+                            st.session_state.points += 5
+                            st.session_state.messages.append({
+                                "role": "assistant",
+                                "avatar": st.session_state.ai_icon,
+                                "content": f"レベルが上がったよ！Lv.{st.session_state.level}になった！ポイント5ptプレゼント！"
+                            })
+                        
+                        save_current_user_data()
+                        st.rerun()
+
         st.markdown('<div style="background-color:#1a1a1a;padding:12px;text-align:center;border-radius:8px;color:#888;border:1px dashed #444;font-size:13px;margin-top:40px;">📢 サイドバー広告枠</div>', unsafe_allow_html=True)
 
     st.subheader(f"💬 {st.session_state.ai_name} とのトークルーム")
     st.caption(f"現在の性格: **{st.session_state.ai_type}** ｜ ポイント: **{st.session_state.points} pt**")
+    
+    if st.session_state.learned_styles:
+        st.caption(f"🧠 記憶している絵柄: {', '.join(st.session_state.learned_styles)}")
 
     for msg in st.session_state.messages:
         avatar = msg.get("avatar", st.session_state.user_icon if msg["role"] == "user" else st.session_state.ai_icon)
@@ -272,7 +396,7 @@ else:
                     "content": f"レベルが上がったよ！Lv.{st.session_state.level}になった！ポイント5ptプレゼント！"
                 })
 
-        # ===== システムプロンプト（性別・レベル対応） =====
+        # システムプロンプト
         base_personality = CHARACTER_PROMPTS.get(st.session_state.ai_type, CHARACTER_PROMPTS["中立"])
         
         if st.session_state.ai_gender == "おんなのこ":
