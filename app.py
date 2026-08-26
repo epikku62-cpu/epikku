@@ -3,9 +3,11 @@ import os
 import json
 import hashlib
 import random
+import base64
 from openai import OpenAI
 from datetime import datetime
 from PIL import Image
+import io
 
 st.set_page_config(page_title="AI育成お絵描きサイト", page_icon="🎨", layout="wide")
 
@@ -94,6 +96,46 @@ def update_personality():
             })
     except:
         pass
+
+def analyze_image_style(uploaded_file):
+    """画像を実際に分析して絵柄・タッチ・質感を返す"""
+    try:
+        # 画像をbase64に変換
+        image = Image.open(uploaded_file)
+        buffered = io.BytesIO()
+        image.save(buffered, format="PNG")
+        img_base64 = base64.b64encode(buffered.getvalue()).decode()
+
+        prompt = """このイラストの絵柄を詳しく分析して、短い日本語で説明してください。
+以下の点を含めてください：
+- 線のタッチ（細い、太い、ラフ、丁寧など）
+- 塗り方（セル塗り、厚塗り、水彩風など）
+- 色の雰囲気
+- 全体の画風
+
+例：「丁寧で細い線のアニメ塗り、鮮やかな色使い」のように、1文でまとめてください。"""
+
+        completion = client.chat.completions.create(
+            model="grok-4-fast",
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/png;base64,{img_base64}"
+                            }
+                        }
+                    ]
+                }
+            ],
+            max_tokens=100
+        )
+        return completion.choices[0].message.content.strip()
+    except Exception as e:
+        return f"分析に失敗しました（{e}）"
 
 # セッション初期化
 if "logged_in" not in st.session_state:
@@ -216,7 +258,7 @@ if st.session_state.ai_name is None:
             save_current_user_data()
             st.rerun()
 else:
-    # ===== サイドバー（常にメニューを表示） =====
+    # サイドバー
     with st.sidebar:
         st.markdown(f"### 👤 {st.session_state.username}")
         st.write(f"**ポイント:** {st.session_state.points} pt")
@@ -246,7 +288,6 @@ else:
             st.session_state.current_mode = "history"
             st.rerun()
 
-        # レベル10でアイコン変更
         if st.session_state.level >= 10:
             st.markdown("---")
             st.markdown("### アイコン変更（Lv.10）")
@@ -271,7 +312,6 @@ else:
         st.markdown("---")
         st.markdown('<div style="background-color:#1a1a1a;padding:12px;text-align:center;border-radius:8px;color:#888;border:1px dashed #444;font-size:13px;">📢 サイドバー広告枠</div>', unsafe_allow_html=True)
 
-    # ===== メインコンテンツ（モードで切り替え） =====
     mode = st.session_state.current_mode
 
     # ---------- トークルーム ----------
@@ -394,33 +434,25 @@ else:
         if st.session_state.level < 3:
             st.warning("この機能はレベル3で解放されます。")
             st.write(f"現在のレベル: **Lv.{st.session_state.level}**")
-            st.info("会話を続けてレベルを上げましょう！")
         else:
-            st.write("好きな絵柄の画像をアップロードして、AIに覚えさせよう。")
+            st.write("好きな絵柄の画像をアップロードして、AIに本当に分析・学習させます。")
+            st.caption("※学習しても経験値は入りません")
             
             uploaded_file = st.file_uploader("画像をアップロード", type=["png", "jpg", "jpeg"], key="learn_upload")
             
             if uploaded_file is not None:
                 st.image(uploaded_file, width=300)
+                
                 if st.button("この画像を学習させる", type="primary"):
-                    tags = [
-                        "アニメ調の線が綺麗な絵柄",
-                        "柔らかく淡い色使いのタッチ",
-                        "コントラストが強めの鮮やかな絵柄",
-                        "繊細で丁寧な線画タッチ",
-                        "厚塗りっぽい塗り方の絵柄"
-                    ]
-                    tag = random.choice(tags)
-                    st.session_state.learned_styles.append(tag)
-                    st.session_state.exp += 1
+                    with st.spinner("画像を分析しています..."):
+                        style_description = analyze_image_style(uploaded_file)
                     
-                    st.success(f"『{tag}』として覚えました！")
-                    
-                    if st.session_state.level == 3 and st.session_state.exp >= 5:
-                        st.session_state.level = 4
-                        st.session_state.exp = 0
-                        st.session_state.points += 80
-                        st.success("レベル4になりました！画像生成が解放されました（80pt付与）")
+                    # 同じ内容がすでになければ追加
+                    if style_description not in st.session_state.learned_styles:
+                        st.session_state.learned_styles.append(style_description)
+                        st.success(f"学習しました！\n\n**覚えた内容：**\n{style_description}")
+                    else:
+                        st.info("この絵柄はすでに学習済みです。")
                     
                     save_current_user_data()
                     st.rerun()
@@ -446,7 +478,6 @@ else:
         if st.session_state.level < 4:
             st.warning("この機能はレベル4で解放されます。")
             st.write(f"現在のレベル: **Lv.{st.session_state.level}**")
-            st.info("会話や学習を続けてレベルを上げましょう！")
         else:
             st.write("あなたが育てたAIにイラストを描いてもらおう")
             
