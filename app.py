@@ -64,6 +64,8 @@ def save_current_user_data():
             "is_premium": st.session_state.get("is_premium", False),
             "ad_count": st.session_state.get("ad_count", 0),
             "generated_history": st.session_state.get("generated_history", [])[-30:],
+            "user_icon": st.session_state.get("user_icon", "👤"),
+            "ai_icon": st.session_state.get("ai_icon", "👤"),
             "last_login": datetime.now().isoformat()
         }
         save_users(users)
@@ -100,6 +102,12 @@ if "username" not in st.session_state:
     st.session_state.username = None
 if "generated_history" not in st.session_state:
     st.session_state.generated_history = []
+if "user_icon" not in st.session_state:
+    st.session_state.user_icon = "👤"
+if "ai_icon" not in st.session_state:
+    st.session_state.ai_icon = "👤"
+if "current_mode" not in st.session_state:
+    st.session_state.current_mode = "chat"
 
 # ログイン画面
 if not st.session_state.logged_in:
@@ -131,12 +139,9 @@ if not st.session_state.logged_in:
                 st.session_state.is_premium = data.get("is_premium", False)
                 st.session_state.ad_count = data.get("ad_count", 0)
                 st.session_state.generated_history = data.get("generated_history", [])
-                st.session_state.user_icon = "👤"
-                # アイコン色分け
-                if st.session_state.ai_gender == "おんなのこ":
-                    st.session_state.ai_icon = "🌸"
-                else:
-                    st.session_state.ai_icon = "🔵"
+                st.session_state.user_icon = data.get("user_icon", "👤")
+                st.session_state.ai_icon = data.get("ai_icon", "👤")
+                st.session_state.current_mode = "chat"
                 st.success("ログインしました！")
                 st.rerun()
             else:
@@ -173,7 +178,8 @@ if not st.session_state.logged_in:
                     st.session_state.ad_count = 0
                     st.session_state.generated_history = []
                     st.session_state.user_icon = "👤"
-                    st.session_state.ai_icon = "🌸"
+                    st.session_state.ai_icon = "👤"
+                    st.session_state.current_mode = "chat"
 
                     st.success("登録完了！自動でログインしました")
                     st.rerun()
@@ -199,10 +205,8 @@ if st.session_state.ai_name is None:
             st.session_state.ai_name = input_name.strip()
             st.session_state.ai_gender = gender
             st.session_state.ai_type = "中立"
-            if gender == "おんなのこ":
-                st.session_state.ai_icon = "🌸"  # ピンク系
-            else:
-                st.session_state.ai_icon = "🔵"  # 青系
+            st.session_state.ai_icon = "👤"
+            st.session_state.user_icon = "👤"
             
             st.session_state.messages = [{
                 "role": "assistant",
@@ -212,7 +216,7 @@ if st.session_state.ai_name is None:
             save_current_user_data()
             st.rerun()
 else:
-    # サイドバー
+    # ===== サイドバー（常にメニューを表示） =====
     with st.sidebar:
         st.markdown(f"### 👤 {st.session_state.username}")
         st.write(f"**ポイント:** {st.session_state.points} pt")
@@ -228,8 +232,36 @@ else:
 
         st.markdown("---")
         st.markdown("### メニュー")
-        st.caption("下のタブで切り替えできます")
 
+        if st.button("💬 トークルーム", use_container_width=True):
+            st.session_state.current_mode = "chat"
+            st.rerun()
+        if st.button("🖼️ 学習モード", use_container_width=True):
+            st.session_state.current_mode = "learn"
+            st.rerun()
+        if st.button("🎨 画像生成モード", use_container_width=True):
+            st.session_state.current_mode = "generate"
+            st.rerun()
+        if st.button("📂 生成履歴", use_container_width=True):
+            st.session_state.current_mode = "history"
+            st.rerun()
+
+        # レベル10でアイコン変更
+        if st.session_state.level >= 10:
+            st.markdown("---")
+            st.markdown("### アイコン変更（Lv.10）")
+            new_user_icon = st.text_input("ユーザーアイコン", value=st.session_state.user_icon)
+            new_ai_icon = st.text_input("AIアイコン", value=st.session_state.ai_icon)
+            if st.button("変更する"):
+                st.session_state.user_icon = new_user_icon if new_user_icon else "👤"
+                st.session_state.ai_icon = new_ai_icon if new_ai_icon else "👤"
+                save_current_user_data()
+                st.success("変更しました")
+                st.rerun()
+        else:
+            st.caption("アイコン変更はLv.10で解放")
+
+        st.markdown("---")
         if st.button("ログアウト"):
             save_current_user_data()
             st.session_state.logged_in = False
@@ -239,26 +271,19 @@ else:
         st.markdown("---")
         st.markdown('<div style="background-color:#1a1a1a;padding:12px;text-align:center;border-radius:8px;color:#888;border:1px dashed #444;font-size:13px;">📢 サイドバー広告枠</div>', unsafe_allow_html=True)
 
-    # タブ
-    tab_chat, tab_learn, tab_generate, tab_history = st.tabs([
-        "💬 トークルーム",
-        "🖼️ 学習モード",
-        "🎨 画像生成モード",
-        "📂 生成履歴"
-    ])
+    # ===== メインコンテンツ（モードで切り替え） =====
+    mode = st.session_state.current_mode
 
     # ---------- トークルーム ----------
-    with tab_chat:
-        st.subheader(f"{st.session_state.ai_name} とのトークルーム")
+    if mode == "chat":
+        st.subheader(f"💬 {st.session_state.ai_name} とのトークルーム")
         
         for msg in st.session_state.messages:
             if msg["role"] == "user":
-                # ユーザー側：名前を表示
                 with st.chat_message("user", avatar=st.session_state.user_icon):
                     st.markdown(f"**{st.session_state.username}**")
                     st.write(msg["content"])
             else:
-                # AI側：名前 + レベルを表示
                 with st.chat_message("assistant", avatar=st.session_state.ai_icon):
                     st.markdown(f"**{st.session_state.ai_name}｜Lv.{st.session_state.level}**")
                     st.write(msg["content"])
@@ -287,7 +312,7 @@ else:
                     if st.session_state.level == 2:
                         unlock_message = "🎉 レベル2になりました！\nAIがあなたの好みを積極的に聞いてくるようになります。"
                     elif st.session_state.level == 3:
-                        unlock_message = "🎉 レベル3になりました！\n【学習モード】が解放されました！\n好きな絵柄の画像をアップロードして覚えさせられるようになりました。"
+                        unlock_message = "🎉 レベル3になりました！\n【学習モード】が解放されました！"
                     elif st.session_state.level == 4:
                         st.session_state.points += 80
                         unlock_message = "🎉 レベル4になりました！\n【画像生成モード】が解放されました！\n80ポイントをプレゼントします！"
@@ -363,12 +388,13 @@ else:
             st.rerun()
 
     # ---------- 学習モード ----------
-    with tab_learn:
+    elif mode == "learn":
         st.subheader("🖼️ 学習モード")
         
         if st.session_state.level < 3:
-            st.info("レベル3になると画像学習ができるようになります。")
-            st.write(f"今のレベル: Lv.{st.session_state.level}")
+            st.warning("この機能はレベル3で解放されます。")
+            st.write(f"現在のレベル: **Lv.{st.session_state.level}**")
+            st.info("会話を続けてレベルを上げましょう！")
         else:
             st.write("好きな絵柄の画像をアップロードして、AIに覚えさせよう。")
             
@@ -414,12 +440,13 @@ else:
                 st.write("まだ何も覚えていません")
 
     # ---------- 画像生成モード ----------
-    with tab_generate:
+    elif mode == "generate":
         st.subheader("🎨 画像生成モード")
         
         if st.session_state.level < 4:
-            st.info("レベル4になると画像生成ができるようになります。")
-            st.write(f"今のレベル: Lv.{st.session_state.level}")
+            st.warning("この機能はレベル4で解放されます。")
+            st.write(f"現在のレベル: **Lv.{st.session_state.level}**")
+            st.info("会話や学習を続けてレベルを上げましょう！")
         else:
             st.write("あなたが育てたAIにイラストを描いてもらおう")
             
@@ -498,7 +525,7 @@ else:
                     st.rerun()
 
     # ---------- 生成履歴 ----------
-    with tab_history:
+    elif mode == "history":
         st.subheader("📂 生成した画像の履歴")
         
         if not st.session_state.generated_history:
