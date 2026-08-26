@@ -132,7 +132,11 @@ if not st.session_state.logged_in:
                 st.session_state.ad_count = data.get("ad_count", 0)
                 st.session_state.generated_history = data.get("generated_history", [])
                 st.session_state.user_icon = "👤"
-                st.session_state.ai_icon = "👧" if st.session_state.ai_gender == "おんなのこ" else "👦"
+                # アイコン色分け
+                if st.session_state.ai_gender == "おんなのこ":
+                    st.session_state.ai_icon = "🌸"
+                else:
+                    st.session_state.ai_icon = "🔵"
                 st.success("ログインしました！")
                 st.rerun()
             else:
@@ -169,7 +173,7 @@ if not st.session_state.logged_in:
                     st.session_state.ad_count = 0
                     st.session_state.generated_history = []
                     st.session_state.user_icon = "👤"
-                    st.session_state.ai_icon = "👧"
+                    st.session_state.ai_icon = "🌸"
 
                     st.success("登録完了！自動でログインしました")
                     st.rerun()
@@ -185,7 +189,6 @@ st.markdown('<div style="background-color:#222;padding:12px;text-align:center;bo
 
 st.title("🎨 専属絵師AI 育成ルーム")
 
-# プロフィール未設定
 if st.session_state.ai_name is None:
     st.subheader("👶 AIのプロフィールを決めてね")
     input_name = st.text_input("AIの名前を入力してください：", placeholder="例：めぐみん、アリスなど")
@@ -196,17 +199,20 @@ if st.session_state.ai_name is None:
             st.session_state.ai_name = input_name.strip()
             st.session_state.ai_gender = gender
             st.session_state.ai_type = "中立"
-            st.session_state.ai_icon = "👧" if gender == "おんなのこ" else "👦"
+            if gender == "おんなのこ":
+                st.session_state.ai_icon = "🌸"  # ピンク系
+            else:
+                st.session_state.ai_icon = "🔵"  # 青系
             
             st.session_state.messages = [{
                 "role": "assistant",
                 "avatar": st.session_state.ai_icon,
-                "content": f"はじめまして！わたしは「{input_name.strip()}」だよ！\n\n今はまだレベル1で、何も知らない真っ白な状態なんだ。\n\nあなたといっぱい話して、好きなキャラや絵柄を教えてもらいながら、少しずつ成長していくよ。\n\nまずは好きなキャラクターや、好きなアニメ・絵柄を教えてくれる？\n一緒に、あなた好みの絵が描けるAIに育てていこうね！"
+                "content": f"【{st.session_state.ai_name}｜Lv.1】\n\nはじめまして！わたしは「{input_name.strip()}」だよ！\n\n今はまだレベル1で、何も知らない真っ白な状態なんだ。\n\nあなたといっぱい話して、好きなキャラや絵柄を教えてもらいながら、少しずつ成長していくよ。\n\nまずは好きなキャラクターや、好きなアニメ・絵柄を教えてくれる？\n一緒に、あなた好みの絵が描けるAIに育てていこうね！"
             }]
             save_current_user_data()
             st.rerun()
 else:
-    # サイドバー（ステータス）
+    # サイドバー
     with st.sidebar:
         st.markdown(f"### 👤 {st.session_state.username}")
         st.write(f"**ポイント:** {st.session_state.points} pt")
@@ -220,6 +226,10 @@ else:
             st.progress(min(st.session_state.exp / 20, 1.0))
             st.caption(f"次のレベルまであと {20 - st.session_state.exp} カウント")
 
+        st.markdown("---")
+        st.markdown("### メニュー")
+        st.caption("下のタブで切り替えできます")
+
         if st.button("ログアウト"):
             save_current_user_data()
             st.session_state.logged_in = False
@@ -229,7 +239,7 @@ else:
         st.markdown("---")
         st.markdown('<div style="background-color:#1a1a1a;padding:12px;text-align:center;border-radius:8px;color:#888;border:1px dashed #444;font-size:13px;">📢 サイドバー広告枠</div>', unsafe_allow_html=True)
 
-    # ===== タブ構成 =====
+    # タブ
     tab_chat, tab_learn, tab_generate, tab_history = st.tabs([
         "💬 トークルーム",
         "🖼️ 学習モード",
@@ -242,11 +252,18 @@ else:
         st.subheader(f"{st.session_state.ai_name} とのトークルーム")
         
         for msg in st.session_state.messages:
-            avatar = msg.get("avatar", st.session_state.user_icon if msg["role"] == "user" else st.session_state.ai_icon)
-            with st.chat_message(msg["role"], avatar=avatar):
-                st.write(msg["content"])
-                if "image" in msg:
-                    st.image(msg["image"], use_container_width=True)
+            if msg["role"] == "user":
+                # ユーザー側：名前を表示
+                with st.chat_message("user", avatar=st.session_state.user_icon):
+                    st.markdown(f"**{st.session_state.username}**")
+                    st.write(msg["content"])
+            else:
+                # AI側：名前 + レベルを表示
+                with st.chat_message("assistant", avatar=st.session_state.ai_icon):
+                    st.markdown(f"**{st.session_state.ai_name}｜Lv.{st.session_state.level}**")
+                    st.write(msg["content"])
+                    if "image" in msg:
+                        st.image(msg["image"], use_container_width=True)
 
         if user_message := st.chat_input("メッセージを送る..."):
             st.session_state.messages.append({
@@ -259,33 +276,36 @@ else:
             st.session_state.ad_count += 1
 
             leveled_up = False
+            unlock_message = ""
+
             if st.session_state.level < 4:
                 if st.session_state.exp >= 5:
                     st.session_state.level += 1
                     st.session_state.exp = 0
                     leveled_up = True
-                    if st.session_state.level == 4:
+                    
+                    if st.session_state.level == 2:
+                        unlock_message = "🎉 レベル2になりました！\nAIがあなたの好みを積極的に聞いてくるようになります。"
+                    elif st.session_state.level == 3:
+                        unlock_message = "🎉 レベル3になりました！\n【学習モード】が解放されました！\n好きな絵柄の画像をアップロードして覚えさせられるようになりました。"
+                    elif st.session_state.level == 4:
                         st.session_state.points += 80
-                        st.session_state.messages.append({
-                            "role": "assistant",
-                            "avatar": st.session_state.ai_icon,
-                            "content": "🎉 レベル4になったよ！画像生成ができるようになった！80ptプレゼント！"
-                        })
+                        unlock_message = "🎉 レベル4になりました！\n【画像生成モード】が解放されました！\n80ポイントをプレゼントします！"
             else:
                 if st.session_state.exp >= 20:
                     st.session_state.level += 1
                     st.session_state.exp = 0
                     st.session_state.points += 5
                     leveled_up = True
-                    st.session_state.messages.append({
-                        "role": "assistant",
-                        "avatar": st.session_state.ai_icon,
-                        "content": f"🎉 レベルアップ！Lv.{st.session_state.level}！5ptプレゼント！"
-                    })
+                    unlock_message = f"🎉 レベルアップ！ Lv.{st.session_state.level} になりました！\n5ポイントをプレゼントします！"
 
-            if leveled_up:
-                st.balloons()
-                st.success(f"レベルアップ！ Lv.{st.session_state.level}")
+            if leveled_up and unlock_message:
+                st.session_state.messages.append({
+                    "role": "assistant",
+                    "avatar": st.session_state.ai_icon,
+                    "content": unlock_message
+                })
+                st.success(unlock_message)
 
             base = CHARACTER_PROMPTS.get(st.session_state.ai_type, CHARACTER_PROMPTS["中立"])
             gender_note = "女の子らしい可愛い口調で話して。" if st.session_state.ai_gender == "おんなのこ" else "男の子らしい口調で話して。"
@@ -348,7 +368,7 @@ else:
         
         if st.session_state.level < 3:
             st.info("レベル3になると画像学習ができるようになります。")
-            st.write("今のレベル:", st.session_state.level)
+            st.write(f"今のレベル: Lv.{st.session_state.level}")
         else:
             st.write("好きな絵柄の画像をアップロードして、AIに覚えさせよう。")
             
@@ -357,7 +377,6 @@ else:
             if uploaded_file is not None:
                 st.image(uploaded_file, width=300)
                 if st.button("この画像を学習させる", type="primary"):
-                    # 簡易タグ（後でVisionで改善可能）
                     tags = [
                         "アニメ調の線が綺麗な絵柄",
                         "柔らかく淡い色使いのタッチ",
@@ -375,7 +394,6 @@ else:
                         st.session_state.level = 4
                         st.session_state.exp = 0
                         st.session_state.points += 80
-                        st.balloons()
                         st.success("レベル4になりました！画像生成が解放されました（80pt付与）")
                     
                     save_current_user_data()
@@ -401,11 +419,11 @@ else:
         
         if st.session_state.level < 4:
             st.info("レベル4になると画像生成ができるようになります。")
-            st.write("今のレベル:", st.session_state.level)
+            st.write(f"今のレベル: Lv.{st.session_state.level}")
         else:
             st.write("あなたが育てたAIにイラストを描いてもらおう")
             
-            prompt_input = st.text_area("何を描く？（詳しく書くほど良い結果になりやすい）", height=100, placeholder="例：赤い瞳の魔法少女が爆発魔法を唱えているシーン、ダイナミックな構図")
+            prompt_input = st.text_area("何を描く？（詳しく書くほど良い結果になりやすい）", height=120, placeholder="例：赤い瞳の魔法少女が爆発魔法を唱えているシーン、ダイナミックな構図")
             
             col1, col2 = st.columns(2)
             with col1:
@@ -413,7 +431,6 @@ else:
             with col2:
                 size = st.radio("サイズ", ["スマホサイズ（+0pt）", "PCサイズ（+5pt）", "ポスターサイズ（+10pt）"])
             
-            # ポイント計算
             cost = 0
             if "低画質" in quality:
                 cost += 10
@@ -450,7 +467,6 @@ else:
                             )
                             image_url = response.data[0].url
                         
-                        # 履歴に追加
                         st.session_state.generated_history.insert(0, {
                             "prompt": prompt_input,
                             "url": image_url,
@@ -476,7 +492,6 @@ else:
                         st.session_state.level += 1
                         st.session_state.exp = 0
                         st.session_state.points += 5
-                        st.balloons()
                         st.success(f"レベルアップ！ Lv.{st.session_state.level}")
                     
                     save_current_user_data()
@@ -489,8 +504,8 @@ else:
         if not st.session_state.generated_history:
             st.write("まだ生成した画像がありません")
         else:
-            for i, item in enumerate(st.session_state.generated_history):
-                with st.expander(f"{item['time']} - {item['prompt'][:30]}..."):
+            for item in st.session_state.generated_history:
+                with st.expander(f"{item['time']} - {item['prompt'][:40]}..."):
                     st.write(f"プロンプト: {item['prompt']}")
                     st.write(f"消費ポイント: {item['cost']}pt")
                     st.image(item["url"], use_container_width=True)
