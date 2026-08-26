@@ -98,22 +98,15 @@ def update_personality():
         pass
 
 def analyze_image_style(uploaded_file):
-    """画像を実際に分析して絵柄・タッチ・質感を返す"""
     try:
-        # 画像をbase64に変換
         image = Image.open(uploaded_file)
         buffered = io.BytesIO()
         image.save(buffered, format="PNG")
         img_base64 = base64.b64encode(buffered.getvalue()).decode()
 
         prompt = """このイラストの絵柄を詳しく分析して、短い日本語で説明してください。
-以下の点を含めてください：
-- 線のタッチ（細い、太い、ラフ、丁寧など）
-- 塗り方（セル塗り、厚塗り、水彩風など）
-- 色の雰囲気
-- 全体の画風
-
-例：「丁寧で細い線のアニメ塗り、鮮やかな色使い」のように、1文でまとめてください。"""
+線のタッチ、塗り方、色の雰囲気、全体の画風を含めて1文でまとめてください。
+例：「丁寧で細い線のアニメ塗り、鮮やかな色使い」"""
 
         completion = client.chat.completions.create(
             model="grok-4-fast",
@@ -150,6 +143,8 @@ if "ai_icon" not in st.session_state:
     st.session_state.ai_icon = "👤"
 if "current_mode" not in st.session_state:
     st.session_state.current_mode = "chat"
+if "last_generated_image" not in st.session_state:
+    st.session_state.last_generated_image = None
 
 # ログイン画面
 if not st.session_state.logged_in:
@@ -258,7 +253,6 @@ if st.session_state.ai_name is None:
             save_current_user_data()
             st.rerun()
 else:
-    # サイドバー
     with st.sidebar:
         st.markdown(f"### 👤 {st.session_state.username}")
         st.write(f"**ポイント:** {st.session_state.points} pt")
@@ -447,7 +441,6 @@ else:
                     with st.spinner("画像を分析しています..."):
                         style_description = analyze_image_style(uploaded_file)
                     
-                    # 同じ内容がすでになければ追加
                     if style_description not in st.session_state.learned_styles:
                         st.session_state.learned_styles.append(style_description)
                         st.success(f"学習しました！\n\n**覚えた内容：**\n{style_description}")
@@ -484,24 +477,34 @@ else:
             prompt_input = st.text_area("何を描く？（詳しく書くほど良い結果になりやすい）", height=120, placeholder="例：赤い瞳の魔法少女が爆発魔法を唱えているシーン、ダイナミックな構図")
             
             col1, col2 = st.columns(2)
+            
             with col1:
                 quality = st.radio("画質", ["低画質（10pt）", "高画質（20pt）"])
+            
             with col2:
-                size = st.radio("サイズ", ["スマホサイズ（+0pt）", "PCサイズ（+5pt）", "ポスターサイズ（+10pt）"])
+                size_category = st.radio("サイズカテゴリ", ["スマホサイズ", "PCサイズ", "ポスターサイズ"])
             
-            cost = 0
-            if "低画質" in quality:
-                cost += 10
-                model_name = "grok-imagine-image"
-            else:
-                cost += 20
-                model_name = "grok-imagine-image-quality"
+            aspect = st.radio("構図", ["正方形", "縦長", "横長"], horizontal=True)
             
-            if "PCサイズ" in size:
-                cost += 5
-            elif "ポスターサイズ" in size:
-                cost += 10
+            # 解像度マップ
+            resolution_map = {
+                ("スマホサイズ", "正方形"): ("1024 × 1024", 0),
+                ("スマホサイズ", "縦長"): ("768 × 1344", 0),
+                ("スマホサイズ", "横長"): ("1344 × 768", 0),
+                ("PCサイズ", "正方形"): ("1280 × 1280", 5),
+                ("PCサイズ", "縦長"): ("1024 × 1536", 5),
+                ("PCサイズ", "横長"): ("1536 × 1024", 5),
+                ("ポスターサイズ", "正方形"): ("1536 × 1536", 10),
+                ("ポスターサイズ", "縦長"): ("1200 × 1800", 10),
+                ("ポスターサイズ", "横長"): ("1800 × 1200", 10),
+            }
             
+            res_text, size_cost = resolution_map.get((size_category, aspect), ("1024 × 1024", 0))
+            
+            cost = 10 if "低画質" in quality else 20
+            cost += size_cost
+            
+            st.info(f"選択中の解像度: **{res_text}**")
             st.write(f"**消費ポイント: {cost} pt**（所持: {st.session_state.points} pt）")
             
             if st.button("🎨 イラストを生成する", type="primary", use_container_width=True):
@@ -514,10 +517,21 @@ else:
                     st.session_state.exp += 2
                     
                     styles_text = ", ".join(st.session_state.learned_styles[-3:]) if st.session_state.learned_styles else "beautiful anime style"
-                    full_prompt = f"{prompt_input}, {styles_text}, high quality, detailed illustration"
+                    
+                    aspect_prompt = ""
+                    if aspect == "縦長":
+                        aspect_prompt = ", vertical composition, portrait orientation"
+                    elif aspect == "横長":
+                        aspect_prompt = ", horizontal composition, landscape orientation"
+                    else:
+                        aspect_prompt = ", square composition"
+                    
+                    full_prompt = f"{prompt_input}, {styles_text}{aspect_prompt}, high quality, detailed illustration"
+                    
+                    model_name = "grok-imagine-image" if "低画質" in quality else "grok-imagine-image-quality"
                     
                     try:
-                        with st.spinner("描いています...しばらく待ってね"):
+                        with st.spinner("生成中です...しばらくお待ちください"):
                             response = client.images.generate(
                                 model=model_name,
                                 prompt=full_prompt,
@@ -525,11 +539,19 @@ else:
                             )
                             image_url = response.data[0].url
                         
+                        st.session_state.last_generated_image = {
+                            "url": image_url,
+                            "prompt": prompt_input,
+                            "cost": cost,
+                            "resolution": res_text
+                        }
+                        
                         st.session_state.generated_history.insert(0, {
                             "prompt": prompt_input,
                             "url": image_url,
                             "cost": cost,
-                            "time": datetime.now().strftime("%Y-%m-%d %H:%M")
+                            "time": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                            "resolution": res_text
                         })
                         
                         st.session_state.messages.append({
@@ -539,21 +561,26 @@ else:
                             "image": image_url
                         })
                         
-                        st.success("生成完了！")
-                        st.image(image_url, use_container_width=True)
+                        if st.session_state.exp >= 20:
+                            st.session_state.level += 1
+                            st.session_state.exp = 0
+                            st.session_state.points += 5
+                            st.success(f"レベルアップ！ Lv.{st.session_state.level}")
+                        
+                        save_current_user_data()
+                        st.rerun()
                         
                     except Exception as e:
                         st.session_state.points += cost
                         st.error(f"生成に失敗しました。ポイントは戻しました。\n{e}")
-                    
-                    if st.session_state.exp >= 20:
-                        st.session_state.level += 1
-                        st.session_state.exp = 0
-                        st.session_state.points += 5
-                        st.success(f"レベルアップ！ Lv.{st.session_state.level}")
-                    
-                    save_current_user_data()
-                    st.rerun()
+
+            # 最新の生成画像をその場で表示
+            if st.session_state.last_generated_image:
+                st.markdown("---")
+                st.subheader("最新の生成結果")
+                st.caption(f"プロンプト: {st.session_state.last_generated_image['prompt']}")
+                st.caption(f"解像度: {st.session_state.last_generated_image.get('resolution', '')} ｜ 消費: {st.session_state.last_generated_image['cost']}pt")
+                st.image(st.session_state.last_generated_image["url"], use_container_width=True)
 
     # ---------- 生成履歴 ----------
     elif mode == "history":
@@ -565,5 +592,5 @@ else:
             for item in st.session_state.generated_history:
                 with st.expander(f"{item['time']} - {item['prompt'][:40]}..."):
                     st.write(f"プロンプト: {item['prompt']}")
-                    st.write(f"消費ポイント: {item['cost']}pt")
+                    st.write(f"解像度: {item.get('resolution', '不明')} ｜ 消費ポイント: {item['cost']}pt")
                     st.image(item["url"], use_container_width=True)
