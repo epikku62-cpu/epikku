@@ -230,7 +230,7 @@ else:
             st.write("- Lv.3：画像学習可能")
             st.write("- Lv.4：画像生成解放")
 
-        # ===== レベル3：画像学習 =====
+        # レベル3：画像学習
         if st.session_state.level == 3:
             st.markdown("### 🖼️ 画像学習モード")
             st.caption("好きな絵柄の画像をアップロードして覚えさせよう")
@@ -260,6 +260,7 @@ else:
                         st.session_state.level = 4
                         st.session_state.exp = 0
                         st.session_state.points += 80
+                        st.balloons()
                         st.session_state.messages.append({
                             "role": "assistant",
                             "avatar": st.session_state.ai_icon,
@@ -270,7 +271,7 @@ else:
                     st.success(f"『{tag}』を学習しました！")
                     st.rerun()
 
-        # ===== レベル4以降：画像生成 =====
+        # レベル4以降：画像生成
         if st.session_state.level >= 4:
             st.markdown("### 🎨 画像生成モード")
             
@@ -286,7 +287,6 @@ else:
                 if not prompt_input.strip():
                     st.warning("何を描くか入力してください")
                 else:
-                    # ポイント消費量を決定
                     if "低画質" in quality:
                         cost = 10
                         model_name = "grok-imagine-image"
@@ -301,7 +301,7 @@ else:
                         st.error(f"ポイントが足りません！（必要: {cost}pt / 所持: {st.session_state.points}pt）")
                     else:
                         st.session_state.points -= cost
-                        st.session_state.exp += 2  # 画像生成は2カウント
+                        st.session_state.exp += 2
                         
                         styles_text = ", ".join(st.session_state.learned_styles) if st.session_state.learned_styles else "beautiful anime style"
                         full_prompt = f"A high-quality illustration of {prompt_input}, {styles_text}, vibrant colors, extremely detailed"
@@ -328,22 +328,22 @@ else:
                                 "image": image_url
                             })
                         except Exception as e:
-                            st.session_state.points += cost  # 失敗したらポイントを戻す
+                            st.session_state.points += cost
                             st.session_state.messages.append({
                                 "role": "assistant",
                                 "avatar": st.session_state.ai_icon,
                                 "content": f"⚠️ 描くのに失敗しちゃった…ポイントは戻したよ。エラー: {e}"
                             })
                         
-                        # レベルアップ判定
                         if st.session_state.exp >= 20:
                             st.session_state.level += 1
                             st.session_state.exp = 0
                             st.session_state.points += 5
+                            st.balloons()
                             st.session_state.messages.append({
                                 "role": "assistant",
                                 "avatar": st.session_state.ai_icon,
-                                "content": f"レベルが上がったよ！Lv.{st.session_state.level}になった！ポイント5ptプレゼント！"
+                                "content": f"🎉 レベルが上がったよ！Lv.{st.session_state.level}になった！ポイント5ptプレゼント！"
                             })
                         
                         save_current_user_data()
@@ -374,10 +374,12 @@ else:
         st.session_state.exp += 1
         st.session_state.ad_count += 1
 
+        leveled_up = False
         if st.session_state.level < 4:
             if st.session_state.exp >= 5:
                 st.session_state.level += 1
                 st.session_state.exp = 0
+                leveled_up = True
                 if st.session_state.level == 4:
                     st.session_state.points += 80
                     st.session_state.messages.append({
@@ -390,13 +392,18 @@ else:
                 st.session_state.level += 1
                 st.session_state.exp = 0
                 st.session_state.points += 5
+                leveled_up = True
                 st.session_state.messages.append({
                     "role": "assistant",
                     "avatar": st.session_state.ai_icon,
-                    "content": f"レベルが上がったよ！Lv.{st.session_state.level}になった！ポイント5ptプレゼント！"
+                    "content": f"🎉 レベルが上がったよ！Lv.{st.session_state.level}になった！ポイント5ptプレゼント！"
                 })
 
-        # システムプロンプト
+        if leveled_up:
+            st.balloons()
+            st.success(f"レベルアップ！ Lv.{st.session_state.level} になりました！")
+
+        # ===== 強化したシステムプロンプト =====
         base_personality = CHARACTER_PROMPTS.get(st.session_state.ai_type, CHARACTER_PROMPTS["中立"])
         
         if st.session_state.ai_gender == "おんなのこ":
@@ -405,21 +412,36 @@ else:
             gender_instruction = "あなたは男の子です。男の子らしい口調で話してください。"
 
         if st.session_state.level < 4:
-            level_instruction = f"【重要】あなたはまだレベル{st.session_state.level}です。まだ絵を描く能力がありません。「描けるよ」「描いてあげる」「何描こうか」などと絶対に言わないでください。「まだレベルが低いから絵は描けないよ。もっと会話してレベルを上げてね」というニュアンスで答えてください。"
+            level_instruction = f"【重要】あなたはまだレベル{st.session_state.level}です。まだ絵を描く能力がありません。「描けるよ」「描いてあげる」などと絶対に言わないでください。"
         else:
             level_instruction = "あなたはレベル4以上なので、絵を描くことができます。"
+
+        # 好みを聞くように強く指示
+        preference_instruction = """
+【最重要】あなたはユーザーの「絵の好み」を学ぶことが目的です。
+積極的に以下のことを聞いてください：
+- 好きなキャラクター
+- 好きなアニメ・漫画
+- 好きな絵柄（アニメ調、厚塗り、水彩など）
+- 好きな色や雰囲気
+- 描いてほしいもの
+
+食べ物や日常の雑談ではなく、絵やキャラに関する話を中心にしてください。
+"""
 
         system_prompt = f"""{base_personality}
 
 {gender_instruction}
 {level_instruction}
+{preference_instruction}
 
 現在のあなたの名前は「{st.session_state.ai_name}」です。
-ユーザーとの会話を通じて、少しずつ性格や好みを学んでいってください。
 """
 
+        # 履歴を直近12件に制限して速度改善
+        recent_messages = st.session_state.messages[-12:]
         api_messages = [{"role": "system", "content": system_prompt}]
-        for msg in st.session_state.messages:
+        for msg in recent_messages:
             if "【お絵描きリクエスト】" not in msg.get("content", ""):
                 api_messages.append({"role": msg["role"], "content": msg["content"]})
 
