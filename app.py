@@ -9,9 +9,6 @@ from datetime import datetime
 
 st.set_page_config(page_title="AI育成お絵描きサイト", page_icon="🎨", layout="wide")
 
-# ======================
-# 設定
-# ======================
 USERS_FILE = "users_data.json"
 grok_key = os.environ.get("XAI_API_KEY", "")
 
@@ -32,9 +29,6 @@ CHARACTER_PROMPTS = {
     "中立": "あなたはこれからユーザーと一緒に育っていくAI絵師です。まだ性格が定まっていません。ユーザーの話し方や態度を観察しながら、少しずつ自分の性格を形成していきます。自然で親しみやすい口調で話してください。"
 }
 
-# ======================
-# ユーティリティ
-# ======================
 def hash_password(password: str) -> str:
     return hashlib.sha256(password.encode()).hexdigest()
 
@@ -68,51 +62,4 @@ def save_current_user_data():
             "messages": st.session_state.get("messages", [])[-50:],
             "points": st.session_state.get("points", 0),
             "is_premium": st.session_state.get("is_premium", False),
-            "ad_count": st.session_state.get("ad_count", 0),
-            "last_login": datetime.now().isoformat()
-        }
-        save_users(users)
-
-def update_personality():
-    if len(st.session_state.messages) < 6:
-        return
-    recent = st.session_state.messages[-8:]
-    conversation_text = "\n".join([f"{m['role']}: {m['content']}" for m in recent if "【お絵描きリクエスト】" not in m.get("content", "")])
-    prompt = f"""以下の会話を見て、AIの現在の性格として最も適切なものを1つだけ選んでください。
-選択肢: 甘えん坊, ツンデレ, ヤンデレ, ヤンキー, 姫, 王子, 明るいキャラ, 口数少ないキャラ, 中立
-
-会話:
-{conversation_text}
-
-回答は選択肢の中から単語だけで返してください。"""
-    try:
-        completion = client.chat.completions.create(
-            model="grok-4.6",
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=20
-        )
-        new_type = completion.choices[0].message.content.strip()
-        if new_type in CHARACTER_PROMPTS and new_type != st.session_state.ai_type:
-            st.session_state.ai_type = new_type
-            st.session_state.messages.append({
-                "role": "assistant",
-                "avatar": st.session_state.ai_icon,
-                "content": f"（……なんか、少し性格が変わった気がする……今は『{new_type}』寄りかも）"
-            })
-    except:
-        pass
-
-# ======================
-# セッション初期化
-# ======================
-if "logged_in" not in st.session_state:
-    st.session_state.logged_in = False
-if "username" not in st.session_state:
-    st.session_state.username = None
-
-# ======================
-# ログイン画面
-# ======================
-if not st.session_state.logged_in:
-    st.markdown("""
-    <div style="background-color: #222; padding: 12px; text-align: center; border-radius:
+            "ad_count": st.session_state.get("ad_count
