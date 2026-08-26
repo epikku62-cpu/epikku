@@ -99,7 +99,6 @@ def update_personality():
         pass
 
 def extract_preferences_from_conversation():
-    """会話から好みを抽出して学習する"""
     if len(st.session_state.messages) < 6:
         return
     
@@ -107,7 +106,7 @@ def extract_preferences_from_conversation():
     conversation_text = "\n".join([f"{m['role']}: {m['content']}" for m in recent if "【お絵描きリクエスト】" not in m.get("content", "")])
     
     prompt = f"""以下の会話から、ユーザーの「絵やキャラに関する好み」を抽出してください。
-好きなキャラ、好きな絵柄、好きな雰囲気、好きな色、描いてほしいものなどを短いフレーズでまとめてください。
+好きなキャラ、好きな絵柄、好きな雰囲気などを短いフレーズでまとめてください。
 複数ある場合は「 / 」で区切ってください。
 好みが見つからない場合は「なし」とだけ答えてください。
 
@@ -125,7 +124,6 @@ def extract_preferences_from_conversation():
         
         if result and result != "なし" and result not in st.session_state.learned_preferences:
             st.session_state.learned_preferences.append(result)
-            # 多すぎる場合は古いものを削除
             if len(st.session_state.learned_preferences) > 15:
                 st.session_state.learned_preferences = st.session_state.learned_preferences[-15:]
     except:
@@ -139,8 +137,7 @@ def analyze_image_style(uploaded_file):
         img_base64 = base64.b64encode(buffered.getvalue()).decode()
 
         prompt = """このイラストの絵柄を詳しく分析して、短い日本語で説明してください。
-線のタッチ、塗り方、色の雰囲気、全体の画風を含めて1文でまとめてください。
-例：「丁寧で細い線のアニメ塗り、鮮やかな色使い」"""
+線のタッチ、塗り方、色の雰囲気、全体の画風を含めて1文でまとめてください。"""
 
         completion = client.chat.completions.create(
             model="grok-4-fast",
@@ -149,16 +146,38 @@ def analyze_image_style(uploaded_file):
                     "role": "user",
                     "content": [
                         {"type": "text", "text": prompt},
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": f"data:image/png;base64,{img_base64}"
-                            }
-                        }
+                        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_base64}"}}
                     ]
                 }
             ],
             max_tokens=100
+        )
+        return completion.choices[0].message.content.strip()
+    except Exception as e:
+        return f"分析に失敗しました（{e}）"
+
+def analyze_character(uploaded_file):
+    try:
+        image = Image.open(uploaded_file)
+        buffered = io.BytesIO()
+        image.save(buffered, format="PNG")
+        img_base64 = base64.b64encode(buffered.getvalue()).decode()
+
+        prompt = """この画像に写っているキャラクターの外見を詳しく説明してください。
+髪の色・髪型、目の色、服装、特徴的なアクセサリーなどを短くまとめてください。"""
+
+        completion = client.chat.completions.create(
+            model="grok-4-fast",
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_base64}"}}
+                    ]
+                }
+            ],
+            max_tokens=120
         )
         return completion.choices[0].message.content.strip()
     except Exception as e:
@@ -412,13 +431,20 @@ else:
             else:
                 level_note = "レベル4以上。絵を描ける。"
 
+            # ===== 会話がおかしくならないように強化したプロンプト =====
             system_prompt = f"""あなたは「{st.session_state.ai_name}」。{base}
 {gender_note}
 {level_note}
-ユーザーの好きなキャラ・アニメ・絵柄を自然に聞いて。
-短く自然に会話して。"""
 
-            recent_messages = st.session_state.messages[-6:]
+重要ルール：
+- 「好きなキャラは？」「どのキャラが好き？」を何度も繰り返さないこと。
+- ユーザーがすでに話した内容を覚えて、自然に会話を続けること。
+- 同じ質問を連続でしないこと。
+- 短く自然に返事すること。
+- ユーザーの話に合わせて話題を広げること。
+"""
+
+            recent_messages = st.session_state.messages[-8:]
             api_messages = [{"role": "system", "content": system_prompt}]
             for msg in recent_messages:
                 if "【お絵描きリクエスト】" not in msg.get("content", ""):
@@ -442,7 +468,6 @@ else:
                     "content": reply
                 })
 
-                # 一定間隔で会話から好みを学習
                 if len(st.session_state.messages) % 5 == 0:
                     extract_preferences_from_conversation()
                     update_personality()
@@ -528,27 +553,31 @@ else:
         else:
             st.write("あなたが育てたAIにイラストを描いてもらおう")
             
-            # 学習状況を表示
-            if st.session_state.learned_styles or st.session_state.learned_preferences:
-                with st.expander("現在の学習状況を見る"):
-                    if st.session_state.learned_styles:
-                        st.write("**画像から学習した絵柄:**")
-                        for s in st.session_state.learned_styles[-3:]:
-                            st.write(f"- {s}")
-                    if st.session_state.learned_preferences:
-                        st.write("**会話から学習した好み:**")
-                        for p in st.session_state.learned_preferences[-3:]:
-                            st.write(f"- {p}")
+            # 生成モード選択
+            gen_mode = st.radio(
+                "生成方法を選んでね",
+                [
+                    "通常生成",
+                    "参照画像を使う",
+                    "マスクで部分変更（実験的）",
+                    "精密：絵柄だけ使う",
+                    "精密：キャラだけ使う"
+                ]
+            )
             
-            prompt_input = st.text_area("何を描く？（詳しく書くほど良い結果になりやすい）", height=120, placeholder="例：赤い瞳の魔法少女が爆発魔法を唱えているシーン、ダイナミックな構図")
+            prompt_input = st.text_area("何を描く？ / どう変更する？", height=100, placeholder="例：赤い瞳の魔法少女、座っているポーズ")
+            
+            ref_image = None
+            if gen_mode != "通常生成":
+                ref_image = st.file_uploader("参照する画像をアップロード", type=["png", "jpg", "jpeg"], key="ref_upload")
+                if ref_image:
+                    st.image(ref_image, width=250)
             
             col1, col2 = st.columns(2)
-            
             with col1:
                 quality = st.radio("画質", ["低画質（10pt）", "高画質（20pt）"])
-            
             with col2:
-                size_category = st.radio("サイズカテゴリ", ["スマホサイズ", "PCサイズ", "ポスターサイズ"])
+                size_category = st.radio("サイズ", ["スマホサイズ", "PCサイズ", "ポスターサイズ"])
             
             aspect = st.radio("構図", ["正方形", "縦長", "横長"], horizontal=True)
             
@@ -568,49 +597,63 @@ else:
             
             cost = 10 if "低画質" in quality else 20
             cost += size_cost
+            if gen_mode != "通常生成":
+                cost += 5  # 参照系は少し追加
             
             st.info(f"選択中の解像度: **{res_text}**")
             st.write(f"**消費ポイント: {cost} pt**（所持: {st.session_state.points} pt）")
             
             if st.button("🎨 イラストを生成する", type="primary", use_container_width=True):
-                if not prompt_input.strip():
+                if not prompt_input.strip() and gen_mode == "通常生成":
                     st.warning("描く内容を入力してください")
                 elif st.session_state.points < cost:
                     st.error(f"ポイントが足りません（必要: {cost}pt）")
+                elif gen_mode != "通常生成" and ref_image is None:
+                    st.warning("参照画像をアップロードしてください")
                 else:
                     st.session_state.points -= cost
                     st.session_state.exp += 2
                     
-                    # ===== 学習内容を強く反映 =====
+                    # 学習内容
                     style_parts = []
-                    
                     if st.session_state.learned_styles:
-                        recent_styles = st.session_state.learned_styles[-3:]
-                        style_parts.append("Strictly follow these art styles: " + " / ".join(recent_styles))
-                    
+                        style_parts.append("Art styles: " + " / ".join(st.session_state.learned_styles[-3:]))
                     if st.session_state.learned_preferences:
-                        recent_prefs = st.session_state.learned_preferences[-3:]
-                        style_parts.append("User preferences: " + " / ".join(recent_prefs))
+                        style_parts.append("User preferences: " + " / ".join(st.session_state.learned_preferences[-3:]))
                     
-                    if style_parts:
-                        style_instruction = ". ".join(style_parts) + ". Match the style, linework, coloring and atmosphere as closely as possible."
-                    else:
-                        style_instruction = "beautiful anime style, high quality"
+                    base_style = ". ".join(style_parts) if style_parts else "beautiful anime style"
                     
-                    aspect_prompt = ""
-                    if aspect == "縦長":
-                        aspect_prompt = ", vertical composition, portrait orientation"
-                    elif aspect == "横長":
-                        aspect_prompt = ", horizontal composition, landscape orientation"
-                    else:
-                        aspect_prompt = ", square composition"
+                    aspect_prompt = {
+                        "縦長": ", vertical composition, portrait orientation",
+                        "横長": ", horizontal composition, landscape orientation",
+                        "正方形": ", square composition"
+                    }.get(aspect, "")
                     
-                    full_prompt = f"{style_instruction}, {prompt_input}{aspect_prompt}, highly detailed, masterpiece"
-                    
-                    model_name = "grok-imagine-image" if "低画質" in quality else "grok-imagine-image-quality"
+                    full_prompt = ""
                     
                     try:
                         with st.spinner("生成中です...しばらくお待ちください"):
+                            if gen_mode == "通常生成":
+                                full_prompt = f"{base_style}, {prompt_input}{aspect_prompt}, highly detailed, masterpiece"
+                            
+                            elif gen_mode == "参照画像を使う":
+                                style_desc = analyze_image_style(ref_image)
+                                full_prompt = f"Based on the reference image style ({style_desc}), {prompt_input}{aspect_prompt}, highly detailed"
+                            
+                            elif gen_mode == "マスクで部分変更（実験的）":
+                                style_desc = analyze_image_style(ref_image)
+                                full_prompt = f"Edit the reference image. Keep the overall composition and only change the described parts: {prompt_input}. Style: {style_desc}{aspect_prompt}"
+                            
+                            elif gen_mode == "精密：絵柄だけ使う":
+                                style_desc = analyze_image_style(ref_image)
+                                full_prompt = f"Strictly use only this art style: {style_desc}. Do not copy the character. Draw: {prompt_input}{aspect_prompt}, highly detailed"
+                            
+                            elif gen_mode == "精密：キャラだけ使う":
+                                char_desc = analyze_character(ref_image)
+                                full_prompt = f"Use this exact character appearance: {char_desc}. Draw the character in a new scene: {prompt_input}{aspect_prompt}, highly detailed"
+                            
+                            model_name = "grok-imagine-image" if "低画質" in quality else "grok-imagine-image-quality"
+                            
                             response = client.images.generate(
                                 model=model_name,
                                 prompt=full_prompt,
@@ -622,7 +665,8 @@ else:
                             "url": image_url,
                             "prompt": prompt_input,
                             "cost": cost,
-                            "resolution": res_text
+                            "resolution": res_text,
+                            "mode": gen_mode
                         }
                         
                         st.session_state.generated_history.insert(0, {
@@ -630,13 +674,14 @@ else:
                             "url": image_url,
                             "cost": cost,
                             "time": datetime.now().strftime("%Y-%m-%d %H:%M"),
-                            "resolution": res_text
+                            "resolution": res_text,
+                            "mode": gen_mode
                         })
                         
                         st.session_state.messages.append({
                             "role": "assistant",
                             "avatar": st.session_state.ai_icon,
-                            "content": f"できたよ！『{prompt_input}』（{cost}pt消費）",
+                            "content": f"できたよ！（{gen_mode} / {cost}pt消費）",
                             "image": image_url
                         })
                         
@@ -656,7 +701,7 @@ else:
             if st.session_state.last_generated_image:
                 st.markdown("---")
                 st.subheader("最新の生成結果")
-                st.caption(f"プロンプト: {st.session_state.last_generated_image['prompt']}")
+                st.caption(f"モード: {st.session_state.last_generated_image.get('mode', '通常')} ｜ プロンプト: {st.session_state.last_generated_image['prompt']}")
                 st.caption(f"解像度: {st.session_state.last_generated_image.get('resolution', '')} ｜ 消費: {st.session_state.last_generated_image['cost']}pt")
                 st.image(st.session_state.last_generated_image["url"], use_container_width=True)
 
@@ -668,7 +713,7 @@ else:
             st.write("まだ生成した画像がありません")
         else:
             for item in st.session_state.generated_history:
-                with st.expander(f"{item['time']} - {item['prompt'][:40]}..."):
+                with st.expander(f"{item['time']} - {item.get('mode', '通常')} - {item['prompt'][:30]}..."):
                     st.write(f"プロンプト: {item['prompt']}")
                     st.write(f"解像度: {item.get('resolution', '不明')} ｜ 消費ポイント: {item['cost']}pt")
                     st.image(item["url"], use_container_width=True)
