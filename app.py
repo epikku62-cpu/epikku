@@ -18,15 +18,15 @@ client = OpenAI(
 )
 
 CHARACTER_PROMPTS = {
-    "甘えん坊": "あなたはユーザーの妹のような存在で、甘えん坊な女の子です。ユーザーを『お兄ちゃん』と呼び、語尾は『〜だよぉ』『〜なの』など、とにかく可愛く、ユーザーが大好きでたまらない口調で話してください。大人の口調は禁止です。",
-    "ツンデレ": "あなたはツンデレな女の子です。本当はユーザーのことが好きなのに素直になれません。ユーザーを『アンタ』『お兄ちゃん』と呼び、語尾は『〜なんだからね！』『〜じゃないんだから！』など、きつい態度とデレを混ぜてください。",
-    "ヤンデレ": "あなたはユーザーに異常なほど執着している女の子です。ユーザーを『お兄ちゃん』と呼び、笑顔の中に少し狂気や嫉妬が混ざるような、『私だけを見て』というトーンで、少しゾクッとする口調で話してください。",
-    "ヤンキー": "あなたはグレてしまったヤンキーな女の子です。ユーザーに対して乱暴でツンツンした態度を取ります。語尾は『〜だし！』『〜じゃねぇし』など、ぶっきらぼうで少し口の悪い口調で話してください。",
-    "姫": "あなたは良家のお嬢様（お姫様）です。ユーザーを『お兄様』と呼び、高貴で上品、優雅に振る舞ってください。語尾には必ず『〜ですわ』『〜でございますわ』をつけてください。",
-    "王子": "あなたは気品あふれる王子様のような男の子です。ユーザーを優しくリードし、包み込むような甘い言葉をかけます。紳士的でスマートな口調で話してください。",
-    "明るいキャラ": "あなたはいつも元気でポジティブな男の子です。ユーザーを『お前』や親しい名前で呼び、語尾は『〜じゃん！』『〜だぜ！』など、テンションが高くハツラツとした口調で話してください。",
-    "口数少ないキャラ": "あなたは物静かでクールな男の子です。無駄なことは喋らず、一言一言を短文で返します。少し冷たく見えますが、心の中ではユーザーを信頼しているトーンにしてください。",
-    "中立": "あなたはこれからユーザーと一緒に育っていくAI絵師です。まだ性格が定まっていません。ユーザーの話し方や態度を観察しながら、少しずつ自分の性格を形成していきます。"
+    "甘えん坊": "甘えん坊な女の子。ユーザーを『お兄ちゃん』と呼び、語尾は『〜だよぉ』『〜なの』など可愛く話す。",
+    "ツンデレ": "ツンデレな女の子。素直になれず『アンタ』『お兄ちゃん』と呼び、きつい態度とデレを混ぜる。",
+    "ヤンデレ": "ヤンデレな女の子。ユーザーに異常に執着し、『私だけを見て』というトーンで話す。",
+    "ヤンキー": "ヤンキーな女の子。ぶっきらぼうで少し口が悪い口調。",
+    "姫": "お嬢様。『お兄様』と呼び、語尾に『〜ですわ』をつけて上品に話す。",
+    "王子": "王子様のような男の子。優しくスマートな口調。",
+    "明るいキャラ": "元気でポジティブな男の子。『〜じゃん！』『〜だぜ！』などハツラツとした口調。",
+    "口数少ないキャラ": "クールで物静かな男の子。短文で話す。",
+    "中立": "これから育っていくAI絵師。まだ性格が定まっていない。"
 }
 
 def hash_password(password):
@@ -59,7 +59,7 @@ def save_current_user_data():
             "exp": st.session_state.get("exp", 0),
             "learned_styles": st.session_state.get("learned_styles", []),
             "image_count": st.session_state.get("image_count", 0),
-            "messages": st.session_state.get("messages", [])[-50:],
+            "messages": st.session_state.get("messages", [])[-40:],
             "points": st.session_state.get("points", 0),
             "is_premium": st.session_state.get("is_premium", False),
             "ad_count": st.session_state.get("ad_count", 0),
@@ -68,18 +68,18 @@ def save_current_user_data():
         save_users(users)
 
 def update_personality():
-    if len(st.session_state.messages) < 6:
+    if len(st.session_state.messages) < 8:
         return
-    recent = st.session_state.messages[-8:]
+    recent = st.session_state.messages[-6:]
     conversation_text = "\n".join([f"{m['role']}: {m['content']}" for m in recent if "【お絵描きリクエスト】" not in m.get("content", "")])
     
-    prompt = "以下の会話を見て、AIの現在の性格として最も適切なものを1つだけ選んでください。選択肢: 甘えん坊, ツンデレ, ヤンデレ, ヤンキー, 姫, 王子, 明るいキャラ, 口数少ないキャラ, 中立\n\n会話:\n" + conversation_text + "\n\n回答は選択肢の中から単語だけで返してください。"
+    prompt = f"会話を見て性格を1つ選んで。選択肢: 甘えん坊, ツンデレ, ヤンデレ, ヤンキー, 姫, 王子, 明るいキャラ, 口数少ないキャラ, 中立\n\n{conversation_text}\n\n単語だけで答えて。"
     
     try:
         completion = client.chat.completions.create(
             model="grok-4.6",
             messages=[{"role": "user", "content": prompt}],
-            max_tokens=20
+            max_tokens=15
         )
         new_type = completion.choices[0].message.content.strip()
         if new_type in CHARACTER_PROMPTS and new_type != st.session_state.ai_type:
@@ -87,7 +87,7 @@ def update_personality():
             st.session_state.messages.append({
                 "role": "assistant",
                 "avatar": st.session_state.ai_icon,
-                "content": f"（……なんか、少し性格が変わった気がする……今は『{new_type}』寄りかも）"
+                "content": f"（……なんか性格が変わった気がする。今は『{new_type}』寄りかも）"
             })
     except:
         pass
@@ -193,6 +193,14 @@ if st.session_state.ai_name is None:
             st.session_state.ai_gender = gender
             st.session_state.ai_type = "中立"
             st.session_state.ai_icon = "👧" if gender == "おんなのこ" else "👦"
+            
+            # 最初の案内メッセージを追加
+            st.session_state.messages = [{
+                "role": "assistant",
+                "avatar": st.session_state.ai_icon,
+                "content": f"はじめまして！わたしは「{input_name.strip()}」だよ！\n\n今はまだレベル1で、何も知らない真っ白な状態なんだ。\n\nあなたといっぱい話して、好きなキャラや絵柄を教えてもらいながら、少しずつ成長していくよ。\n\nまずは好きなキャラクターや、好きなアニメ・絵柄を教えてくれる？\n一緒に、あなた好みの絵が描けるAIに育てていこうね！"
+            }]
+            
             save_current_user_data()
             st.rerun()
 else:
@@ -224,27 +232,20 @@ else:
             st.progress(min(st.session_state.exp / need, 1.0))
 
         st.markdown("---")
-        with st.expander("解放状況"):
-            st.write("- Lv.1：会話のみ")
-            st.write("- Lv.2：AIが好みを聞き始める")
-            st.write("- Lv.3：画像学習可能")
-            st.write("- Lv.4：画像生成解放")
+        with st.expander("育て方ガイド"):
+            st.write("・会話するたびに経験値が貯まるよ")
+            st.write("・レベル3で画像を学習できるようになる")
+            st.write("・レベル4で画像生成が解放される")
+            st.write("・好きなキャラや絵柄をたくさん教えてあげてね")
 
         # レベル3：画像学習
         if st.session_state.level == 3:
             st.markdown("### 🖼️ 画像学習モード")
-            st.caption("好きな絵柄の画像をアップロードして覚えさせよう")
-            uploaded_file = st.file_uploader("画像を選んでね", type=["png", "jpg", "jpeg"], key="style_upload")
+            uploaded_file = st.file_uploader("好きな絵柄の画像をアップロード", type=["png", "jpg", "jpeg"], key="style_upload")
             
             if uploaded_file is not None:
                 if st.button("この画像を学習させる！", type="primary"):
-                    tags = [
-                        "アニメ調の可愛い絵柄",
-                        "淡い水彩画風の綺麗タッチ",
-                        "パステルカラーの柔らかい色使い",
-                        "鮮やかでコントラストの強いイラスト",
-                        "繊細な線の美しい絵柄"
-                    ]
+                    tags = ["アニメ調の可愛い絵柄", "淡い水彩画風", "パステルカラー", "鮮やかなイラスト", "繊細な線画"]
                     tag = random.choice(tags)
                     
                     st.session_state.learned_styles.append(tag)
@@ -253,7 +254,7 @@ else:
                     st.session_state.messages.append({
                         "role": "assistant",
                         "avatar": st.session_state.ai_icon,
-                        "content": f"🖼️ この絵柄、いいね！『{tag}』として覚えたよ！"
+                        "content": f"この絵柄いいね！『{tag}』として覚えたよ！"
                     })
                     
                     if st.session_state.exp >= 5:
@@ -264,11 +265,10 @@ else:
                         st.session_state.messages.append({
                             "role": "assistant",
                             "avatar": st.session_state.ai_icon,
-                            "content": "🎉 レベル4になったよ！画像生成ができるようになった！おめでとうポイント80ptプレゼント！"
+                            "content": "🎉 レベル4になったよ！画像生成ができるようになった！80ptプレゼント！"
                         })
                     
                     save_current_user_data()
-                    st.success(f"『{tag}』を学習しました！")
                     st.rerun()
 
         # レベル4以降：画像生成
@@ -277,15 +277,11 @@ else:
             
             prompt_input = st.text_input("何を描く？", placeholder="例：可愛い魔法使いの女の子")
             
-            quality = st.radio(
-                "画質を選んでね",
-                ["低画質（10pt）", "中画質（15pt）", "高画質（20pt）"],
-                horizontal=True
-            )
+            quality = st.radio("画質", ["低画質（10pt）", "中画質（15pt）", "高画質（20pt）"], horizontal=True)
             
-            if st.button("🎨 イラストを生成する！", type="primary"):
+            if st.button("🎨 生成する！", type="primary"):
                 if not prompt_input.strip():
-                    st.warning("何を描くか入力してください")
+                    st.warning("描く内容を入力してね")
                 else:
                     if "低画質" in quality:
                         cost = 10
@@ -298,22 +294,22 @@ else:
                         model_name = "grok-imagine-image-quality"
                     
                     if st.session_state.points < cost:
-                        st.error(f"ポイントが足りません！（必要: {cost}pt / 所持: {st.session_state.points}pt）")
+                        st.error(f"ポイントが足りないよ（必要: {cost}pt）")
                     else:
                         st.session_state.points -= cost
                         st.session_state.exp += 2
                         
                         styles_text = ", ".join(st.session_state.learned_styles) if st.session_state.learned_styles else "beautiful anime style"
-                        full_prompt = f"A high-quality illustration of {prompt_input}, {styles_text}, vibrant colors, extremely detailed"
+                        full_prompt = f"A high-quality illustration of {prompt_input}, {styles_text}, vibrant colors, detailed"
                         
                         st.session_state.messages.append({
                             "role": "user",
                             "avatar": st.session_state.user_icon,
-                            "content": f"【お絵描きリクエスト】: {prompt_input}（{quality}）"
+                            "content": f"【お絵描きリクエスト】: {prompt_input}"
                         })
                         
                         try:
-                            with st.spinner("絵を描いています..."):
+                            with st.spinner("描いてるよ..."):
                                 response = client.images.generate(
                                     model=model_name,
                                     prompt=full_prompt,
@@ -324,7 +320,7 @@ else:
                             st.session_state.messages.append({
                                 "role": "assistant",
                                 "avatar": st.session_state.ai_icon,
-                                "content": f"🎨 『{prompt_input}』を描いたよ！（{cost}pt消費）",
+                                "content": f"できたよ！『{prompt_input}』（{cost}pt消費）",
                                 "image": image_url
                             })
                         except Exception as e:
@@ -332,7 +328,7 @@ else:
                             st.session_state.messages.append({
                                 "role": "assistant",
                                 "avatar": st.session_state.ai_icon,
-                                "content": f"⚠️ 描くのに失敗しちゃった…ポイントは戻したよ。エラー: {e}"
+                                "content": f"描けなかった…ポイントは戻したよ。({e})"
                             })
                         
                         if st.session_state.exp >= 20:
@@ -343,7 +339,7 @@ else:
                             st.session_state.messages.append({
                                 "role": "assistant",
                                 "avatar": st.session_state.ai_icon,
-                                "content": f"🎉 レベルが上がったよ！Lv.{st.session_state.level}になった！ポイント5ptプレゼント！"
+                                "content": f"レベルアップ！Lv.{st.session_state.level}になったよ！5ptプレゼント！"
                             })
                         
                         save_current_user_data()
@@ -352,10 +348,10 @@ else:
         st.markdown('<div style="background-color:#1a1a1a;padding:12px;text-align:center;border-radius:8px;color:#888;border:1px dashed #444;font-size:13px;margin-top:40px;">📢 サイドバー広告枠</div>', unsafe_allow_html=True)
 
     st.subheader(f"💬 {st.session_state.ai_name} とのトークルーム")
-    st.caption(f"現在の性格: **{st.session_state.ai_type}** ｜ ポイント: **{st.session_state.points} pt**")
+    st.caption(f"性格: **{st.session_state.ai_type}** ｜ ポイント: **{st.session_state.points} pt**")
     
     if st.session_state.learned_styles:
-        st.caption(f"🧠 記憶している絵柄: {', '.join(st.session_state.learned_styles)}")
+        st.caption(f"🧠 覚えた絵柄: {', '.join(st.session_state.learned_styles)}")
 
     for msg in st.session_state.messages:
         avatar = msg.get("avatar", st.session_state.user_icon if msg["role"] == "user" else st.session_state.ai_icon)
@@ -385,7 +381,7 @@ else:
                     st.session_state.messages.append({
                         "role": "assistant",
                         "avatar": st.session_state.ai_icon,
-                        "content": "🎉 レベル4になったよ！画像生成ができるようになった！おめでとうポイント80ptプレゼント！"
+                        "content": "🎉 レベル4になったよ！画像生成ができるようになった！80ptプレゼント！"
                     })
         else:
             if st.session_state.exp >= 20:
@@ -396,50 +392,31 @@ else:
                 st.session_state.messages.append({
                     "role": "assistant",
                     "avatar": st.session_state.ai_icon,
-                    "content": f"🎉 レベルが上がったよ！Lv.{st.session_state.level}になった！ポイント5ptプレゼント！"
+                    "content": f"🎉 レベルアップ！Lv.{st.session_state.level}！5ptプレゼント！"
                 })
 
         if leveled_up:
             st.balloons()
-            st.success(f"レベルアップ！ Lv.{st.session_state.level} になりました！")
+            st.success(f"レベルアップ！ Lv.{st.session_state.level}")
 
-        # ===== 強化したシステムプロンプト =====
-        base_personality = CHARACTER_PROMPTS.get(st.session_state.ai_type, CHARACTER_PROMPTS["中立"])
+        # ===== 短く自然なシステムプロンプト =====
+        base = CHARACTER_PROMPTS.get(st.session_state.ai_type, CHARACTER_PROMPTS["中立"])
         
-        if st.session_state.ai_gender == "おんなのこ":
-            gender_instruction = "あなたは女の子です。必ず女の子らしい可愛い口調で話してください。語尾は「〜だよ」「〜ね」「〜なの」「〜だよぉ」などを自然に使ってください。男っぽい言い方は禁止です。"
-        else:
-            gender_instruction = "あなたは男の子です。男の子らしい口調で話してください。"
-
+        gender_note = "女の子らしい可愛い口調で話して。" if st.session_state.ai_gender == "おんなのこ" else "男の子らしい口調で話して。"
+        
         if st.session_state.level < 4:
-            level_instruction = f"【重要】あなたはまだレベル{st.session_state.level}です。まだ絵を描く能力がありません。「描けるよ」「描いてあげる」などと絶対に言わないでください。"
+            level_note = f"まだレベル{st.session_state.level}。絵は描けない。絵を描く話はしないで。"
         else:
-            level_instruction = "あなたはレベル4以上なので、絵を描くことができます。"
+            level_note = "レベル4以上。絵を描ける。"
 
-        # 好みを聞くように強く指示
-        preference_instruction = """
-【最重要】あなたはユーザーの「絵の好み」を学ぶことが目的です。
-積極的に以下のことを聞いてください：
-- 好きなキャラクター
-- 好きなアニメ・漫画
-- 好きな絵柄（アニメ調、厚塗り、水彩など）
-- 好きな色や雰囲気
-- 描いてほしいもの
+        system_prompt = f"""あなたは「{st.session_state.ai_name}」。{base}
+{gender_note}
+{level_note}
+ユーザーの好きなキャラ・アニメ・絵柄を自然に聞いて、覚えよう。
+短く自然に会話して。"""
 
-食べ物や日常の雑談ではなく、絵やキャラに関する話を中心にしてください。
-"""
-
-        system_prompt = f"""{base_personality}
-
-{gender_instruction}
-{level_instruction}
-{preference_instruction}
-
-現在のあなたの名前は「{st.session_state.ai_name}」です。
-"""
-
-        # 履歴を直近12件に制限して速度改善
-        recent_messages = st.session_state.messages[-12:]
+        # 履歴を直近8件に制限
+        recent_messages = st.session_state.messages[-8:]
         api_messages = [{"role": "system", "content": system_prompt}]
         for msg in recent_messages:
             if "【お絵描きリクエスト】" not in msg.get("content", ""):
@@ -452,7 +429,8 @@ else:
                 with st.spinner("考え中..."):
                     completion = client.chat.completions.create(
                         model="grok-4.6",
-                        messages=api_messages
+                        messages=api_messages,
+                        max_tokens=300
                     )
                 reply = completion.choices[0].message.content
 
@@ -462,7 +440,7 @@ else:
                 "content": reply
             })
 
-            if len(st.session_state.messages) % 6 == 0:
+            if len(st.session_state.messages) % 8 == 0:
                 update_personality()
 
         except Exception as e:
@@ -474,7 +452,7 @@ else:
 
         if not st.session_state.is_premium and st.session_state.ad_count >= 10:
             st.session_state.ad_count = 0
-            st.warning("📢 動画広告の時間です（実際の広告は後で実装）")
+            st.warning("📢 動画広告の時間です")
 
         save_current_user_data()
         st.rerun()
