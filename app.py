@@ -7,10 +7,10 @@ from PIL import Image
 from openai import OpenAI
 from datetime import datetime
 
-st.set_page_config(page_title="AI育成お絵描きサイト", page_icon="🎨")
+st.set_page_config(page_title="AI育成お絵描きサイト", page_icon="🎨", layout="wide")
 
 # ======================
-# 設定・初期化
+# 設定
 # ======================
 USERS_FILE = "users_data.json"
 grok_key = os.environ.get("XAI_API_KEY", "")
@@ -32,10 +32,8 @@ CHARACTER_PROMPTS = {
     "中立": "あなたはこれからユーザーと一緒に育っていくAI絵師です。まだ性格が定まっていません。ユーザーの話し方や態度を観察しながら、少しずつ自分の性格を形成していきます。自然で親しみやすい口調で話してください。"
 }
 
-TARGET_EXP, TARGET_IMAGES = 5, 10
-
 # ======================
-# ユーティリティ関数
+# ユーティリティ
 # ======================
 def hash_password(password: str) -> str:
     return hashlib.sha256(password.encode()).hexdigest()
@@ -54,34 +52,32 @@ def save_users(users: dict):
         json.dump(users, f, ensure_ascii=False, indent=2)
 
 def save_current_user_data():
-    """現在のsession_stateをユーザーデータに保存"""
     if "username" not in st.session_state:
         return
     users = load_users()
     username = st.session_state.username
     if username in users:
         users[username]["data"] = {
-            "ai_name": st.session_state.ai_name,
-            "ai_gender": st.session_state.ai_gender,
-            "ai_type": st.session_state.ai_type,
-            "level": st.session_state.level,
-            "exp": st.session_state.exp,
-            "learned_styles": st.session_state.learned_styles,
-            "image_count": st.session_state.image_count,
-            "messages": st.session_state.messages[-40:],  # 直近40件だけ保存
+            "ai_name": st.session_state.get("ai_name"),
+            "ai_gender": st.session_state.get("ai_gender", "おんなのこ"),
+            "ai_type": st.session_state.get("ai_type", "中立"),
+            "level": st.session_state.get("level", 1),
+            "exp": st.session_state.get("exp", 0),
+            "learned_styles": st.session_state.get("learned_styles", []),
+            "image_count": st.session_state.get("image_count", 0),
+            "messages": st.session_state.get("messages", [])[-50:],
+            "points": st.session_state.get("points", 0),
+            "is_premium": st.session_state.get("is_premium", False),
+            "ad_count": st.session_state.get("ad_count", 0),
             "last_login": datetime.now().isoformat()
         }
         save_users(users)
 
 def update_personality():
-    """会話内容を見て性格を更新する（B方式）"""
-    if len(st.session_state.messages) < 4:
-        return  # 会話が少ないうちは変えない
-
-    # 直近の会話を抜粋
+    if len(st.session_state.messages) < 6:
+        return
     recent = st.session_state.messages[-8:]
     conversation_text = "\n".join([f"{m['role']}: {m['content']}" for m in recent if "【お絵描きリクエスト】" not in m.get("content", "")])
-
     prompt = f"""以下の会話を見て、AIの現在の性格として最も適切なものを1つだけ選んでください。
 選択肢: 甘えん坊, ツンデレ, ヤンデレ, ヤンキー, 姫, 王子, 明るいキャラ, 口数少ないキャラ, 中立
 
@@ -89,7 +85,6 @@ def update_personality():
 {conversation_text}
 
 回答は選択肢の中から単語だけで返してください。"""
-
     try:
         completion = client.chat.completions.create(
             model="grok-4.6",
@@ -99,14 +94,13 @@ def update_personality():
         new_type = completion.choices[0].message.content.strip()
         if new_type in CHARACTER_PROMPTS and new_type != st.session_state.ai_type:
             st.session_state.ai_type = new_type
-            # 変化を通知（任意）
             st.session_state.messages.append({
                 "role": "assistant",
                 "avatar": st.session_state.ai_icon,
                 "content": f"（……なんか、少し性格が変わった気がする……今は『{new_type}』寄りかも）"
             })
     except:
-        pass  # 失敗しても無視
+        pass
 
 # ======================
 # セッション初期化
@@ -120,6 +114,12 @@ if "username" not in st.session_state:
 # ログイン画面
 # ======================
 if not st.session_state.logged_in:
+    st.markdown("""
+    <div style="background-color: #222; padding: 12px; text-align: center; border-radius: 8px; color: #aaa; border: 1px dashed #555; margin-bottom: 20px; font-size: 14px;">
+    📢 ここにGoogleアドセンスなどのバナー広告を表示します
+    </div>
+    """, unsafe_allow_html=True)
+
     st.title("🎨 専属絵師AI 育成ルーム")
     st.markdown("### ログイン / 新規登録")
 
@@ -133,7 +133,6 @@ if not st.session_state.logged_in:
             if login_user in users and users[login_user]["password"] == hash_password(login_pass):
                 st.session_state.logged_in = True
                 st.session_state.username = login_user
-                # データ復元
                 data = users[login_user].get("data", {})
                 st.session_state.ai_name = data.get("ai_name")
                 st.session_state.ai_gender = data.get("ai_gender", "おんなのこ")
@@ -143,6 +142,9 @@ if not st.session_state.logged_in:
                 st.session_state.learned_styles = data.get("learned_styles", [])
                 st.session_state.image_count = data.get("image_count", 0)
                 st.session_state.messages = data.get("messages", [])
+                st.session_state.points = data.get("points", 0)
+                st.session_state.is_premium = data.get("is_premium", False)
+                st.session_state.ad_count = data.get("ad_count", 0)
                 st.session_state.user_icon = "👤"
                 st.session_state.ai_icon = "👧" if st.session_state.ai_gender == "おんなのこ" else "👦"
                 st.success("ログインしました！")
@@ -163,213 +165,137 @@ if not st.session_state.logged_in:
             else:
                 try:
                     users = load_users()
-                    
-                    # 既に存在チェックを外して強制登録
                     users[reg_user] = {
                         "password": hash_password(reg_pass),
                         "data": {}
                     }
                     save_users(users)
-                    
-                    st.success("登録が完了しました！ログインしてください")
+
+                    # 自動ログイン
+                    st.session_state.logged_in = True
+                    st.session_state.username = reg_user
+                    st.session_state.ai_name = None
+                    st.session_state.ai_gender = "おんなのこ"
+                    st.session_state.ai_type = "中立"
+                    st.session_state.level = 1
+                    st.session_state.exp = 0
+                    st.session_state.learned_styles = []
+                    st.session_state.image_count = 0
+                    st.session_state.messages = []
+                    st.session_state.points = 50          # 新規ボーナス
+                    st.session_state.is_premium = False
+                    st.session_state.ad_count = 0
+                    st.session_state.user_icon = "👤"
+                    st.session_state.ai_icon = "👧"
+
+                    st.success("登録完了！自動でログインしました（新規ボーナス50ポイント付与）")
                     st.rerun()
-                    
                 except Exception as e:
-                    st.error(f"登録に失敗しました。もう一度試してください。（{e}）")
+                    st.error(f"登録に失敗しました。（{e}）")
 
     st.stop()
+
 # ======================
-# メイン画面（ログイン後）
+# メイン画面
 # ======================
-# 広告枠
-st.markdown('<div style="background-color: #333333; padding: 10px; text-align: center; border-radius: 5px; color: #aaaaaa; border: 1px dashed #666666; margin-bottom: 20px;">📢 ここにGoogleアドセンスなどの【バナー広告】が表示されます</div>', unsafe_allow_html=True)
+# 最上部広告
+st.markdown("""
+<div style="background-color: #222; padding: 12px; text-align: center; border-radius: 8px; color: #aaa; border: 1px dashed #555; margin-bottom: 20px; font-size: 14px;">
+📢 ここにGoogleアドセンスなどのバナー広告を表示します
+</div>
+""", unsafe_allow_html=True)
 
 st.title("🎨 専属絵師AI 育成ルーム")
-st.markdown("### **いっぱい会話して自分好みの絵師AIを育てよう！**")
 st.caption("本物のAIがあなたの好みを学習し、世界に1つのイラストを生み出します。")
-st.write("---")
 
-# 初期登録（名前・性別のみ）
+# 初期設定（名前・性別）
 if st.session_state.ai_name is None:
     st.subheader("👶 AIのプロフィールを決めてね")
-    input_name = st.text_input("AIの名前を入力してください：", placeholder="例：めぐみん、アリス、レンなど")
+    input_name = st.text_input("AIの名前を入力してください：", placeholder="例：めぐみん、アリスなど")
     gender = st.radio("性別を選んでね：", ["おんなのこ", "おとこのこ"], horizontal=True)
 
-    if st.button("この設定で開始する！"):
-        if input_name.strip() != "":
-            st.session_state.ai_name = input_name
+    if st.button("この設定で開始する！", type="primary"):
+        if input_name.strip():
+            st.session_state.ai_name = input_name.strip()
             st.session_state.ai_gender = gender
-            st.session_state.ai_type = "中立"  # 最初は中立からスタート
+            st.session_state.ai_type = "中立"
             st.session_state.ai_icon = "👧" if gender == "おんなのこ" else "👦"
-            st.session_state.level = 1
-            st.session_state.exp = 0
-            st.session_state.learned_styles = []
-            st.session_state.image_count = 0
-            st.session_state.messages = []
             save_current_user_data()
             st.rerun()
 else:
     # サイドバー
     with st.sidebar:
         st.markdown(f"### 👤 {st.session_state.username}")
+        st.write(f"**ポイント:** {st.session_state.points} pt")
+        if st.session_state.is_premium:
+            st.success("月額会員")
+        else:
+            st.info("無料会員")
+
         if st.button("ログアウト"):
             save_current_user_data()
             st.session_state.logged_in = False
             st.session_state.username = None
             st.rerun()
 
-        st.markdown(f"### 📊 【 {st.session_state.ai_name} 】のステータス")
-        st.write(f"**現在の性格傾向:** {st.session_state.ai_type}")
-        st.write(f"**性別:** {st.session_state.ai_gender}")
-        st.markdown(f"**現在のレベル:** Lv.{st.session_state.level} / 999")
-
+        st.markdown("---")
+        st.markdown(f"### 📊 【{st.session_state.ai_name}】")
+        st.write(f"**性格傾向:** {st.session_state.ai_type}")
+        st.write(f"**レベル:** Lv.{st.session_state.level}")
+        
         if st.session_state.level < 4:
-            st.write(f"あと {TARGET_EXP - st.session_state.exp} 回でLvアップ")
-            st.progress(st.session_state.exp / TARGET_EXP)
-        elif st.session_state.level < 999:
-            st.write(f"画像あと {TARGET_IMAGES - st.session_state.image_count} 枚でLvアップ")
-            st.progress(st.session_state.image_count / TARGET_IMAGES)
+            st.write(f"次のレベルまであと {5 - st.session_state.exp} 回会話")
+            st.progress(st.session_state.exp / 5)
+        else:
+            need = 20
+            st.write(f"次のレベルまであと {need - st.session_state.exp} カウント")
+            st.progress(min(st.session_state.exp / need, 1.0))
 
-        st.write("---")
-        with st.expander("🖼️ チャットのアイコンを変更する", expanded=False):
-            user_file = st.file_uploader("👤 あなたのアイコン画像", type=["png", "jpg", "jpeg"], key="u_up")
-            if user_file:
-                st.session_state.user_icon = Image.open(user_file)
-            ai_file = st.file_uploader(f"🤖 AIのアイコン画像", type=["png", "jpg", "jpeg"], key="a_up")
-            if ai_file:
-                st.session_state.ai_icon = Image.open(ai_file)
+        st.markdown("---")
+        with st.expander("解放状況"):
+            st.markdown("""
+            - **Lv.1**：会話のみ
+            - **Lv.2**：AIが好みを聞き始める
+            - **Lv.3**：画像学習可能
+            - **Lv.4**：画像生成解放
+            """)
 
-        st.write("---")
-        with st.expander("🗺️ 解放予告一覧", expanded=False):
-            st.markdown('* **Lv.1**：会話のみ。\n* **Lv.2**：質問期。\n* **Lv.3**：画像でお勉強。\n* **Lv.4**：画像生成解放！')
+        # サイドバー広告
+        st.markdown("""
+        <div style="background-color: #1a1a1a; padding: 12px; text-align: center; border-radius: 8px; color: #888; border: 1px dashed #444; font-size: 13px; margin-top: 40px;">
+        📢 サイドバー広告枠
+        </div>
+        """, unsafe_allow_html=True)
 
-        if st.session_state.level == 3:
-            st.markdown("### 🖼️ 【画像学習モード】")
-            uploaded_file = st.file_uploader("写真から画像を選んでね", type=["png", "jpg", "jpeg"], key="s_up")
-            if uploaded_file and st.button("この画像を学習させる！"):
-                tag = random.choice(["アニメ調の可愛い絵柄", "淡い水彩画風の綺麗タッチ", "パステルカラーの柔らかい色使い"])
-                st.session_state.exp += 1
-                st.session_state.learned_styles.append(tag)
-                st.session_state.messages.append({
-                    "role": "assistant",
-                    "avatar": st.session_state.ai_icon,
-                    "content": f"🖼️ 『{tag}』みたいな絵柄が好きなんだね！覚えたよ！"
-                })
-                if st.session_state.exp >= TARGET_EXP:
-                    st.session_state.level = 4
-                    st.session_state.exp = 0
-                save_current_user_data()
-                st.rerun()
-
-        if st.session_state.level >= 4:
-            st.markdown("### 🎨 【本物のAIお絵描きモード】")
-            prompt_input = st.text_input("どんな絵を描く？", placeholder="例：可愛い魔法使いの女の子など")
-            if st.button("🎨 イラストを生成する！") and prompt_input.strip() != "":
-                st.session_state.image_count += 1
-                styles_text = ", ".join(st.session_state.learned_styles) if st.session_state.learned_styles else "beautiful anime style"
-                st.session_state.messages.append({
-                    "role": "user",
-                    "avatar": st.session_state.user_icon,
-                    "content": f"【お絵描きリクエスト】: {prompt_input}"
-                })
-
-                full_prompt = f"A high-quality master piece illustration of {prompt_input}, {styles_text}, vibrant colors, extremely detailed."
-
-                try:
-                    response = client.images.generate(
-                        model="grok-imagine-image-2.0",
-                        prompt=full_prompt,
-                        n=1,
-                        size="1024x1024"
-                    )
-                    image_url = response.data[0].url
-                    st.session_state.messages.append({
-                        "role": "assistant",
-                        "avatar": st.session_state.ai_icon,
-                        "content": f"🎨 好みの『{styles_text}』をたっぷり混ぜてお絵描きしたよ！『{prompt_input}』のイラストをどうぞ！",
-                        "image": image_url
-                    })
-                except Exception as e:
-                    st.session_state.messages.append({
-                        "role": "assistant",
-                        "avatar": st.session_state.ai_icon,
-                        "content": f"⚠️ お絵描き中にエラーが起きちゃいました。時間をおいてね: {e}"
-                    })
-
-                if st.session_state.image_count >= TARGET_IMAGES and st.session_state.level < 999:
-                    st.session_state.level += 1
-                    st.session_state.image_count = 0
-                save_current_user_data()
-                st.rerun()
-
-        st.write("---")
-        st.markdown('<div style="background-color: #222222; padding: 10px; text-align: center; border-radius: 5px; color: #888888; border: 1px dashed #444444; font-size: 12px; margin-top: 50px;">📢 ここに【サイドバー広告】<br>が表示されます</div>', unsafe_allow_html=True)
-
-    # メインチャット画面
+    # メインチャット
     st.subheader(f"💬 {st.session_state.ai_name} とのトークルーム")
-    st.caption(f"現在の性格傾向: **{st.session_state.ai_type}**")
-    if st.session_state.learned_styles:
-        st.caption(f"🧠 記憶している好み: " + ", ".join(st.session_state.learned_styles))
-    st.write("---")
+    st.caption(f"現在の性格: **{st.session_state.ai_type}** ｜ ポイント: **{st.session_state.points} pt**")
 
     for msg in st.session_state.messages:
-        current_avatar = msg.get("avatar", st.session_state.user_icon if msg["role"] == "user" else st.session_state.ai_icon)
-        with st.chat_message(msg["role"], avatar=current_avatar):
+        avatar = msg.get("avatar", st.session_state.user_icon if msg["role"] == "user" else st.session_state.ai_icon)
+        with st.chat_message(msg["role"], avatar=avatar):
             st.write(msg["content"])
             if "image" in msg:
                 st.image(msg["image"])
 
-    # チャット入力処理
-    if user_message := st.chat_input("AIにメッセージを送る..."):
+    if user_message := st.chat_input("メッセージを送る..."):
         st.session_state.messages.append({
             "role": "user",
             "avatar": st.session_state.user_icon,
             "content": user_message
         })
+
+        # 経験値・カウント処理
         st.session_state.exp += 1
+        st.session_state.ad_count += 1
 
-        # システムプロンプト（現在の性格を使用）
-        api_messages = [{"role": "system", "content": CHARACTER_PROMPTS.get(st.session_state.ai_type, CHARACTER_PROMPTS["中立"])}]
-        for msg in st.session_state.messages:
-            if "【お絵描きリクエスト】" not in msg.get("content", ""):
-                api_messages.append({"role": msg["role"], "content": msg["content"]})
-
-        try:
-            if not grok_key:
-                reply_text = "（サーバーの設定に XAI_API_KEY が登録されていないみたい…！管理画面から設定してね）"
-            else:
-                with st.spinner("考え中です…"):
-                    completion = client.chat.completions.create(
-                        model="grok-4.6",
-                        messages=api_messages
-                    )
-                if hasattr(completion, 'choices') and completion.choices:
-                    reply_text = completion.choices[0].message.content
-                else:
-                    reply_text = "（返事を生成できませんでした）"
-
-            st.session_state.messages.append({
-                "role": "assistant",
-                "avatar": st.session_state.ai_icon,
-                "content": reply_text
-            })
-
-            # 性格更新（一定間隔で実行）
-            if len(st.session_state.messages) % 6 == 0:  # 6メッセージごとに判定
-                update_personality()
-
-        except Exception as e:
-            error_reply = f"（エラー詳細：{type(e).__name__}: {e}）"
-            st.session_state.messages.append({
-                "role": "assistant",
-                "avatar": st.session_state.ai_icon,
-                "content": error_reply
-            })
-            st.error(f"APIエラー: {e}")
-
-        if st.session_state.level < 4 and st.session_state.exp >= TARGET_EXP:
-            st.session_state.level += 1
-            st.session_state.exp = 0
-
-        save_current_user_data()
-        st.rerun()
+        # レベルアップ判定
+        if st.session_state.level < 4:
+            if st.session_state.exp >= 5:
+                st.session_state.level += 1
+                st.session_state.exp = 0
+                if st.session_state.level == 4:
+                    st.session_state.points += 30  # Lv4ボーナス
+                    st.session_state.messages.append({
+                        "role": "assistant",
+                        "avatar": st.session_state.ai_icon
