@@ -24,7 +24,7 @@ CHARACTER_PROMPTS = {
     "王子": "あなたは気品あふれる王子様のような男の子です。ユーザーを優しくリードし、包み込むような甘い言葉をかけます。紳士的でスマートな口調で話してください。",
     "明るいキャラ": "あなたはいつも元気でポジティブな男の子です。ユーザーを『お前』や親しい名前で呼び、語尾は『〜じゃん！』『〜だぜ！』など、テンションが高くハツラツとした口調で話してください。",
     "口数少ないキャラ": "あなたは物静かでクールな男の子です。無駄なことは喋らず、一言一言を短文で返します。少し冷たく見えますが、心の中ではユーザーを信頼しているトーンにしてください。",
-    "中立": "あなたはこれからユーザーと一緒に育っていくAI絵師です。まだ性格が定まっていません。ユーザーの話し方や態度を観察しながら、少しずつ自分の性格を形成していきます。自然で親しみやすい口調で話してください。"
+    "中立": "あなたはこれからユーザーと一緒に育っていくAI絵師です。まだ性格が定まっていません。ユーザーの話し方や態度を観察しながら、少しずつ自分の性格を形成していきます。"
 }
 
 def hash_password(password):
@@ -161,7 +161,7 @@ if not st.session_state.logged_in:
                     st.session_state.learned_styles = []
                     st.session_state.image_count = 0
                     st.session_state.messages = []
-                    st.session_state.points = 0          # ← 新規登録ボーナスなし
+                    st.session_state.points = 0
                     st.session_state.is_premium = False
                     st.session_state.ad_count = 0
                     st.session_state.user_icon = "👤"
@@ -255,7 +255,7 @@ else:
                 st.session_state.level += 1
                 st.session_state.exp = 0
                 if st.session_state.level == 4:
-                    st.session_state.points += 80  # ← レベル4到達ボーナス80pt
+                    st.session_state.points += 80
                     st.session_state.messages.append({
                         "role": "assistant",
                         "avatar": st.session_state.ai_icon,
@@ -272,7 +272,29 @@ else:
                     "content": f"レベルが上がったよ！Lv.{st.session_state.level}になった！ポイント5ptプレゼント！"
                 })
 
-        api_messages = [{"role": "system", "content": CHARACTER_PROMPTS.get(st.session_state.ai_type, CHARACTER_PROMPTS["中立"])}]
+        # ===== システムプロンプト（性別・レベル対応） =====
+        base_personality = CHARACTER_PROMPTS.get(st.session_state.ai_type, CHARACTER_PROMPTS["中立"])
+        
+        if st.session_state.ai_gender == "おんなのこ":
+            gender_instruction = "あなたは女の子です。必ず女の子らしい可愛い口調で話してください。語尾は「〜だよ」「〜ね」「〜なの」「〜だよぉ」などを自然に使ってください。男っぽい言い方は禁止です。"
+        else:
+            gender_instruction = "あなたは男の子です。男の子らしい口調で話してください。"
+
+        if st.session_state.level < 4:
+            level_instruction = f"【重要】あなたはまだレベル{st.session_state.level}です。まだ絵を描く能力がありません。「描けるよ」「描いてあげる」「何描こうか」などと絶対に言わないでください。「まだレベルが低いから絵は描けないよ。もっと会話してレベルを上げてね」というニュアンスで答えてください。"
+        else:
+            level_instruction = "あなたはレベル4以上なので、絵を描くことができます。"
+
+        system_prompt = f"""{base_personality}
+
+{gender_instruction}
+{level_instruction}
+
+現在のあなたの名前は「{st.session_state.ai_name}」です。
+ユーザーとの会話を通じて、少しずつ性格や好みを学んでいってください。
+"""
+
+        api_messages = [{"role": "system", "content": system_prompt}]
         for msg in st.session_state.messages:
             if "【お絵描きリクエスト】" not in msg.get("content", ""):
                 api_messages.append({"role": msg["role"], "content": msg["content"]})
