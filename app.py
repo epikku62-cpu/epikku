@@ -4,8 +4,9 @@ import json
 import hashlib
 import base64
 import requests
+import stripe
 from openai import OpenAI
-from datetime import datetime
+from datetime import datetime, timedelta
 from PIL import Image
 import io
 
@@ -13,6 +14,12 @@ st.set_page_config(page_title="AI育成お絵描きサイト", page_icon="🎨",
 
 USERS_FILE = "users_data.json"
 grok_key = os.environ.get("XAI_API_KEY", "")
+STRIPE_SECRET_KEY = os.environ.get("STRIPE_SECRET_KEY", "")
+STRIPE_PRICE_ID = os.environ.get("STRIPE_PRICE_ID", "")
+SITE_URL = os.environ.get("SITE_URL", "https://aistation.onrender.com")
+
+if STRIPE_SECRET_KEY:
+    stripe.api_key = STRIPE_SECRET_KEY
 
 client = OpenAI(
     api_key=grok_key,
@@ -64,6 +71,8 @@ def save_current_user_data():
             "messages": st.session_state.get("messages", [])[-40:],
             "points": st.session_state.get("points", 0),
             "is_premium": st.session_state.get("is_premium", False),
+            "premium_until": st.session_state.get("premium_until"),
+            "paid_sessions": st.session_state.get("paid_sessions", []),
             "ad_count": st.session_state.get("ad_count", 0),
             "generated_history": st.session_state.get("generated_history", [])[-30:],
             "user_icon": st.session_state.get("user_icon", "👤"),
@@ -75,6 +84,39 @@ def save_current_user_data():
 def needed_exp(level):
     return 5 if level < 5 else 20
 
+def size_extra_cost(w, h):
+    area = w * h
+    if area <= 1024 * 1024:
+        return 0
+    if area <= 1280 * 1280:
+        return 5
+    if area <= 1536 * 1536:
+        return 10
+    return 15
+
+def is_premium_active():
+    if not st.session_state.get("is_premium"):
+        return False
+    until = st.session_state.get("premium_until")
+    if not until:
+        return False
+    try:
+        return datetime.fromisoformat(until) > datetime.now()
+    except:
+        return False
+
+def activate_premium(session_id):
+    paid = st.session_state.get("paid_sessions", [])
+    if session_id in paid:
+        return False
+    paid.append(session_id)
+    st.session_state.paid_sessions = paid[-50:]
+    st.session_state.is_premium = True
+    st.session_state.premium_until = (datetime.now() + timedelta(days=30)).isoformat()
+    st.session_state.points += 1500
+    save_current_user_data()
+    return True
+
 def file_to_data_uri(uploaded_file):
     raw = uploaded_file.getvalue()
     mime = uploaded_file.type or "image/png"
@@ -84,10 +126,7 @@ def ratio_from_size(w, h):
     if w <= 0 or h <= 0:
         return "1:1"
     r = w / h
-    choices = {
-        "1:1": 1.0, "3:4": 0.75, "4:3": 1.33, "9:16": 0.5625, "16:9": 1.777,
-        "2:3": 0.666, "3:2": 1.5
-    }
+    choices = {"1:1": 1.0, "3:4": 0.75, "4:3": 1.33, "9:16": 0.5625, "16:9": 1.777, "2:3": 0.666, "3:2": 1.5}
     return min(choices.items(), key=lambda x: abs(x[1] - r))[0]
 
 def generate_text_image(prompt, aspect_ratio, resolution, quality):
@@ -138,20 +177,14 @@ def update_personality():
         new_type = completion.choices[0].message.content.strip()
         if new_type in CHARACTER_PROMPTS and new_type != st.session_state.ai_type:
             st.session_state.ai_type = new_type
-            st.session_state.messages.append({
-                "role": "assistant",
-                "content": f"（話し方のタイプが『{new_type}』寄りになったよ）"
-            })
+            st.session_state.messages.append({"role": "assistant", "content": f"（話し方のタイプが『{new_type}』寄りになったよ）"})
     except:
         pass
 
 def learn_one_from_recent_chat():
     recent = [m for m in st.session_state.messages[-12:] if m.get("content") and not str(m["content"]).startswith("🎉")]
     conversation_text = "\n".join([f"{m['role']}: {m['content']}" for m in recent])
-    prompt = f"""直近の会話から、ユーザーの絵の好みを1つだけ抽出して短い日本語1文にしてください。
-好きなキャラ、絵柄、雰囲気、色、ポーズなど。見つからなければ「まだ具体的な好みは少ない」と返して。
-会話:
-{conversation_text}"""
+    prompt = f"直近の会話からユーザーの絵の好みを1つだけ短い日本語1文で。なければ『まだ具体的な好みは少ない』。\n{conversation_text}"
     try:
         completion = client.chat.completions.create(
             model="grok-4-fast",
@@ -187,6 +220,18 @@ def analyze_image_style(uploaded_file):
     except Exception as e:
         return f"分析失敗（{e}）"
 
+query = st.query_params
+if st.session_state.get("logged_in") and query.get("checkout") == "success" and query.get("session_id"):
+    session_id = query.get("session_id")
+    try:
+        checkout = stripe.checkout.Session.retrieve(session_id)
+        if checkout.get("client_reference_id") == st.session_state.get("username") and checkout.get("status") in ["complete", "paid"]:
+            if activate_premium(session_id):
+                st.success("決済が完了しました。月額会員になり、1500ptを付与しました。")
+        st.query_params.clear()
+    except Exception as e:
+        st.error(f"決済確認に失敗しました: {e}")
+
 if "logged_in" not in st.session_state:
     st.session_state.logged_in = False
 if "username" not in st.session_state:
@@ -205,6 +250,12 @@ if "learned_preferences" not in st.session_state:
     st.session_state.learned_preferences = []
 if "learned_styles" not in st.session_state:
     st.session_state.learned_styles = []
+if "is_premium" not in st.session_state:
+    st.session_state.is_premium = False
+if "premium_until" not in st.session_state:
+    st.session_state.premium_until = None
+if "paid_sessions" not in st.session_state:
+    st.session_state.paid_sessions = []
 
 if not st.session_state.logged_in:
     st.title("🎨 専属絵師AI 育成ルーム")
@@ -221,8 +272,9 @@ if not st.session_state.logged_in:
                 defaults = {
                     "ai_name": None, "ai_gender": "おんなのこ", "ai_type": "中立",
                     "level": 1, "exp": 0, "learned_styles": [], "learned_preferences": [],
-                    "messages": [], "points": 0, "is_premium": False, "ad_count": 0,
-                    "generated_history": [], "user_icon": "👤", "ai_icon": "👤"
+                    "messages": [], "points": 0, "is_premium": False, "premium_until": None,
+                    "paid_sessions": [], "ad_count": 0, "generated_history": [],
+                    "user_icon": "👤", "ai_icon": "👤"
                 }
                 for k, v in defaults.items():
                     st.session_state[k] = data.get(k, v)
@@ -255,6 +307,8 @@ if not st.session_state.logged_in:
                 st.session_state.messages = []
                 st.session_state.points = 0
                 st.session_state.is_premium = False
+                st.session_state.premium_until = None
+                st.session_state.paid_sessions = []
                 st.session_state.ad_count = 0
                 st.session_state.generated_history = []
                 st.session_state.user_icon = "👤"
@@ -273,19 +327,21 @@ if st.session_state.ai_name is None:
         st.session_state.ai_gender = gender
         st.session_state.messages = [{
             "role": "assistant",
-            "content": f"はじめまして！わたしは「{input_name.strip()}」だよ。\nまだ何も知らないから、好きなキャラや絵柄を教えて育てていこうね。"
+            "content": f"はじめまして！わたしは「{input_name.strip()}」だよ。好きなキャラや絵柄を教えて育てていこうね。"
         }]
         save_current_user_data()
         st.rerun()
 else:
     need = needed_exp(st.session_state.level)
+    premium = is_premium_active()
     with st.sidebar:
         st.markdown(f"### {st.session_state.username}")
+        st.write(f"**プラン:** {'月額会員' if premium else '無料'}")
         st.write(f"**ポイント:** {st.session_state.points} pt")
         st.write(f"**レベル:** Lv.{st.session_state.level}")
         st.write(f"**タイプ:** {st.session_state.ai_type}")
         st.progress(min(st.session_state.exp / need, 1.0))
-        st.caption(f"次のレベルまで 会話 {need - st.session_state.exp} 回")
+        st.caption(f"次のレベルまで 会話 {max(need - st.session_state.exp, 0)} 回")
         st.info("会話でレベルが上がると、直近の会話から好みを1つ学習します。")
         st.markdown("---")
         if st.button("💬 トークルーム", use_container_width=True):
@@ -296,6 +352,8 @@ else:
             st.session_state.current_mode = "generate"; st.rerun()
         if st.button("📂 生成履歴", use_container_width=True):
             st.session_state.current_mode = "history"; st.rerun()
+        if st.button("💎 月額プラン", use_container_width=True):
+            st.session_state.current_mode = "plan"; st.rerun()
         if st.button("ログアウト"):
             save_current_user_data()
             st.session_state.logged_in = False
@@ -305,8 +363,7 @@ else:
 
     if mode == "chat":
         st.subheader(f"💬 {st.session_state.ai_name}")
-        st.caption("会話するほど好みを覚えます。レベル4までは5回、レベル5からは20回でレベルアップ。上がるたびに会話から1つ学習します。")
-
+        st.caption("会話するほど好みを覚えます。レベル4までは5回、レベル5からは20回でレベルアップ。")
         for msg in st.session_state.messages:
             if msg["role"] == "user":
                 with st.chat_message("user", avatar=st.session_state.user_icon):
@@ -318,71 +375,53 @@ else:
                     st.write(msg["content"])
                     if "image" in msg:
                         st.image(msg["image"], use_container_width=True)
-
         if user_message := st.chat_input("メッセージを送る..."):
             st.session_state.messages.append({"role": "user", "content": user_message})
             st.session_state.exp += 1
             st.session_state.ad_count += 1
-
-            leveled = False
             need_now = needed_exp(st.session_state.level)
             if st.session_state.exp >= need_now:
                 st.session_state.level += 1
                 st.session_state.exp = 0
-                leveled = True
                 if st.session_state.level == 4:
                     st.session_state.points += 80
                 elif st.session_state.level > 4:
                     st.session_state.points += 5
-
                 learned = learn_one_from_recent_chat()
                 unlock = ""
                 if st.session_state.level == 3:
                     unlock = "学習モードが解放されました。"
                 elif st.session_state.level == 4:
                     unlock = "画像生成モードが解放されました。80ptプレゼント！"
-                notice = f"🎉 レベルアップ！ Lv.{st.session_state.level} になりました。\n今回覚えたこと：{learned}"
+                notice = f"🎉 レベルアップ！ Lv.{st.session_state.level}\n今回覚えたこと：{learned}"
                 if unlock:
                     notice += f"\n{unlock}"
                 st.session_state.messages.append({"role": "assistant", "content": notice})
-
             gender_note = "女の子らしい口調で。" if st.session_state.ai_gender == "おんなのこ" else "男の子らしい口調で。"
             base = CHARACTER_PROMPTS.get(st.session_state.ai_type, CHARACTER_PROMPTS["中立"])
             prefs = " / ".join(st.session_state.learned_preferences[-3:]) if st.session_state.learned_preferences else "まだ少ない"
-            system_prompt = f"""あなたは「{st.session_state.ai_name}」。{base}{gender_note}
-ユーザーの好きなキャラ・絵柄・雰囲気を自然に聞く。
-同じ質問を繰り返さない。すでに聞いたことは覚えている前提。
-短く会話する。絵を今すぐ描けるとは言わない。レベル4未満ならまだ生成できない。
-既に覚えている好み: {prefs}"""
-
-            api_messages = [{"role": "system", "content": system_prompt}]
-            for m in st.session_state.messages[-8:]:
-                api_messages.append({"role": m["role"], "content": m["content"]})
+            system_prompt = f"あなたは「{st.session_state.ai_name}」。{base}{gender_note}好きなキャラ・絵柄を自然に聞く。同じ質問を繰り返さない。短く。既に覚えている好み: {prefs}"
+            api_messages = [{"role": "system", "content": system_prompt}] + [
+                {"role": m["role"], "content": m["content"]} for m in st.session_state.messages[-8:]
+            ]
             try:
                 with st.spinner("考え中..."):
-                    completion = client.chat.completions.create(
-                        model="grok-4-fast",
-                        messages=api_messages,
-                        max_tokens=220
-                    )
+                    completion = client.chat.completions.create(model="grok-4-fast", messages=api_messages, max_tokens=220)
                 st.session_state.messages.append({"role": "assistant", "content": completion.choices[0].message.content})
                 if len(st.session_state.messages) % 6 == 0:
                     update_personality()
             except Exception as e:
                 st.session_state.messages.append({"role": "assistant", "content": f"（エラー: {e}）"})
-
-            if not st.session_state.is_premium and st.session_state.ad_count >= 10:
+            if not is_premium_active() and st.session_state.ad_count >= 10:
                 st.session_state.ad_count = 0
                 st.warning("📢 動画広告の時間です")
-
             save_current_user_data()
             st.rerun()
 
     elif mode == "learn":
         st.subheader("🖼️ 学習モード")
-        st.info("会話でレベルアップすると、その時の会話から好みを1つ覚えます。画像学習は別です。")
         if st.session_state.level < 3:
-            st.warning("画像学習はレベル3で解放されます。会話学習は今も溜まっていきます。")
+            st.warning("画像学習はレベル3で解放されます。")
         else:
             uploaded_file = st.file_uploader("画像をアップロード", type=["png", "jpg", "jpeg"], key="learn_upload")
             if uploaded_file:
@@ -393,28 +432,22 @@ else:
                         st.session_state.learned_styles.append(desc)
                     save_current_user_data()
                     st.success(desc)
-
         st.markdown("### 画像から覚えた絵柄")
         if st.session_state.learned_styles:
             for i, s in enumerate(st.session_state.learned_styles, 1):
                 st.write(f"{i}. {s}")
             if st.button("画像の学習をリセット"):
-                st.session_state.learned_styles = []
-                save_current_user_data()
-                st.rerun()
+                st.session_state.learned_styles = []; save_current_user_data(); st.rerun()
         else:
             st.write("まだありません")
-
         st.markdown("### 会話から覚えた好み")
         if st.session_state.learned_preferences:
             for i, p in enumerate(st.session_state.learned_preferences, 1):
                 st.write(f"{i}. {p}")
             if st.button("会話の学習をリセット"):
-                st.session_state.learned_preferences = []
-                save_current_user_data()
-                st.rerun()
+                st.session_state.learned_preferences = []; save_current_user_data(); st.rerun()
         else:
-            st.write("まだありません。会話してレベルアップすると増えます。")
+            st.write("まだありません")
 
     elif mode == "generate":
         st.subheader("🎨 画像生成モード")
@@ -429,17 +462,13 @@ else:
                 gen_h = st.number_input("高さ", min_value=512, max_value=2048, value=1024, step=64)
             aspect_ratio = ratio_from_size(gen_w, gen_h)
             resolution = "2k" if max(gen_w, gen_h) >= 1536 else "1k"
-
+            extra_size = size_extra_cost(gen_w, gen_h)
             st.markdown("### 画質")
             quality_choice = st.radio("画質", ["低画質（10pt）", "高画質（20pt）"])
             if "低画質" in quality_choice:
-                quality = "low"
-                cost = 10
+                quality = "low"; cost = 10
             else:
-                quality = "medium"
-                cost = 20
-                resolution = "2k"
-
+                quality = "medium"; cost = 20; resolution = "2k"
             st.markdown("### 参照")
             col_a, col_b = st.columns(2)
             with col_a:
@@ -452,11 +481,11 @@ else:
                 char_strength = st.slider("キャラの強度", 1, 10, 8, key="char_str")
                 if char_ref:
                     st.image(char_ref, width=180)
-
-            prompt_input = st.text_area("何を描く？", height=100, placeholder="例：座っている、腕を上げる")
-            cost += 5 * sum(1 for x in [style_ref, char_ref] if x)
+            prompt_input = st.text_area("何を描く？", height=100)
+            ref_cost = 5 * sum(1 for x in [style_ref, char_ref] if x)
+            cost = cost + extra_size + ref_cost
+            st.write(f"サイズ加算: {extra_size}pt ／ 参照加算: {ref_cost}pt")
             st.write(f"**消費ポイント: {cost} pt**（所持: {st.session_state.points} pt）")
-
             if st.button("🎨 イラストを生成する", type="primary", use_container_width=True):
                 if not prompt_input.strip():
                     st.warning("何を描くかを入力してください")
@@ -464,7 +493,6 @@ else:
                     st.error("ポイントが足りません")
                 else:
                     st.session_state.points -= cost
-                    st.session_state.exp += 2
                     try:
                         with st.spinner("生成中..."):
                             refs = []
@@ -474,14 +502,10 @@ else:
                             ]
                             if style_ref:
                                 refs.append(file_to_data_uri(style_ref))
-                                extra.append(
-                                    f"STYLE REFERENCE strength {style_strength}/10: use ONLY art style. Do not copy the reference character or pose."
-                                )
+                                extra.append(f"STYLE REFERENCE strength {style_strength}/10: use ONLY art style.")
                             if char_ref:
                                 refs.append(file_to_data_uri(char_ref))
-                                extra.append(
-                                    f"CHARACTER REFERENCE strength {char_strength}/10: keep the same character, change pose by the prompt. Do not copy the original pose exactly."
-                                )
+                                extra.append(f"CHARACTER REFERENCE strength {char_strength}/10: keep the same character, change pose by the prompt.")
                             if st.session_state.learned_styles:
                                 extra.append("Learned image styles: " + " / ".join(st.session_state.learned_styles[-3:]))
                             if st.session_state.learned_preferences:
@@ -501,7 +525,6 @@ else:
                     except Exception as e:
                         st.session_state.points += cost
                         st.error(f"失敗しました。ポイントは戻しました。\n{e}")
-
             if st.session_state.last_generated_image:
                 st.markdown("---")
                 st.subheader("最新の生成結果")
@@ -516,3 +539,27 @@ else:
             for item in st.session_state.generated_history:
                 with st.expander(f"{item['time']} - {item['prompt'][:40]}"):
                     st.image(item["url"], use_container_width=True)
+
+    elif mode == "plan":
+        st.subheader("💎 月額プラン")
+        st.write("**月額 980円**")
+        st.write("- 毎月 1500ポイント付与")
+        st.write("- 会話中の動画広告なし")
+        st.write("- 有効期限は登録から30日")
+        if is_premium_active():
+            st.success(f"月額会員です。期限: {str(st.session_state.premium_until)[:10]}")
+        else:
+            if not STRIPE_SECRET_KEY or not STRIPE_PRICE_ID:
+                st.error("決済設定がまだ完了していません。")
+            elif st.button("980円で月額登録する", type="primary"):
+                try:
+                    session = stripe.checkout.Session.create(
+                        mode="subscription",
+                        line_items=[{"price": STRIPE_PRICE_ID, "quantity": 1}],
+                        success_url=f"{SITE_URL}/?checkout=success&session_id={{CHECKOUT_SESSION_ID}}",
+                        cancel_url=f"{SITE_URL}/?checkout=cancel",
+                        client_reference_id=st.session_state.username,
+                    )
+                    st.markdown(f"[決済ページへ進む]({session.url})")
+                except Exception as e:
+                    st.error(f"決済ページを作れませんでした: {e}")
