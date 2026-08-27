@@ -61,7 +61,6 @@ def save_current_user_data():
             "exp": st.session_state.get("exp", 0),
             "learned_styles": st.session_state.get("learned_styles", []),
             "learned_preferences": st.session_state.get("learned_preferences", []),
-            "image_count": st.session_state.get("image_count", 0),
             "messages": st.session_state.get("messages", [])[-40:],
             "points": st.session_state.get("points", 0),
             "is_premium": st.session_state.get("is_premium", False),
@@ -73,22 +72,30 @@ def save_current_user_data():
         }
         save_users(users)
 
+def needed_exp(level):
+    return 5 if level < 5 else 20
+
 def file_to_data_uri(uploaded_file):
     raw = uploaded_file.getvalue()
     mime = uploaded_file.type or "image/png"
-    b64 = base64.b64encode(raw).decode("utf-8")
-    return f"data:{mime};base64,{b64}"
+    return f"data:{mime};base64,{base64.b64encode(raw).decode('utf-8')}"
+
+def ratio_from_size(w, h):
+    if w <= 0 or h <= 0:
+        return "1:1"
+    r = w / h
+    choices = {
+        "1:1": 1.0, "3:4": 0.75, "4:3": 1.33, "9:16": 0.5625, "16:9": 1.777,
+        "2:3": 0.666, "3:2": 1.5
+    }
+    return min(choices.items(), key=lambda x: abs(x[1] - r))[0]
 
 def generate_text_image(prompt, aspect_ratio, resolution, quality):
     response = client.images.generate(
         model="grok-imagine-image-2.0",
         prompt=prompt,
         n=1,
-        extra_body={
-            "aspect_ratio": aspect_ratio,
-            "resolution": resolution,
-            "quality": quality
-        }
+        extra_body={"aspect_ratio": aspect_ratio, "resolution": resolution, "quality": quality}
     )
     return response.data[0].url
 
@@ -105,13 +112,9 @@ def generate_with_references(prompt, aspect_ratio, resolution, quality, image_ur
         payload["image"] = {"url": image_uris[0], "type": "image_url"}
     else:
         payload["images"] = [{"url": uri, "type": "image_url"} for uri in image_uris[:3]]
-
     res = requests.post(
         "https://api.x.ai/v1/images/edits",
-        headers={
-            "Authorization": f"Bearer {grok_key}",
-            "Content-Type": "application/json",
-        },
+        headers={"Authorization": f"Bearer {grok_key}", "Content-Type": "application/json"},
         json=payload,
         timeout=180
     )
@@ -121,11 +124,11 @@ def generate_with_references(prompt, aspect_ratio, resolution, quality, image_ur
     return data["data"][0]["url"]
 
 def update_personality():
-    if len(st.session_state.messages) < 8:
+    if len(st.session_state.messages) < 6:
         return
-    recent = st.session_state.messages[-6:]
+    recent = [m for m in st.session_state.messages[-8:] if m.get("content") and not str(m["content"]).startswith("🎉")]
     conversation_text = "\n".join([f"{m['role']}: {m['content']}" for m in recent])
-    prompt = f"会話を見て性格を1つ選んで。選択肢: 甘えん坊, ツンデレ, ヤンデレ, ヤンキー, 姫, 王子, 明るいキャラ, 口数少ないキャラ, 中立\n\n{conversation_text}\n単語だけ。"
+    prompt = f"会話を見て性格を1つだけ選ぶ。選択肢: 甘えん坊, ツンデレ, ヤンデレ, ヤンキー, 姫, 王子, 明るいキャラ, 口数少ないキャラ, 中立\n\n{conversation_text}\n単語だけ。"
     try:
         completion = client.chat.completions.create(
             model="grok-4-fast",
@@ -135,15 +138,20 @@ def update_personality():
         new_type = completion.choices[0].message.content.strip()
         if new_type in CHARACTER_PROMPTS and new_type != st.session_state.ai_type:
             st.session_state.ai_type = new_type
+            st.session_state.messages.append({
+                "role": "assistant",
+                "content": f"（話し方のタイプが『{new_type}』寄りになったよ）"
+            })
     except:
         pass
 
-def extract_preferences_from_conversation():
-    if len(st.session_state.messages) < 6:
-        return
-    recent = st.session_state.messages[-10:]
+def learn_one_from_recent_chat():
+    recent = [m for m in st.session_state.messages[-12:] if m.get("content") and not str(m["content"]).startswith("🎉")]
     conversation_text = "\n".join([f"{m['role']}: {m['content']}" for m in recent])
-    prompt = f"会話から絵やキャラの好みだけ短いフレーズで。なければなし。\n{conversation_text}"
+    prompt = f"""直近の会話から、ユーザーの絵の好みを1つだけ抽出して短い日本語1文にしてください。
+好きなキャラ、絵柄、雰囲気、色、ポーズなど。見つからなければ「まだ具体的な好みは少ない」と返して。
+会話:
+{conversation_text}"""
     try:
         completion = client.chat.completions.create(
             model="grok-4-fast",
@@ -151,11 +159,12 @@ def extract_preferences_from_conversation():
             max_tokens=80
         )
         result = completion.choices[0].message.content.strip()
-        if result and result != "なし" and result not in st.session_state.learned_preferences:
+        if result and result not in st.session_state.learned_preferences:
             st.session_state.learned_preferences.append(result)
-            st.session_state.learned_preferences = st.session_state.learned_preferences[-15:]
-    except:
-        pass
+            st.session_state.learned_preferences = st.session_state.learned_preferences[-20:]
+        return result
+    except Exception as e:
+        return f"学習に失敗（{e}）"
 
 def analyze_image_style(uploaded_file):
     try:
@@ -194,6 +203,8 @@ if "last_generated_image" not in st.session_state:
     st.session_state.last_generated_image = None
 if "learned_preferences" not in st.session_state:
     st.session_state.learned_preferences = []
+if "learned_styles" not in st.session_state:
+    st.session_state.learned_styles = []
 
 if not st.session_state.logged_in:
     st.title("🎨 専属絵師AI 育成ルーム")
@@ -210,8 +221,8 @@ if not st.session_state.logged_in:
                 defaults = {
                     "ai_name": None, "ai_gender": "おんなのこ", "ai_type": "中立",
                     "level": 1, "exp": 0, "learned_styles": [], "learned_preferences": [],
-                    "image_count": 0, "messages": [], "points": 0, "is_premium": False,
-                    "ad_count": 0, "generated_history": [], "user_icon": "👤", "ai_icon": "👤"
+                    "messages": [], "points": 0, "is_premium": False, "ad_count": 0,
+                    "generated_history": [], "user_icon": "👤", "ai_icon": "👤"
                 }
                 for k, v in defaults.items():
                     st.session_state[k] = data.get(k, v)
@@ -262,15 +273,21 @@ if st.session_state.ai_name is None:
         st.session_state.ai_gender = gender
         st.session_state.messages = [{
             "role": "assistant",
-            "content": f"はじめまして！わたしは「{input_name.strip()}」だよ。好きな絵柄やキャラを教えてね。"
+            "content": f"はじめまして！わたしは「{input_name.strip()}」だよ。\nまだ何も知らないから、好きなキャラや絵柄を教えて育てていこうね。"
         }]
         save_current_user_data()
         st.rerun()
 else:
+    need = needed_exp(st.session_state.level)
     with st.sidebar:
-        st.write(f"**{st.session_state.username}**")
-        st.write(f"ポイント: {st.session_state.points} pt")
-        st.write(f"レベル: Lv.{st.session_state.level}")
+        st.markdown(f"### {st.session_state.username}")
+        st.write(f"**ポイント:** {st.session_state.points} pt")
+        st.write(f"**レベル:** Lv.{st.session_state.level}")
+        st.write(f"**タイプ:** {st.session_state.ai_type}")
+        st.progress(min(st.session_state.exp / need, 1.0))
+        st.caption(f"次のレベルまで 会話 {need - st.session_state.exp} 回")
+        st.info("会話でレベルが上がると、直近の会話から好みを1つ学習します。")
+        st.markdown("---")
         if st.button("💬 トークルーム", use_container_width=True):
             st.session_state.current_mode = "chat"; st.rerun()
         if st.button("🖼️ 学習モード", use_container_width=True):
@@ -288,69 +305,142 @@ else:
 
     if mode == "chat":
         st.subheader(f"💬 {st.session_state.ai_name}")
+        st.caption("会話するほど好みを覚えます。レベル4までは5回、レベル5からは20回でレベルアップ。上がるたびに会話から1つ学習します。")
+
         for msg in st.session_state.messages:
-            role = msg["role"]
-            with st.chat_message(role, avatar=st.session_state.user_icon if role == "user" else st.session_state.ai_icon):
-                st.write(msg["content"])
-                if "image" in msg:
-                    st.image(msg["image"], use_container_width=True)
+            if msg["role"] == "user":
+                with st.chat_message("user", avatar=st.session_state.user_icon):
+                    st.markdown(f"**{st.session_state.username}**")
+                    st.write(msg["content"])
+            else:
+                with st.chat_message("assistant", avatar=st.session_state.ai_icon):
+                    st.markdown(f"**{st.session_state.ai_name}｜Lv.{st.session_state.level}**")
+                    st.write(msg["content"])
+                    if "image" in msg:
+                        st.image(msg["image"], use_container_width=True)
+
         if user_message := st.chat_input("メッセージを送る..."):
             st.session_state.messages.append({"role": "user", "content": user_message})
             st.session_state.exp += 1
-            if st.session_state.level < 4 and st.session_state.exp >= 5:
+            st.session_state.ad_count += 1
+
+            leveled = False
+            need_now = needed_exp(st.session_state.level)
+            if st.session_state.exp >= need_now:
                 st.session_state.level += 1
                 st.session_state.exp = 0
+                leveled = True
                 if st.session_state.level == 4:
                     st.session_state.points += 80
-            elif st.session_state.level >= 4 and st.session_state.exp >= 20:
-                st.session_state.level += 1
-                st.session_state.exp = 0
-                st.session_state.points += 5
+                elif st.session_state.level > 4:
+                    st.session_state.points += 5
+
+                learned = learn_one_from_recent_chat()
+                unlock = ""
+                if st.session_state.level == 3:
+                    unlock = "学習モードが解放されました。"
+                elif st.session_state.level == 4:
+                    unlock = "画像生成モードが解放されました。80ptプレゼント！"
+                notice = f"🎉 レベルアップ！ Lv.{st.session_state.level} になりました。\n今回覚えたこと：{learned}"
+                if unlock:
+                    notice += f"\n{unlock}"
+                st.session_state.messages.append({"role": "assistant", "content": notice})
+
+            gender_note = "女の子らしい口調で。" if st.session_state.ai_gender == "おんなのこ" else "男の子らしい口調で。"
             base = CHARACTER_PROMPTS.get(st.session_state.ai_type, CHARACTER_PROMPTS["中立"])
-            system_prompt = f"あなたは{st.session_state.ai_name}。{base}同じ質問を繰り返さない。短く自然に。"
-            api_messages = [{"role": "system", "content": system_prompt}] + [
-                {"role": m["role"], "content": m["content"]} for m in st.session_state.messages[-8:]
-            ]
+            prefs = " / ".join(st.session_state.learned_preferences[-3:]) if st.session_state.learned_preferences else "まだ少ない"
+            system_prompt = f"""あなたは「{st.session_state.ai_name}」。{base}{gender_note}
+ユーザーの好きなキャラ・絵柄・雰囲気を自然に聞く。
+同じ質問を繰り返さない。すでに聞いたことは覚えている前提。
+短く会話する。絵を今すぐ描けるとは言わない。レベル4未満ならまだ生成できない。
+既に覚えている好み: {prefs}"""
+
+            api_messages = [{"role": "system", "content": system_prompt}]
+            for m in st.session_state.messages[-8:]:
+                api_messages.append({"role": m["role"], "content": m["content"]})
             try:
                 with st.spinner("考え中..."):
-                    completion = client.chat.completions.create(model="grok-4-fast", messages=api_messages, max_tokens=220)
+                    completion = client.chat.completions.create(
+                        model="grok-4-fast",
+                        messages=api_messages,
+                        max_tokens=220
+                    )
                 st.session_state.messages.append({"role": "assistant", "content": completion.choices[0].message.content})
-                if len(st.session_state.messages) % 5 == 0:
-                    extract_preferences_from_conversation()
+                if len(st.session_state.messages) % 6 == 0:
                     update_personality()
             except Exception as e:
                 st.session_state.messages.append({"role": "assistant", "content": f"（エラー: {e}）"})
+
+            if not st.session_state.is_premium and st.session_state.ad_count >= 10:
+                st.session_state.ad_count = 0
+                st.warning("📢 動画広告の時間です")
+
             save_current_user_data()
             st.rerun()
 
     elif mode == "learn":
         st.subheader("🖼️ 学習モード")
+        st.info("会話でレベルアップすると、その時の会話から好みを1つ覚えます。画像学習は別です。")
         if st.session_state.level < 3:
-            st.warning("レベル3で解放")
+            st.warning("画像学習はレベル3で解放されます。会話学習は今も溜まっていきます。")
         else:
             uploaded_file = st.file_uploader("画像をアップロード", type=["png", "jpg", "jpeg"], key="learn_upload")
-            if uploaded_file and st.button("この画像を学習させる", type="primary"):
-                desc = analyze_image_style(uploaded_file)
-                if desc not in st.session_state.learned_styles:
-                    st.session_state.learned_styles.append(desc)
-                save_current_user_data()
-                st.success(desc)
-            for s in st.session_state.learned_styles:
-                st.write(s)
-            if st.button("学習リセット"):
+            if uploaded_file:
+                st.image(uploaded_file, width=280)
+                if st.button("この画像を学習させる", type="primary"):
+                    desc = analyze_image_style(uploaded_file)
+                    if desc not in st.session_state.learned_styles:
+                        st.session_state.learned_styles.append(desc)
+                    save_current_user_data()
+                    st.success(desc)
+
+        st.markdown("### 画像から覚えた絵柄")
+        if st.session_state.learned_styles:
+            for i, s in enumerate(st.session_state.learned_styles, 1):
+                st.write(f"{i}. {s}")
+            if st.button("画像の学習をリセット"):
                 st.session_state.learned_styles = []
+                save_current_user_data()
+                st.rerun()
+        else:
+            st.write("まだありません")
+
+        st.markdown("### 会話から覚えた好み")
+        if st.session_state.learned_preferences:
+            for i, p in enumerate(st.session_state.learned_preferences, 1):
+                st.write(f"{i}. {p}")
+            if st.button("会話の学習をリセット"):
                 st.session_state.learned_preferences = []
                 save_current_user_data()
                 st.rerun()
+        else:
+            st.write("まだありません。会話してレベルアップすると増えます。")
 
     elif mode == "generate":
         st.subheader("🎨 画像生成モード")
         if st.session_state.level < 4:
-            st.warning("レベル4で解放")
+            st.warning("レベル4で解放されます。")
         else:
-            prompt_input = st.text_area("何を描く？（キャラ名、ポーズ、状況など）", height=100, placeholder="例：座っている、腕を上げる、別の服")
+            st.markdown("### サイズ")
+            c1, c2 = st.columns(2)
+            with c1:
+                gen_w = st.number_input("幅", min_value=512, max_value=2048, value=1024, step=64)
+            with c2:
+                gen_h = st.number_input("高さ", min_value=512, max_value=2048, value=1024, step=64)
+            aspect_ratio = ratio_from_size(gen_w, gen_h)
+            resolution = "2k" if max(gen_w, gen_h) >= 1536 else "1k"
 
-            st.markdown("### 参照画像")
+            st.markdown("### 画質")
+            quality_choice = st.radio("画質", ["低画質（10pt）", "高画質（20pt）"])
+            if "低画質" in quality_choice:
+                quality = "low"
+                cost = 10
+            else:
+                quality = "medium"
+                cost = 20
+                resolution = "2k"
+
+            st.markdown("### 参照")
             col_a, col_b = st.columns(2)
             with col_a:
                 style_ref = st.file_uploader("絵柄参照", type=["png", "jpg", "jpeg"], key="style_ref")
@@ -363,35 +453,8 @@ else:
                 if char_ref:
                     st.image(char_ref, width=180)
 
-            quality_choice = st.radio("画質", ["低画質（10pt）", "高画質（20pt）"])
-            size_category = st.radio("サイズ", ["スマホサイズ", "PCサイズ", "ポスターサイズ"])
-            aspect = st.radio("構図", ["正方形", "縦長", "横長"], horizontal=True)
-
-            aspect_map = {"正方形": "1:1", "縦長": "9:16", "横長": "16:9"}
-            aspect_ratio = aspect_map[aspect]
-            if size_category == "PCサイズ" and aspect == "縦長":
-                aspect_ratio = "3:4"
-            elif size_category == "PCサイズ" and aspect == "横長":
-                aspect_ratio = "4:3"
-
-            if "低画質" in quality_choice:
-                quality = "low"
-                resolution = "1k"
-                cost = 10
-            else:
-                quality = "medium"
-                resolution = "2k"
-                cost = 20
-
-            if size_category == "PCサイズ":
-                cost += 5
-            elif size_category == "ポスターサイズ":
-                cost += 10
-                resolution = "2k"
-
-            ref_count = sum(1 for x in [style_ref, char_ref] if x)
-            cost += ref_count * 5
-
+            prompt_input = st.text_area("何を描く？", height=100, placeholder="例：座っている、腕を上げる")
+            cost += 5 * sum(1 for x in [style_ref, char_ref] if x)
             st.write(f"**消費ポイント: {cost} pt**（所持: {st.session_state.points} pt）")
 
             if st.button("🎨 イラストを生成する", type="primary", use_container_width=True):
@@ -405,53 +468,34 @@ else:
                     try:
                         with st.spinner("生成中..."):
                             refs = []
-                            extra = []
-                            extra.append("The user text is a DRAWING INSTRUCTION, not text to write on the image.")
-                            extra.append("Do not render letters, captions, watermarks, or names onto the image.")
-
+                            extra = [
+                                "The user text is a DRAWING INSTRUCTION, not text to write on the image.",
+                                "Do not render letters, captions, watermarks, or names onto the image."
+                            ]
                             if style_ref:
                                 refs.append(file_to_data_uri(style_ref))
                                 extra.append(
-                                    f"STYLE REFERENCE strength {style_strength}/10: "
-                                    "Use ONLY the linework, coloring, shading and overall art style of the style reference image. "
-                                    "Do NOT copy the character, face, outfit, pose or composition from the style reference."
+                                    f"STYLE REFERENCE strength {style_strength}/10: use ONLY art style. Do not copy the reference character or pose."
                                 )
                             if char_ref:
                                 refs.append(file_to_data_uri(char_ref))
                                 extra.append(
-                                    f"CHARACTER REFERENCE strength {char_strength}/10: "
-                                    "Keep the same character identity from the character reference (face, hair, body type, outfit features). "
-                                    "Change pose, camera and composition according to the user instruction. "
-                                    "Do NOT copy the original pose or background exactly."
+                                    f"CHARACTER REFERENCE strength {char_strength}/10: keep the same character, change pose by the prompt. Do not copy the original pose exactly."
                                 )
-
                             if st.session_state.learned_styles:
-                                extra.append("Also keep learned styles: " + " / ".join(st.session_state.learned_styles[-2:]))
+                                extra.append("Learned image styles: " + " / ".join(st.session_state.learned_styles[-3:]))
                             if st.session_state.learned_preferences:
-                                extra.append("User preferences: " + " / ".join(st.session_state.learned_preferences[-2:]))
-
+                                extra.append("Learned chat preferences: " + " / ".join(st.session_state.learned_preferences[-3:]))
                             full_prompt = f"Draw this: {prompt_input}\n" + "\n".join(extra)
-
                             if refs:
                                 image_url = generate_with_references(full_prompt, aspect_ratio, resolution, quality, refs)
                             else:
                                 image_url = generate_text_image(full_prompt, aspect_ratio, resolution, quality)
-
-                        st.session_state.last_generated_image = {
-                            "url": image_url,
-                            "prompt": prompt_input,
-                            "cost": cost
-                        }
+                        st.session_state.last_generated_image = {"url": image_url, "prompt": prompt_input, "cost": cost}
                         st.session_state.generated_history.insert(0, {
-                            "prompt": prompt_input,
-                            "url": image_url,
-                            "cost": cost,
+                            "prompt": prompt_input, "url": image_url, "cost": cost,
                             "time": datetime.now().strftime("%Y-%m-%d %H:%M")
                         })
-                        if st.session_state.exp >= 20:
-                            st.session_state.level += 1
-                            st.session_state.exp = 0
-                            st.session_state.points += 5
                         save_current_user_data()
                         st.rerun()
                     except Exception as e:
@@ -466,6 +510,9 @@ else:
 
     elif mode == "history":
         st.subheader("📂 生成履歴")
-        for item in st.session_state.generated_history:
-            with st.expander(f"{item['time']} - {item['prompt'][:40]}"):
-                st.image(item["url"], use_container_width=True)
+        if not st.session_state.generated_history:
+            st.write("まだありません")
+        else:
+            for item in st.session_state.generated_history:
+                with st.expander(f"{item['time']} - {item['prompt'][:40]}"):
+                    st.image(item["url"], use_container_width=True)
