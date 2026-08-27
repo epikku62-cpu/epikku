@@ -4,11 +4,15 @@ import json
 import hashlib
 import base64
 import requests
-import stripe
 from openai import OpenAI
 from datetime import datetime, timedelta
 from PIL import Image
 import io
+
+try:
+    import stripe
+except ImportError:
+    stripe = None
 
 st.set_page_config(page_title="AI育成お絵描きサイト", page_icon="🎨", layout="wide")
 
@@ -18,7 +22,7 @@ STRIPE_SECRET_KEY = os.environ.get("STRIPE_SECRET_KEY", "")
 STRIPE_PRICE_ID = os.environ.get("STRIPE_PRICE_ID", "")
 SITE_URL = os.environ.get("SITE_URL", "https://aistation.onrender.com")
 
-if STRIPE_SECRET_KEY:
+if stripe is not None and STRIPE_SECRET_KEY:
     stripe.api_key = STRIPE_SECRET_KEY
 
 client = OpenAI(
@@ -220,18 +224,6 @@ def analyze_image_style(uploaded_file):
     except Exception as e:
         return f"分析失敗（{e}）"
 
-query = st.query_params
-if st.session_state.get("logged_in") and query.get("checkout") == "success" and query.get("session_id"):
-    session_id = query.get("session_id")
-    try:
-        checkout = stripe.checkout.Session.retrieve(session_id)
-        if checkout.get("client_reference_id") == st.session_state.get("username") and checkout.get("status") in ["complete", "paid"]:
-            if activate_premium(session_id):
-                st.success("決済が完了しました。月額会員になり、1500ptを付与しました。")
-        st.query_params.clear()
-    except Exception as e:
-        st.error(f"決済確認に失敗しました: {e}")
-
 if "logged_in" not in st.session_state:
     st.session_state.logged_in = False
 if "username" not in st.session_state:
@@ -256,6 +248,18 @@ if "premium_until" not in st.session_state:
     st.session_state.premium_until = None
 if "paid_sessions" not in st.session_state:
     st.session_state.paid_sessions = []
+
+query = st.query_params
+if st.session_state.get("logged_in") and stripe is not None and query.get("checkout") == "success" and query.get("session_id"):
+    session_id = query.get("session_id")
+    try:
+        checkout = stripe.checkout.Session.retrieve(session_id)
+        if checkout.get("client_reference_id") == st.session_state.get("username") and checkout.get("status") in ["complete", "paid"]:
+            if activate_premium(session_id):
+                st.success("決済が完了しました。月額会員になり、1500ptを付与しました。")
+        st.query_params.clear()
+    except Exception as e:
+        st.error(f"決済確認に失敗しました: {e}")
 
 if not st.session_state.logged_in:
     st.title("🎨 専属絵師AI 育成ルーム")
@@ -549,7 +553,9 @@ else:
         if is_premium_active():
             st.success(f"月額会員です。期限: {str(st.session_state.premium_until)[:10]}")
         else:
-            if not STRIPE_SECRET_KEY or not STRIPE_PRICE_ID:
+            if stripe is None:
+                st.error("決済部品の準備中です。少し待ってから開き直してください。")
+            elif not STRIPE_SECRET_KEY or not STRIPE_PRICE_ID:
                 st.error("決済設定がまだ完了していません。")
             elif st.button("980円で月額登録する", type="primary"):
                 try:
