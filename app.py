@@ -79,24 +79,26 @@ def file_to_data_uri(uploaded_file):
     b64 = base64.b64encode(raw).decode("utf-8")
     return f"data:{mime};base64,{b64}"
 
-def generate_text_image(prompt, model_name, aspect_ratio, resolution):
+def generate_text_image(prompt, aspect_ratio, resolution, quality):
     response = client.images.generate(
-        model=model_name,
+        model="grok-imagine-image-2.0",
         prompt=prompt,
         n=1,
         extra_body={
             "aspect_ratio": aspect_ratio,
-            "resolution": resolution
+            "resolution": resolution,
+            "quality": quality
         }
     )
     return response.data[0].url
 
-def generate_with_references(prompt, model_name, aspect_ratio, resolution, image_uris):
+def generate_with_references(prompt, aspect_ratio, resolution, quality, image_uris):
     payload = {
-        "model": model_name,
+        "model": "grok-imagine-image-2.0",
         "prompt": prompt,
         "aspect_ratio": aspect_ratio,
         "resolution": resolution,
+        "quality": quality,
         "response_format": "url"
     }
     if len(image_uris) == 1:
@@ -361,7 +363,7 @@ else:
                 if char_ref:
                     st.image(char_ref, width=180)
 
-            quality = st.radio("画質", ["低画質（10pt / 1K）", "高画質（20pt / 2K）"])
+            quality_choice = st.radio("画質", ["低画質（10pt）", "高画質（20pt）"])
             size_category = st.radio("サイズ", ["スマホサイズ", "PCサイズ", "ポスターサイズ"])
             aspect = st.radio("構図", ["正方形", "縦長", "横長"], horizontal=True)
 
@@ -372,26 +374,24 @@ else:
             elif size_category == "PCサイズ" and aspect == "横長":
                 aspect_ratio = "4:3"
 
-            if "低画質" in quality:
-                model_name = "grok-imagine-image"
+            if "低画質" in quality_choice:
+                quality = "low"
                 resolution = "1k"
                 cost = 10
-                res_text = "1K"
             else:
-                model_name = "grok-imagine-image-quality"
+                quality = "medium"
                 resolution = "2k"
                 cost = 20
-                res_text = "2K"
+
             if size_category == "PCサイズ":
                 cost += 5
             elif size_category == "ポスターサイズ":
                 cost += 10
                 resolution = "2k"
-                res_text = "2K"
+
             ref_count = sum(1 for x in [style_ref, char_ref] if x)
             cost += ref_count * 5
 
-            st.info(f"{model_name} / {resolution} / {aspect_ratio}")
             st.write(f"**消費ポイント: {cost} pt**（所持: {st.session_state.points} pt）")
 
             if st.button("🎨 イラストを生成する", type="primary", use_container_width=True):
@@ -406,7 +406,6 @@ else:
                         with st.spinner("生成中..."):
                             refs = []
                             extra = []
-
                             extra.append("The user text is a DRAWING INSTRUCTION, not text to write on the image.")
                             extra.append("Do not render letters, captions, watermarks, or names onto the image.")
 
@@ -434,22 +433,20 @@ else:
                             full_prompt = f"Draw this: {prompt_input}\n" + "\n".join(extra)
 
                             if refs:
-                                image_url = generate_with_references(full_prompt, model_name, aspect_ratio, resolution, refs)
+                                image_url = generate_with_references(full_prompt, aspect_ratio, resolution, quality, refs)
                             else:
-                                image_url = generate_text_image(full_prompt, model_name, aspect_ratio, resolution)
+                                image_url = generate_text_image(full_prompt, aspect_ratio, resolution, quality)
 
                         st.session_state.last_generated_image = {
                             "url": image_url,
                             "prompt": prompt_input,
-                            "cost": cost,
-                            "resolution": f"{res_text} / {aspect_ratio}"
+                            "cost": cost
                         }
                         st.session_state.generated_history.insert(0, {
                             "prompt": prompt_input,
                             "url": image_url,
                             "cost": cost,
-                            "time": datetime.now().strftime("%Y-%m-%d %H:%M"),
-                            "resolution": f"{res_text} / {aspect_ratio}"
+                            "time": datetime.now().strftime("%Y-%m-%d %H:%M")
                         })
                         if st.session_state.exp >= 20:
                             st.session_state.level += 1
