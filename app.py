@@ -22,6 +22,13 @@ STRIPE_SECRET_KEY = os.environ.get("STRIPE_SECRET_KEY", "")
 STRIPE_PRICE_ID = os.environ.get("STRIPE_PRICE_ID", "")
 SITE_URL = os.environ.get("SITE_URL", "https://aistation.onrender.com")
 
+POINT_PACKS = {
+    "300": {"yen": 300, "points": 300, "label": "300ポイント / 300円"},
+    "900": {"yen": 900, "points": 900, "label": "900ポイント / 900円"},
+    "1500": {"yen": 1500, "points": 1500, "label": "1500ポイント / 1500円"},
+    "3000": {"yen": 3000, "points": 3000, "label": "3000ポイント / 3000円"},
+}
+
 if stripe is not None and STRIPE_SECRET_KEY:
     stripe.api_key = STRIPE_SECRET_KEY
 
@@ -76,7 +83,11 @@ def save_current_user_data():
             "points": st.session_state.get("points", 0),
             "is_premium": st.session_state.get("is_premium", False),
             "premium_until": st.session_state.get("premium_until"),
+            "premium_started": st.session_state.get("premium_started"),
+            "last_free_grant": st.session_state.get("last_free_grant"),
+            "free_gen_left": st.session_state.get("free_gen_left", 0),
             "paid_sessions": st.session_state.get("paid_sessions", []),
+            "stripe_subscription_id": st.session_state.get("stripe_subscription_id"),
             "ad_count": st.session_state.get("ad_count", 0),
             "generated_history": st.session_state.get("generated_history", [])[-30:],
             "user_icon": st.session_state.get("user_icon", "👤"),
@@ -98,28 +109,86 @@ def size_extra_cost(w, h):
         return 10
     return 15
 
+def parse_dt(value):
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except:
+        return None
+
 def is_premium_active():
     if not st.session_state.get("is_premium"):
         return False
-    until = st.session_state.get("premium_until")
-    if not until:
+    until = parse_dt(st.session_state.get("premium_until"))
+    if until and until <= datetime.now():
         return False
-    try:
-        return datetime.fromisoformat(until) > datetime.now()
-    except:
-        return False
+    return True
 
-def activate_premium(session_id):
+def cancel_premium():
+    sub_id = st.session_state.get("stripe_subscription_id")
+    if stripe is not None and sub_id:
+        try:
+            stripe.Subscription.delete(sub_id)
+        except Exception:
+            try:
+                stripe.Subscription.cancel(sub_id)
+            except Exception:
+                pass
+    st.session_state.is_premium = False
+    st.session_state.premium_until = datetime.now().isoformat()
+    st.session_state.stripe_subscription_id = None
+    save_current_user_data()
+
+def activate_premium(session_id, subscription_id=None):
+    paid = st.session_state.get("paid_sessions", [])
+    if session_id in paid:
+        return False
+    paid.append(session_id)
+    now = datetime.now()
+    st.session_state.paid_sessions = paid[-50:]
+    st.session_state.is_premium = True
+    st.session_state.premium_started = now.isoformat()
+    st.session_state.premium_until = (now + timedelta(days=30)).isoformat()
+    st.session_state.last_free_grant = now.isoformat()
+    st.session_state.points += 1500
+    st.session_state.free_gen_left = 100
+    if subscription_id:
+        st.session_state.stripe_subscription_id = subscription_id
+    save_current_user_data()
+    return True
+
+def activate_points(session_id, points):
     paid = st.session_state.get("paid_sessions", [])
     if session_id in paid:
         return False
     paid.append(session_id)
     st.session_state.paid_sessions = paid[-50:]
-    st.session_state.is_premium = True
-    st.session_state.premium_until = (datetime.now() + timedelta(days=30)).isoformat()
-    st.session_state.points += 1500
+    st.session_state.points += int(points)
     save_current_user_data()
     return True
+
+def grant_free_gens_if_needed():
+    if not is_premium_active():
+        return
+    now = datetime.now()
+    last = parse_dt(st.session_state.get("last_free_grant"))
+    if last is None:
+        st.session_state.last_free_grant = now.isoformat()
+        st.session_state.free_gen_left = 100
+        if not st.session_state.get("premium_started"):
+            st.session_state.premium_started = now.isoformat()
+        save_current_user_data()
+        return
+    renewed = False
+    while last + timedelta(days=30) <= now:
+        last = last + timedelta(days=30)
+        st.session_state.free_gen_left = 100
+        renewed = True
+    if renewed:
+        st.session_state.last_free_grant = last.isoformat()
+        st.session_state.premium_until = (now + timedelta(days=30)).isoformat()
+        save_current_user_data()
 
 def file_to_data_uri(uploaded_file):
     raw = uploaded_file.getvalue()
@@ -246,17 +315,31 @@ if "is_premium" not in st.session_state:
     st.session_state.is_premium = False
 if "premium_until" not in st.session_state:
     st.session_state.premium_until = None
+if "premium_started" not in st.session_state:
+    st.session_state.premium_started = None
+if "last_free_grant" not in st.session_state:
+    st.session_state.last_free_grant = None
 if "paid_sessions" not in st.session_state:
     st.session_state.paid_sessions = []
+if "free_gen_left" not in st.session_state:
+    st.session_state.free_gen_left = 0
+if "stripe_subscription_id" not in st.session_state:
+    st.session_state.stripe_subscription_id = None
 
 query = st.query_params
-if st.session_state.get("logged_in") and stripe is not None and query.get("checkout") == "success" and query.get("session_id"):
+if st.session_state.get("logged_in") and stripe is not None and query.get("session_id"):
     session_id = query.get("session_id")
     try:
         checkout = stripe.checkout.Session.retrieve(session_id)
         if checkout.get("client_reference_id") == st.session_state.get("username") and checkout.get("status") in ["complete", "paid"]:
-            if activate_premium(session_id):
-                st.success("決済が完了しました。月額会員になり、1500ptを付与しました。")
+            kind = (checkout.get("metadata") or {}).get("kind", "premium")
+            if kind == "points":
+                pts = int((checkout.get("metadata") or {}).get("points", "0"))
+                if activate_points(session_id, pts):
+                    st.success(f"ポイント購入完了。{pts}pt を付与しました。")
+            else:
+                if activate_premium(session_id, checkout.get("subscription")):
+                    st.success("月額会員になりました。1500pt と画像生成100回無料を付与しました。")
         st.query_params.clear()
     except Exception as e:
         st.error(f"決済確認に失敗しました: {e}")
@@ -277,8 +360,10 @@ if not st.session_state.logged_in:
                     "ai_name": None, "ai_gender": "おんなのこ", "ai_type": "中立",
                     "level": 1, "exp": 0, "learned_styles": [], "learned_preferences": [],
                     "messages": [], "points": 0, "is_premium": False, "premium_until": None,
+                    "premium_started": None, "last_free_grant": None,
                     "paid_sessions": [], "ad_count": 0, "generated_history": [],
-                    "user_icon": "👤", "ai_icon": "👤"
+                    "user_icon": "👤", "ai_icon": "👤", "free_gen_left": 0,
+                    "stripe_subscription_id": None
                 }
                 for k, v in defaults.items():
                     st.session_state[k] = data.get(k, v)
@@ -312,14 +397,21 @@ if not st.session_state.logged_in:
                 st.session_state.points = 0
                 st.session_state.is_premium = False
                 st.session_state.premium_until = None
+                st.session_state.premium_started = None
+                st.session_state.last_free_grant = None
                 st.session_state.paid_sessions = []
                 st.session_state.ad_count = 0
                 st.session_state.generated_history = []
                 st.session_state.user_icon = "👤"
                 st.session_state.ai_icon = "👤"
+                st.session_state.free_gen_left = 0
+                st.session_state.stripe_subscription_id = None
                 st.session_state.current_mode = "chat"
                 st.rerun()
     st.stop()
+
+if st.session_state.get("logged_in"):
+    grant_free_gens_if_needed()
 
 st.title("🎨 専属絵師AI 育成ルーム")
 
@@ -342,11 +434,12 @@ else:
         st.markdown(f"### {st.session_state.username}")
         st.write(f"**プラン:** {'月額会員' if premium else '無料'}")
         st.write(f"**ポイント:** {st.session_state.points} pt")
+        if premium:
+            st.write(f"**無料生成残:** {st.session_state.get('free_gen_left', 0)} / 100")
         st.write(f"**レベル:** Lv.{st.session_state.level}")
         st.write(f"**タイプ:** {st.session_state.ai_type}")
         st.progress(min(st.session_state.exp / need, 1.0))
         st.caption(f"次のレベルまで 会話 {max(need - st.session_state.exp, 0)} 回")
-        st.info("会話でレベルが上がると、直近の会話から好みを1つ学習します。")
         st.markdown("---")
         if st.button("💬 トークルーム", use_container_width=True):
             st.session_state.current_mode = "chat"; st.rerun()
@@ -358,6 +451,8 @@ else:
             st.session_state.current_mode = "history"; st.rerun()
         if st.button("💎 月額プラン", use_container_width=True):
             st.session_state.current_mode = "plan"; st.rerun()
+        if st.button("🪙 ポイント購入", use_container_width=True):
+            st.session_state.current_mode = "shop"; st.rerun()
         if st.button("ログアウト"):
             save_current_user_data()
             st.session_state.logged_in = False
@@ -367,7 +462,6 @@ else:
 
     if mode == "chat":
         st.subheader(f"💬 {st.session_state.ai_name}")
-        st.caption("会話するほど好みを覚えます。レベル4までは5回、レベル5からは20回でレベルアップ。")
         for msg in st.session_state.messages:
             if msg["role"] == "user":
                 with st.chat_message("user", avatar=st.session_state.user_icon):
@@ -473,6 +567,11 @@ else:
                 quality = "low"; cost = 10
             else:
                 quality = "medium"; cost = 20; resolution = "2k"
+            used_free = False
+            if is_premium_active() and st.session_state.get("free_gen_left", 0) > 0:
+                cost = 0
+                used_free = True
+                st.info(f"月額特典：無料生成を使います（残り {st.session_state.free_gen_left} / 100）")
             st.markdown("### 参照")
             col_a, col_b = st.columns(2)
             with col_a:
@@ -487,7 +586,10 @@ else:
                     st.image(char_ref, width=180)
             prompt_input = st.text_area("何を描く？", height=100)
             ref_cost = 5 * sum(1 for x in [style_ref, char_ref] if x)
-            cost = cost + extra_size + ref_cost
+            if used_free:
+                cost = extra_size + ref_cost
+            else:
+                cost = cost + extra_size + ref_cost
             st.write(f"サイズ加算: {extra_size}pt ／ 参照加算: {ref_cost}pt")
             st.write(f"**消費ポイント: {cost} pt**（所持: {st.session_state.points} pt）")
             if st.button("🎨 イラストを生成する", type="primary", use_container_width=True):
@@ -519,6 +621,8 @@ else:
                                 image_url = generate_with_references(full_prompt, aspect_ratio, resolution, quality, refs)
                             else:
                                 image_url = generate_text_image(full_prompt, aspect_ratio, resolution, quality)
+                        if used_free:
+                            st.session_state.free_gen_left = max(st.session_state.free_gen_left - 1, 0)
                         st.session_state.last_generated_image = {"url": image_url, "prompt": prompt_input, "cost": cost}
                         st.session_state.generated_history.insert(0, {
                             "prompt": prompt_input, "url": image_url, "cost": cost,
@@ -547,16 +651,19 @@ else:
     elif mode == "plan":
         st.subheader("💎 月額プラン")
         st.write("**月額 980円**")
-        st.write("- 毎月 1500ポイント付与")
-        st.write("- 会話中の動画広告なし")
-        st.write("- 有効期限は登録から30日")
+        st.write("- 登録時に 1500ポイント付与")
+        st.write("- 毎月 画像生成 100回無料")
+        st.write("- 広告除去")
         if is_premium_active():
             st.success(f"月額会員です。期限: {str(st.session_state.premium_until)[:10]}")
+            st.write(f"無料生成の残り: {st.session_state.get('free_gen_left', 0)} / 100")
+            if st.button("月額を解約する"):
+                cancel_premium()
+                st.warning("解約しました。これ以降の無料回数の更新はありません。")
+                st.rerun()
         else:
-            if stripe is None:
-                st.error("決済部品の準備中です。少し待ってから開き直してください。")
-            elif not STRIPE_SECRET_KEY or not STRIPE_PRICE_ID:
-                st.error("決済設定がまだ完了していません。")
+            if stripe is None or not STRIPE_SECRET_KEY or not STRIPE_PRICE_ID:
+                st.error("決済設定を確認してください。")
             elif st.button("980円で月額登録する", type="primary"):
                 try:
                     session = stripe.checkout.Session.create(
@@ -565,7 +672,36 @@ else:
                         success_url=f"{SITE_URL}/?checkout=success&session_id={{CHECKOUT_SESSION_ID}}",
                         cancel_url=f"{SITE_URL}/?checkout=cancel",
                         client_reference_id=st.session_state.username,
+                        metadata={"kind": "premium", "username": st.session_state.username},
                     )
                     st.markdown(f"[決済ページへ進む]({session.url})")
                 except Exception as e:
                     st.error(f"決済ページを作れませんでした: {e}")
+
+    elif mode == "shop":
+        st.subheader("🪙 ポイント購入")
+        st.write("1ポイント = 1円")
+        pack_key = st.radio("購入するパック", list(POINT_PACKS.keys()), format_func=lambda k: POINT_PACKS[k]["label"])
+        pack = POINT_PACKS[pack_key]
+        if stripe is None or not STRIPE_SECRET_KEY:
+            st.error("決済設定を確認してください。")
+        elif st.button(f"{pack['yen']}円で {pack['points']}pt 買う", type="primary"):
+            try:
+                session = stripe.checkout.Session.create(
+                    mode="payment",
+                    line_items=[{
+                        "price_data": {
+                            "currency": "jpy",
+                            "product_data": {"name": f"{pack['points']}ポイント"},
+                            "unit_amount": pack["yen"],
+                        },
+                        "quantity": 1,
+                    }],
+                    success_url=f"{SITE_URL}/?checkout=points&session_id={{CHECKOUT_SESSION_ID}}",
+                    cancel_url=f"{SITE_URL}/?checkout=cancel",
+                    client_reference_id=st.session_state.username,
+                    metadata={"kind": "points", "username": st.session_state.username, "points": str(pack["points"])},
+                )
+                st.markdown(f"[決済ページへ進む]({session.url})")
+            except Exception as e:
+                st.error(f"決済ページを作れませんでした: {e}")
