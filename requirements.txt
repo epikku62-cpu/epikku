@@ -1,4 +1,5 @@
-openai==1.58.1
-streamlit==1.40.1
-Pillow
-
+streamlit
+openai
+pillow
+requests
+stripe
