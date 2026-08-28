@@ -1,28 +1,33 @@
 import streamlit as st
 import os
-import json
-import hashlib
+import uuid
 import base64
 import requests
-import uuid
 from io import BytesIO
 from datetime import datetime
 from openai import OpenAI
 from PIL import Image, ImageDraw, ImageFont
 
-st.set_page_config(page_title="4コマ工房", page_icon="漫画", layout="wide")
+st.set_page_config(page_title="4コマ工房", page_icon="🎨", layout="wide")
 
-USERS_FILE = "users_data.json"
+PANEL_W, PANEL_H = 768, 768
 grok_key = os.environ.get("XAI_API_KEY", "")
 client = OpenAI(api_key=grok_key, base_url="https://api.x.ai/v1")
 
-PANEL_W, PANEL_H = 768, 768
 FONT_CANDIDATES = [
     "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
     "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
     "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-    "C:/Windows/Fonts/msgothic.ttc",
 ]
+
+LAYOUTS = {
+    "縦に4つ": {"cols": 1, "count": 4},
+    "正方形に4つ": {"cols": 2, "count": 4},
+    "横に4つ": {"cols": 4, "count": 4},
+    "縦に2つ": {"cols": 1, "count": 2},
+    "横に2つ": {"cols": 2, "count": 2},
+    "縦に3つ": {"cols": 1, "count": 3},
+}
 
 def load_font(size=28):
     for path in FONT_CANDIDATES:
@@ -33,35 +38,6 @@ def load_font(size=28):
                 pass
     return ImageFont.load_default()
 
-def hash_password(password):
-    return hashlib.sha256(password.encode()).hexdigest()
-
-def load_users():
-    if os.path.exists(USERS_FILE):
-        try:
-            with open(USERS_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            return {}
-    return {}
-
-def save_users(users):
-    with open(USERS_FILE, "w", encoding="utf-8") as f:
-        json.dump(users, f, ensure_ascii=False, indent=2)
-
-def save_current_user_data():
-    if not st.session_state.get("username"):
-        return
-    users = load_users()
-    name = st.session_state.username
-    if name in users:
-        users[name]["data"] = {
-            "characters": st.session_state.get("characters", []),
-            "works": st.session_state.get("works", [])[-20:],
-            "points": st.session_state.get("points", 80),
-        }
-        save_users(users)
-
 def uploaded_to_uri(uploaded):
     raw = uploaded.getvalue()
     mime = uploaded.type or "image/png"
@@ -71,17 +47,13 @@ def uri_to_image(uri):
     if not uri:
         return None
     if uri.startswith("data:"):
-        b64 = uri.split(",", 1)[1]
-        return Image.open(BytesIO(base64.b64decode(b64))).convert("RGB")
-    res = requests.get(uri, timeout=60)
+        return Image.open(BytesIO(base64.b64decode(uri.split(",", 1)[1]))).convert("RGB")
+    res = requests.get(uri, timeout=90)
+    res.raise_for_status()
     return Image.open(BytesIO(res.content)).convert("RGB")
 
 def generate_panel(prompt, ref_uris):
-    extra = {
-        "aspect_ratio": "1:1",
-        "resolution": "1k",
-        "quality": "low",
-    }
+    extra = {"aspect_ratio": "1:1", "resolution": "1k", "quality": "low"}
     if not ref_uris:
         response = client.images.generate(
             model="grok-imagine-image-2.0",
@@ -135,7 +107,7 @@ def draw_bubble(panel_img, text, pos="上", fill="#ffffff", font_color="#111111"
     draw = ImageDraw.Draw(img)
     font = load_font(28)
     w, h = img.size
-    max_w = int(w * 0.7)
+    max_w = int(w * 0.72)
     lines = wrap_text(text.strip(), font, max_w - 24)
     line_h = 34
     box_h = 20 + line_h * len(lines)
@@ -153,19 +125,32 @@ def draw_bubble(panel_img, text, pos="上", fill="#ffffff", font_color="#111111"
         ty += line_h
     return img
 
+def load_font(size=28):
+    for path in [
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    ]:
+        if os.path.exists(path):
+            try:
+                return ImageFont.truetype(path, size)
+            except Exception:
+                pass
+    return ImageFont.load_default()
+
 def combine_panels(images, cols=2):
-    imgs = [im.resize((PANEL_W, PANEL_H)) for im in images]
+    imgs = [im.resize((768, 768)) for im in images]
     n = len(imgs)
-    if n <= 2:
-        cols = 1
-        rows = n
-    else:
-        rows = (n + cols - 1) // cols
+    rows = (n + cols - 1) // cols
     gap = 16
-    canvas = Image.new("RGB", (cols * PANEL_W + gap * (cols + 1), rows * PANEL_H + gap * (rows + 1)), "#111111")
+    canvas = Image.new(
+        "RGB",
+        (cols * 768 + gap * (cols + 1), rows * 768 + gap * (rows + 1)),
+        "#111111",
+    )
     for i, im in enumerate(imgs):
         r, c = divmod(i, cols)
-        canvas.paste(im, (gap + c * (PANEL_W + gap), gap + r * (PANEL_H + gap)))
+        canvas.paste(im, (gap + c * (768 + gap), gap + r * (768 + gap)))
     return canvas
 
 def image_to_bytes(img):
@@ -173,85 +158,60 @@ def image_to_bytes(img):
     img.save(buf, format="PNG")
     return buf.getvalue()
 
-if "logged_in" not in st.session_state:
-    st.session_state.logged_in = False
 if "characters" not in st.session_state:
     st.session_state.characters = []
-if "works" not in st.session_state:
-    st.session_state.works = []
-if "points" not in st.session_state:
-    st.session_state.points = 80
-if "mode" not in st.session_state:
-    st.session_state.mode = "chars"
 if "panel_count" not in st.session_state:
     st.session_state.panel_count = 4
+if "layout" not in st.session_state:
+    st.session_state.layout = "正方形に4つ"
 if "scenes" not in st.session_state:
     st.session_state.scenes = ["", "", "", ""]
 if "scene_chars" not in st.session_state:
-    st.session_state.scene_chars = [None, None, None, None]
+    st.session_state.scene_chars = ["", "", "", ""]
 if "panel_images" not in st.session_state:
     st.session_state.panel_images = [None, None, None, None]
 if "bubbles" not in st.session_state:
-    st.session_state.bubbles = [{"text": "", "pos": "上", "fill": "#ffffff", "color": "#111111"} for _ in range(4)]
+    st.session_state.bubbles = [
+        {"text": "", "pos": "上", "fill": "#ffffff", "color": "#111111"} for _ in range(4)
+    ]
+if "works" not in st.session_state:
+    st.session_state.works = []
+if "mode" not in st.session_state:
+    st.session_state.mode = "chars"
+if "error" not in st.session_state:
+    st.session_state.error = ""
+if "busy" not in st.session_state:
+    st.session_state.busy = False
 
-if not st.session_state.logged_in:
-    st.title("4コマ工房")
-    tab1, tab2 = st.tabs(["ログイン", "新規登録"])
-    with tab1:
-        u = st.text_input("ユーザー名", key="login_user")
-        p = st.text_input("パスワード", type="password", key="login_pass")
-        if st.button("ログイン", type="primary"):
-            users = load_users()
-            if u in users and users[u]["password"] == hash_password(p):
-                data = users[u].get("data", {})
-                st.session_state.logged_in = True
-                st.session_state.username = u
-                st.session_state.characters = data.get("characters", [])
-                st.session_state.works = data.get("works", [])
-                st.session_state.points = data.get("points", 80)
-                st.rerun()
-            else:
-                st.error("ログインできません")
-    with tab2:
-        u = st.text_input("新しいユーザー名", key="reg_user")
-        p = st.text_input("パスワード", type="password", key="reg_pass")
-        if st.button("登録", type="primary"):
-            users = load_users()
-            if not u or not p:
-                st.warning("入力してください")
-            elif u in users:
-                st.error("その名前は使われています")
-            else:
-                users[u] = {"password": hash_password(p), "data": {"characters": [], "works": [], "points": 80}}
-                save_users(users)
-                st.session_state.logged_in = True
-                st.session_state.username = u
-                st.session_state.points = 80
-                st.rerun()
-    st.stop()
+LAYOUTS = {
+    "縦に4つ": {"cols": 1, "count": 4},
+    "正方形に4つ": {"cols": 2, "count": 4},
+    "横に4つ": {"cols": 4, "count": 4},
+    "縦に3つ": {"cols": 1, "count": 3},
+    "縦に2つ": {"cols": 1, "count": 2},
+    "横に2つ": {"cols": 2, "count": 2},
+}
 
 with st.sidebar:
-    st.write(f"**{st.session_state.username}**")
-    st.write(f"ポイント: {st.session_state.points} pt")
-    st.caption("1コマ 10pt")
-    if st.button("キャラ固定", use_container_width=True):
+    st.title("4コマ工房")
+    if st.button("1. キャラを固定", use_container_width=True):
         st.session_state.mode = "chars"; st.rerun()
-    if st.button("4コマを作る", use_container_width=True):
+    if st.button("2. 4コマを作る", use_container_width=True):
         st.session_state.mode = "comic"; st.rerun()
-    if st.button("吹き出し", use_container_width=True):
+    if st.button("3. 吹き出し", use_container_width=True):
         st.session_state.mode = "bubble"; st.rerun()
     if st.button("作品", use_container_width=True):
         st.session_state.mode = "works"; st.rerun()
-    if st.button("ログアウト"):
-        save_current_user_data()
-        st.session_state.logged_in = False
-        st.rerun()
+    st.caption("テスト用。登録画面なし。")
+
+if st.session_state.error:
+    st.error(st.session_state.error)
 
 mode = st.session_state.mode
 
 if mode == "chars":
     st.header("固定キャラ")
-    st.write("絵柄とキャラの参照を登録すると、4コマの各コマに割り当てできます。複数登録できます。")
+    st.write("キャラ参照と絵柄参照を登録します。複数登録できます。4コマの各コマに割り当てます。")
     name = st.text_input("キャラ名")
     c1, c2 = st.columns(2)
     with c1:
@@ -272,7 +232,6 @@ if mode == "chars":
                 "char": uploaded_to_uri(char_file),
                 "style": uploaded_to_uri(style_file) if style_file else "",
             })
-            save_current_user_data()
             st.success(f"{name} を固定しました")
             st.rerun()
 
@@ -280,48 +239,54 @@ if mode == "chars":
         st.info("まだ固定キャラはありません")
     else:
         for i, ch in enumerate(st.session_state.characters):
-            box = st.container()
-            with box:
-                a, b, c = st.columns([2, 2, 1])
-                with a:
-                    st.write(f"**{ch['name']}**")
-                    st.image(ch["char"], width=140)
-                with b:
-                    if ch.get("style"):
-                        st.caption("絵柄")
-                        st.image(ch["style"], width=140)
-                with c:
-                    if st.button("削除", key=f"delc_{i}"):
-                        st.session_state.characters.pop(i)
-                        save_current_user_data()
-                        st.rerun()
+            a, b, c = st.columns([2, 2, 1])
+            with a:
+                st.write(f"**{ch['name']}**")
+                st.image(ch["char"], width=160)
+            with b:
+                if ch.get("style"):
+                    st.caption("絵柄")
+                    st.image(ch["style"], width=160)
+            with c:
+                if st.button("削除", key=f"delc_{i}"):
+                    st.session_state.characters.pop(i)
+                    st.rerun()
 
 elif mode == "comic":
     st.header("4コマシーン")
-    st.caption("精度優先のため、1コマ目を作ってから、それを見本に2コマ目以降を作ります。")
-    count = st.radio("コマ数", [2, 3, 4], index=2, horizontal=True)
-    if count != st.session_state.panel_count:
-        st.session_state.panel_count = count
-        st.rerun()
-    n = st.session_state.panel_count
-    names = [ch["name"] for ch in st.session_state.characters] or ["（先にキャラを固定）"]
+    st.write("精度優先のため、1コマずつ作ります。2コマ目以降は1コマ目を見本にします。")
+    layout = st.radio("並び", list(LAYOUTS.keys()), horizontal=True)
+    st.session_state.layout = layout
+    n = LAYOUTS[layout]["count"]
+    st.session_state.panel_count = n
+    names = [ch["name"] for ch in st.session_state.characters]
 
-    for i in range(n):
-        st.markdown(f"### コマ {i+1}")
-        st.session_state.scenes[i] = st.text_input("このコマの内容", value=st.session_state.scenes[i], key=f"sc_{i}")
-        if st.session_state.characters:
-            pick = st.selectbox(
+    if not names:
+        st.warning("先にキャラを固定してください")
+    else:
+        for i in range(n):
+            st.markdown(f"### コマ {i+1}")
+            st.session_state.scenes[i] = st.text_input(
+                "このコマの内容",
+                value=st.session_state.scenes[i],
+                key=f"sc_{i}",
+            )
+            current = st.session_state.scene_chars[i] if st.session_state.scene_chars[i] in names else names[0]
+            st.session_state.scene_chars[i] = st.selectbox(
                 "使う固定キャラ",
                 names,
-                index=min(i, len(names) - 1) if st.session_state.scene_chars[i] is None else max(names.index(st.session_state.scene_chars[i]) if st.session_state.scene_chars[i] in names else 0, 0),
+                index=names.index(current),
                 key=f"ch_{i}",
             )
-            st.session_state.scene_chars[i] = pick
-        if st.session_state.panel_images[i]:
-            st.image(st.session_state.panel_images[i], width=240)
+            if st.session_state.panel_images[i]:
+                st.image(st.session_state.panel_images[i], width=240)
+            if st.button(f"コマ{i+1}を生成", key=f"gen_{i}", type="primary" if i == 0 else "secondary"):
+                st.session_state.busy_index = i
+                st.rerun()
 
-    cost = 10 * n
-    st.write(f"全部作ると {cost} pt（所持 {st.session_state.points} pt）")
+        if st.button("空いているコマをまとめて生成"):
+            st.session_state.busy_index = "all"
+            st.rerun()
 
     def char_by_name(name):
         for ch in st.session_state.characters:
@@ -329,51 +294,83 @@ elif mode == "comic":
                 return ch
         return None
 
-    def build_prompt(i, scene, char_name):
-        return (
-            "Manga comic panel, clean illustration, no speech bubbles, no text, no letters, no captions. "
-            f"Character: {char_name}. "
-            f"Scene {i+1}: {scene}. "
-            "Keep the same face, hair, outfit and art style. "
-            "One character unless the scene needs two."
-        )
-
     def make_one(i):
         scene = st.session_state.scenes[i].strip()
         if not scene:
             raise Exception(f"コマ{i+1}の内容が空です")
         ch = char_by_name(st.session_state.scene_chars[i])
         refs = []
+        if i > 0 and st.session_state.panel_images[0]:
+            refs.append(st.session_state.panel_images[0])
         if ch:
             if ch.get("char"):
                 refs.append(ch["char"])
             if ch.get("style"):
                 refs.append(ch["style"])
-        if i > 0 and st.session_state.panel_images[0]:
-            refs.insert(0, st.session_state.panel_images[0])
-        url = generate_panel(build_prompt(i, scene, st.session_state.scene_chars[i] or "girl"), refs[:3])
+        prompt = (
+            "Square manga comic panel, clean illustration, no speech bubbles, no text, no letters, no captions. "
+            f"Character: {st.session_state.scene_chars[i]}. "
+            f"Scene: {scene}. "
+            "Keep the same face, hair, outfit, linework and coloring as the reference. "
+            "One character unless the scene needs two."
+        )
+        url = generate_panel(prompt, refs[:3])
         st.session_state.panel_images[i] = url
         return url
 
-    colx, coly = st.columns(2)
-    with colx:
-        if st.button("1コマ目だけ作る", type="primary"):
-            if st.session_state.points < 10:
-                st.error("ポイント不足")
-            elif not grok_key:
-                st.error("XAI_API_KEY がありません")
-            else:
-                try:
-                    with st.spinner("1コマ目を生成中..."):
-                        make_one(0)
-                    st.session_state.points -= 10
-                    save_current_user_data()
-                    st.rerun()
-                except Exception as e:
-                    st.error(e)
-    with coly:
-        if st.button("残りコマを1コマ目に寄せて作る"):
-            if not st.session_state.panel_images[0]:
-                st.warning("先に1コマ目を作ってください")
-            elif st.session_state.points < 10 * (n - 1):
-                st
+    busy = st.session_state.get("busy_index")
+    if busy is not None:
+        st.session_state.busy_index = None
+        if not grok_key:
+            st.session_state.error = "XAI_API_KEY がありません"
+        else:
+            try:
+                if busy == "all":
+                    with st.spinner("コマを生成中..."):
+                        for i in range(n):
+                            if not st.session_state.panel_images[i]:
+                                make_one(i)
+                    st.session_state.error = ""
+                else:
+                    with st.spinner(f"コマ{busy+1}を生成中..."):
+                        make_one(int(busy))
+                    st.session_state.error = ""
+            except Exception as e:
+                st.session_state.error = str(e)
+        st.rerun()
+
+    n = LAYOUTS[st.session_state.layout]["count"]
+    if all(st.session_state.panel_images[:n]):
+        st.success("全コマそろいました")
+        if st.button("吹き出し編集へ", type="primary"):
+            st.session_state.mode = "bubble"
+            st.rerun()
+
+elif mode == "bubble":
+    st.header("吹き出しと文字")
+    n = st.session_state.panel_count
+    layout = LAYOUTS[st.session_state.layout]
+    if not all(st.session_state.panel_images[:n]):
+        st.warning("先にコマを全部作ってください")
+    else:
+        panels = []
+        cols = st.columns(2)
+        for i in range(n):
+            with cols[i % 2]:
+                st.markdown(f"**コマ {i+1}**")
+                st.session_state.bubbles[i]["text"] = st.text_area(
+                    "セリフ", value=st.session_state.bubbles[i]["text"], key=f"bt_{i}", height=70
+                )
+                st.session_state.bubbles[i]["pos"] = st.selectbox("位置", ["上", "上右", "下"], key=f"bp_{i}")
+                st.session_state.bubbles[i]["fill"] = st.color_picker("吹き出し色", st.session_state.bubbles[i]["fill"], key=f"bf_{i}")
+                st.session_state.bubbles[i]["color"] = st.color_picker("文字色", st.session_state.bubbles[i]["color"], key=f"bc_{i}")
+            raw = uri_to_image(st.session_state.panel_images[i])
+            bub = st.session_state.bubbles[i]
+            panels.append(draw_bubble(raw, bub["text"], bub["pos"], bub["fill"], bub["color"]))
+        comic = combine_panels(panels, cols=layout["cols"])
+        st.image(comic, use_container_width=True)
+        st.download_button("PNGで保存", data=image_to_bytes(comic), file_name="yonkoma.png", mime="image/png")
+
+elif mode == "works":
+    st.header("作品")
+    st.write("まだ保存機能はテスト用に省略しています。吹き出し画面からPNG保存してください。")
