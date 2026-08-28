@@ -81,6 +81,20 @@ def set_home_background():
     </style>
     """, unsafe_allow_html=True)
 
+def set_guide_text_black():
+    st.markdown("""
+    <style>
+    .guide-card, .guide-card * {
+        color: #111111 !important;
+    }
+    .guide-card {
+        background: rgba(255,255,255,0.82);
+        padding: 16px 18px;
+        border-radius: 16px;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
 def show_header_image():
     if os.path.exists(START_HEADER):
         st.image(START_HEADER, use_container_width=True)
@@ -586,6 +600,7 @@ with st.sidebar:
 mode = st.session_state.current_mode
 if mode == "guide":
     set_home_background()
+    set_guide_text_black()
 elif mode != "generate":
     show_header_image()
 
@@ -838,42 +853,32 @@ elif mode == "history":
                 st.image(item["url"], use_container_width=True)
 
 elif mode == "guide":
-    st.subheader("📘 説明書")
     st.markdown("""
-**nurture Ai** は、会話と画像で専属のAI絵師を育てて、自分好みの絵を生成するサイトです。
-
-### 始め方
-1. ホームで「登録して始める」
-2. ユーザー名とパスワードを登録
-3. AIの名前と性別を決めてスタート
-
-### 育成の流れ
-- **レベル1** 何も知らないAI。会話して好みを教える
-- **レベル2** アイコン変更が解放
-- **レベル3** 学習モード解放。好きな絵を見せて絵柄を覚えさせる
-- **レベル4** 画像生成解放。50ポイントプレゼント
-- **レベル5以降** 会話20回でレベルアップ。毎回5ポイント
-
-経験値は会話だけで増えます。画像生成では増えません。
-
-### 会話とタイプ
-好きなキャラ、アニメ、絵柄、体型、服、雰囲気などを話すと、レベルアップ時に1つ学習します。  
-AIの口調タイプはレベルアップ時に会話の雰囲気から変わることがあります。  
-メニューの「今のタイプを固定する」を押すと、タイプは変わりません。
-
-### 画像生成
-低画質 / 高画質、正方形・縦長・横長、大きいサイズが選べます。
-
-### ポイント
-- 低画質1K：10pt
-- 高画質：20pt
-- 大きいサイズ（1536以上）：+5pt
-- 参照1枚：+5pt
-
-### 無料と月額
-- 無料：レベル4まで会話5回に1回、その後は10回に1回の動画広告
-- 月額980円：登録時1200ポイント、毎月画像生成50回無料（低画質1K）、広告なし
-    """)
+    <div class="guide-card">
+    <h2>📘 説明書</h2>
+    <p><b>nurture Ai</b> は、会話と画像で専属のAI絵師を育てて、自分好みの絵を生成するサイトです。</p>
+    <h3>始め方</h3>
+    <ol>
+    <li>ホームで「登録して始める」</li>
+    <li>ユーザー名とパスワードを登録</li>
+    <li>AIの名前と性別を決めてスタート</li>
+    </ol>
+    <h3>育成の流れ</h3>
+    <ul>
+    <li><b>レベル1</b> 何も知らないAI。会話して好みを教える</li>
+    <li><b>レベル2</b> アイコン変更が解放</li>
+    <li><b>レベル3</b> 学習モード解放。好きな絵を見せて絵柄を覚えさせる</li>
+    <li><b>レベル4</b> 画像生成解放。50ポイントプレゼント</li>
+    <li><b>レベル5以降</b> 会話20回でレベルアップ。毎回5ポイント</li>
+    </ul>
+    <p>経験値は会話だけで増えます。画像生成では増えません。</p>
+    <h3>会話とタイプ</h3>
+    <p>好きなキャラ、アニメ、絵柄、体型、服、雰囲気などを話すと、レベルアップ時に1つ学習します。<br>
+    学習した内容は画像生成に使われます。<br>
+    AIの口調タイプは、レベルアップ時に会話の雰囲気から変わることがあります。<br>
+    メニューの「今のタイプを固定する」を押すと、タイプは変わりません。</p>
+    </div>
+    """, unsafe_allow_html=True)
 
 elif mode == "icon":
     st.subheader("🖼️ アイコン変更")
