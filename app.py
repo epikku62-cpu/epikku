@@ -275,6 +275,29 @@ def generate_with_references(prompt, aspect_ratio, resolution, quality, image_ur
         raise Exception(data)
     return data["data"][0]["url"]
 
+def learn_one_from_recent_chat():
+    recent = [m for m in st.session_state.messages[-16:] if m.get("content") and m.get("kind") != "levelup"]
+    conversation_text = "\n".join([f"{m['role']}: {m['content']}" for m in recent])
+    prompt = (
+        "直近の会話から、画像生成に使えるユーザーの好みを日本語1文だけ抜き出す。"
+        "キャラ、アニメ、絵柄、体型、髪型、服装、雰囲気、背景など絵に必要なことだけ。"
+        "見つからなければ『まだ具体的な好みは少ない』。"
+        f"\n{conversation_text}"
+    )
+    try:
+        completion = client.chat.completions.create(
+            model="grok-4-fast",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=60
+        )
+        result = completion.choices[0].message.content.strip()
+        if result and result not in st.session_state.learned_preferences and "まだ具体的" not in result:
+            st.session_state.learned_preferences.append(result)
+            st.session_state.learned_preferences = st.session_state.learned_preferences[-20:]
+        return result
+    except Exception:
+        return "まだ具体的な好みは少ない"
+
 def analyze_image_style(uploaded_file):
     try:
         image = Image.open(uploaded_file)
@@ -461,7 +484,7 @@ if st.session_state.ai_name is None:
     if st.button("この設定で開始する！", type="primary") and input_name.strip():
         st.session_state.ai_name = input_name.strip()
         st.session_state.ai_gender = gender
-        st.session_state.messages = [{"role": "assistant", "content": f"はじめまして！わたしは「{input_name.strip()}」だよ。好きなキャラや絵柄を教えて育てていこうね。"}]
+        st.session_state.messages = [{"role": "assistant", "content": f"はじめまして！わたしは「{input_name.strip()}」だよ。好きなキャラ、アニメ、絵柄、体型、雰囲気など、絵に必要なことを教えてね。"}]
         save_current_user_data()
         st.rerun()
     st.stop()
@@ -504,7 +527,7 @@ if mode != "generate":
 
 if mode == "chat":
     st.subheader(f"💬 {st.session_state.ai_name}")
-    st.caption("経験値は会話だけです。画像生成では増えません。")
+    st.caption("絵に必要な好みを教えると、画像生成に使われます。")
     for msg in st.session_state.messages:
         if msg["role"] == "user":
             with st.chat_message("user", avatar=st.session_state.user_icon):
@@ -513,9 +536,13 @@ if mode == "chat":
         else:
             with st.chat_message("assistant", avatar=st.session_state.ai_icon):
                 st.markdown(f"**{st.session_state.ai_name}｜Lv.{st.session_state.level}**")
-                st.write(msg["content"])
-                if "image" in msg:
-                    st.image(msg["image"], use_container_width=True)
+                if msg.get("kind") == "levelup":
+                    st.markdown(
+                        f"<div style='color:#FFB300;font-weight:700;white-space:pre-wrap'>{msg['content']}</div>",
+                        unsafe_allow_html=True
+                    )
+                else:
+                    st.write(msg["content"])
 
     user_message = st.chat_input(
         "考え中です..." if st.session_state.waiting_for_ai else "メッセージを送る...",
@@ -531,15 +558,22 @@ if mode == "chat":
     if st.session_state.waiting_for_ai and st.session_state.messages and st.session_state.messages[-1]["role"] == "user":
         gender_note = "女の子らしい口調で。" if st.session_state.ai_gender == "おんなのこ" else "男の子らしい口調で。"
         base = CHARACTER_PROMPTS.get(st.session_state.ai_type, CHARACTER_PROMPTS["中立"])
-        prefs = " / ".join(st.session_state.learned_preferences[-3:]) if st.session_state.learned_preferences else "まだ少ない"
+        prefs = " / ".join(st.session_state.learned_preferences[-5:]) if st.session_state.learned_preferences else "まだ少ない"
         system_prompt = (
-            f"あなたは「{st.session_state.ai_name}」。{base}{gender_note}"
-            "短く自然に返す。同じ質問を繰り返さない。"
-            f"覚えている好み: {prefs}"
+            f"あなたは育成中のAI絵師「{st.session_state.ai_name}」。{base}{gender_note}"
+            "目的は画像生成に必要な好みを知ること。"
+            "聞いてよい内容の例: 好きなキャラ、好きなアニメ、絵のタイプ、絵柄、タッチ、色、線、塗り、"
+            "好きなキャラのタイプ、体型、髪型、服装、表情、雰囲気、背景、構図。"
+            "食べ物など絵に関係ない話には広げない。短く話す。同じ質問を繰り返さない。"
+            "ルール1: ユーザーが質問してきたら、その質問に答えるだけ。追加の質問はしない。"
+            "ルール2: ユーザーが質問してこなかったら、絵に関する質問を1つする。"
+            "ルール3: ユーザーが質問していないときは、会話が途切れないようにする。"
+            f"すでに学習済み: {prefs}"
         )
         api_messages = [{"role": "system", "content": system_prompt}] + [
             {"role": m["role"], "content": m["content"]}
             for m in st.session_state.messages[-6:]
+            if m.get("kind") != "levelup"
         ]
         try:
             with st.spinner("考え中..."):
@@ -565,15 +599,14 @@ if mode == "chat":
                 st.session_state.points += 50
             elif st.session_state.level > 4:
                 st.session_state.points += 5
+            learned = learn_one_from_recent_chat()
             unlock = ""
             if st.session_state.level == 3:
-                unlock = "学習モードが解放されました。"
+                unlock = "\n学習モードが解放されました。"
             elif st.session_state.level == 4:
-                unlock = "画像生成モードが解放されました。50ptプレゼント！"
-            notice = f"🎉 レベルアップ！ Lv.{st.session_state.level}"
-            if unlock:
-                notice += f"\n{unlock}"
-            st.session_state.messages.append({"role": "assistant", "content": notice})
+                unlock = "\n画像生成モードが解放されました。50ptプレゼント！"
+            notice = f"🎉 レベルアップ！ Lv.{st.session_state.level}\n「{learned}」を学習しました。{unlock}"
+            st.session_state.messages.append({"role": "assistant", "content": notice, "kind": "levelup"})
 
         if not is_premium_active() and st.session_state.ad_count >= ad_interval(st.session_state.level):
             st.session_state.ad_count = 0
@@ -619,6 +652,12 @@ elif mode == "generate":
     if st.session_state.level < 4:
         st.warning("レベル4で解放されます。")
     else:
+        if st.session_state.learned_preferences or st.session_state.learned_styles:
+            st.caption("今反映される学習")
+            if st.session_state.learned_preferences:
+                st.write("会話: " + " / ".join(st.session_state.learned_preferences[-3:]))
+            if st.session_state.learned_styles:
+                st.write("絵柄: " + " / ".join(st.session_state.learned_styles[-3:]))
         st.markdown("### サイズ")
         st.caption("よく使うサイズ")
         r1 = st.columns(3)
@@ -694,9 +733,9 @@ elif mode == "generate":
                             refs.append(file_to_data_uri(char_ref))
                             extra.append(f"CHARACTER REFERENCE strength {char_strength}/10: keep the same character, change pose by the prompt.")
                         if st.session_state.learned_styles:
-                            extra.append("Learned image styles: " + " / ".join(st.session_state.learned_styles[-3:]))
+                            extra.append("Learned image styles, follow strongly: " + " / ".join(st.session_state.learned_styles[-3:]))
                         if st.session_state.learned_preferences:
-                            extra.append("Learned chat preferences: " + " / ".join(st.session_state.learned_preferences[-3:]))
+                            extra.append("Learned user preferences from chat, follow strongly: " + " / ".join(st.session_state.learned_preferences[-5:]))
                         full_prompt = f"Draw this: {prompt_input}\n" + "\n".join(extra)
                         if refs:
                             image_url = generate_with_references(full_prompt, aspect_ratio, resolution, quality, refs)
