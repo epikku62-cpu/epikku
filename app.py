@@ -32,10 +32,7 @@ POINT_PACKS = {
 if stripe is not None and STRIPE_SECRET_KEY:
     stripe.api_key = STRIPE_SECRET_KEY
 
-client = OpenAI(
-    api_key=grok_key,
-    base_url="https://api.x.ai/v1",
-)
+client = OpenAI(api_key=grok_key, base_url="https://api.x.ai/v1")
 
 CHARACTER_PROMPTS = {
     "甘えん坊": "甘えん坊な女の子。ユーザーを『お兄ちゃん』と呼び、語尾は『〜だよぉ』『〜なの』など可愛く話す。",
@@ -97,17 +94,14 @@ def save_current_user_data():
         save_users(users)
 
 def needed_exp(level):
-    return 5 if level < 5 else 20
-
-def size_extra_cost(w, h):
-    area = w * h
-    if area <= 1024 * 1024:
-        return 0
-    if area <= 1280 * 1280:
+    if level <= 2:
         return 5
-    if area <= 1536 * 1536:
+    if level == 3:
         return 10
-    return 15
+    return 20
+
+def ad_interval(level):
+    return 5 if level < 4 else 10
 
 def parse_dt(value):
     if not value:
@@ -151,8 +145,8 @@ def activate_premium(session_id, subscription_id=None):
     st.session_state.premium_started = now.isoformat()
     st.session_state.premium_until = (now + timedelta(days=30)).isoformat()
     st.session_state.last_free_grant = now.isoformat()
-    st.session_state.points += 1500
-    st.session_state.free_gen_left = 100
+    st.session_state.points += 1200
+    st.session_state.free_gen_left = 50
     if subscription_id:
         st.session_state.stripe_subscription_id = subscription_id
     save_current_user_data()
@@ -175,7 +169,7 @@ def grant_free_gens_if_needed():
     last = parse_dt(st.session_state.get("last_free_grant"))
     if last is None:
         st.session_state.last_free_grant = now.isoformat()
-        st.session_state.free_gen_left = 100
+        st.session_state.free_gen_left = 50
         if not st.session_state.get("premium_started"):
             st.session_state.premium_started = now.isoformat()
         save_current_user_data()
@@ -183,12 +177,24 @@ def grant_free_gens_if_needed():
     renewed = False
     while last + timedelta(days=30) <= now:
         last = last + timedelta(days=30)
-        st.session_state.free_gen_left = 100
+        st.session_state.free_gen_left = 50
         renewed = True
     if renewed:
         st.session_state.last_free_grant = last.isoformat()
         st.session_state.premium_until = (now + timedelta(days=30)).isoformat()
         save_current_user_data()
+
+def calc_generation_cost(quality, width, height, ref_count, use_free=False):
+    is_2k = max(width, height) >= 1536
+    resolution = "2k" if (is_2k or quality == "medium") else "1k"
+    cost = 10 if quality == "low" else 20
+    size_add = 5 if is_2k else 0
+    ref_add = 5 * ref_count
+    if use_free:
+        cost = size_add + ref_add
+    else:
+        cost = cost + size_add + ref_add
+    return cost, resolution, size_add, ref_add
 
 def file_to_data_uri(uploaded_file):
     raw = uploaded_file.getvalue()
@@ -242,11 +248,7 @@ def update_personality():
     conversation_text = "\n".join([f"{m['role']}: {m['content']}" for m in recent])
     prompt = f"会話を見て性格を1つだけ選ぶ。選択肢: 甘えん坊, ツンデレ, ヤンデレ, ヤンキー, 姫, 王子, 明るいキャラ, 口数少ないキャラ, 中立\n\n{conversation_text}\n単語だけ。"
     try:
-        completion = client.chat.completions.create(
-            model="grok-4-fast",
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=15
-        )
+        completion = client.chat.completions.create(model="grok-4-fast", messages=[{"role": "user", "content": prompt}], max_tokens=15)
         new_type = completion.choices[0].message.content.strip()
         if new_type in CHARACTER_PROMPTS and new_type != st.session_state.ai_type:
             st.session_state.ai_type = new_type
@@ -259,11 +261,7 @@ def learn_one_from_recent_chat():
     conversation_text = "\n".join([f"{m['role']}: {m['content']}" for m in recent])
     prompt = f"直近の会話からユーザーの絵の好みを1つだけ短い日本語1文で。なければ『まだ具体的な好みは少ない』。\n{conversation_text}"
     try:
-        completion = client.chat.completions.create(
-            model="grok-4-fast",
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=80
-        )
+        completion = client.chat.completions.create(model="grok-4-fast", messages=[{"role": "user", "content": prompt}], max_tokens=80)
         result = completion.choices[0].message.content.strip()
         if result and result not in st.session_state.learned_preferences:
             st.session_state.learned_preferences.append(result)
@@ -280,13 +278,10 @@ def analyze_image_style(uploaded_file):
         img_base64 = base64.b64encode(buffered.getvalue()).decode()
         completion = client.chat.completions.create(
             model="grok-4-fast",
-            messages=[{
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": "この絵のタッチ、塗り、線、雰囲気を短い日本語1文で。"},
-                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_base64}"}}
-                ]
-            }],
+            messages=[{"role": "user", "content": [
+                {"type": "text", "text": "この絵のタッチ、塗り、線、雰囲気を短い日本語1文で。"},
+                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_base64}"}}
+            ]}],
             max_tokens=80
         )
         return completion.choices[0].message.content.strip()
@@ -339,7 +334,7 @@ if st.session_state.get("logged_in") and stripe is not None and query.get("sessi
                     st.success(f"ポイント購入完了。{pts}pt を付与しました。")
             else:
                 if activate_premium(session_id, checkout.get("subscription")):
-                    st.success("月額会員になりました。1500pt と画像生成100回無料を付与しました。")
+                    st.success("月額会員になりました。1200pt と画像生成50回無料を付与しました。")
         st.query_params.clear()
     except Exception as e:
         st.error(f"決済確認に失敗しました: {e}")
@@ -421,10 +416,7 @@ if st.session_state.ai_name is None:
     if st.button("この設定で開始する！", type="primary") and input_name.strip():
         st.session_state.ai_name = input_name.strip()
         st.session_state.ai_gender = gender
-        st.session_state.messages = [{
-            "role": "assistant",
-            "content": f"はじめまして！わたしは「{input_name.strip()}」だよ。好きなキャラや絵柄を教えて育てていこうね。"
-        }]
+        st.session_state.messages = [{"role": "assistant", "content": f"はじめまして！わたしは「{input_name.strip()}」だよ。好きなキャラや絵柄を教えて育てていこうね。"}]
         save_current_user_data()
         st.rerun()
 else:
@@ -435,7 +427,7 @@ else:
         st.write(f"**プラン:** {'月額会員' if premium else '無料'}")
         st.write(f"**ポイント:** {st.session_state.points} pt")
         if premium:
-            st.write(f"**無料生成残:** {st.session_state.get('free_gen_left', 0)} / 100")
+            st.write(f"**無料生成残:** {st.session_state.get('free_gen_left', 0)} / 50")
         st.write(f"**レベル:** Lv.{st.session_state.level}")
         st.write(f"**タイプ:** {st.session_state.ai_type}")
         st.progress(min(st.session_state.exp / need, 1.0))
@@ -462,6 +454,7 @@ else:
 
     if mode == "chat":
         st.subheader(f"💬 {st.session_state.ai_name}")
+        st.caption("経験値は会話だけです。画像生成では増えません。")
         for msg in st.session_state.messages:
             if msg["role"] == "user":
                 with st.chat_message("user", avatar=st.session_state.user_icon):
@@ -476,13 +469,14 @@ else:
         if user_message := st.chat_input("メッセージを送る..."):
             st.session_state.messages.append({"role": "user", "content": user_message})
             st.session_state.exp += 1
-            st.session_state.ad_count += 1
+            if not is_premium_active():
+                st.session_state.ad_count += 1
             need_now = needed_exp(st.session_state.level)
             if st.session_state.exp >= need_now:
                 st.session_state.level += 1
                 st.session_state.exp = 0
                 if st.session_state.level == 4:
-                    st.session_state.points += 80
+                    st.session_state.points += 50
                 elif st.session_state.level > 4:
                     st.session_state.points += 5
                 learned = learn_one_from_recent_chat()
@@ -490,7 +484,7 @@ else:
                 if st.session_state.level == 3:
                     unlock = "学習モードが解放されました。"
                 elif st.session_state.level == 4:
-                    unlock = "画像生成モードが解放されました。80ptプレゼント！"
+                    unlock = "画像生成モードが解放されました。50ptプレゼント！"
                 notice = f"🎉 レベルアップ！ Lv.{st.session_state.level}\n今回覚えたこと：{learned}"
                 if unlock:
                     notice += f"\n{unlock}"
@@ -499,9 +493,7 @@ else:
             base = CHARACTER_PROMPTS.get(st.session_state.ai_type, CHARACTER_PROMPTS["中立"])
             prefs = " / ".join(st.session_state.learned_preferences[-3:]) if st.session_state.learned_preferences else "まだ少ない"
             system_prompt = f"あなたは「{st.session_state.ai_name}」。{base}{gender_note}好きなキャラ・絵柄を自然に聞く。同じ質問を繰り返さない。短く。既に覚えている好み: {prefs}"
-            api_messages = [{"role": "system", "content": system_prompt}] + [
-                {"role": m["role"], "content": m["content"]} for m in st.session_state.messages[-8:]
-            ]
+            api_messages = [{"role": "system", "content": system_prompt}] + [{"role": m["role"], "content": m["content"]} for m in st.session_state.messages[-8:]]
             try:
                 with st.spinner("考え中..."):
                     completion = client.chat.completions.create(model="grok-4-fast", messages=api_messages, max_tokens=220)
@@ -510,7 +502,7 @@ else:
                     update_personality()
             except Exception as e:
                 st.session_state.messages.append({"role": "assistant", "content": f"（エラー: {e}）"})
-            if not is_premium_active() and st.session_state.ad_count >= 10:
+            if not is_premium_active() and st.session_state.ad_count >= ad_interval(st.session_state.level):
                 st.session_state.ad_count = 0
                 st.warning("📢 動画広告の時間です")
             save_current_user_data()
@@ -559,19 +551,9 @@ else:
             with c2:
                 gen_h = st.number_input("高さ", min_value=512, max_value=2048, value=1024, step=64)
             aspect_ratio = ratio_from_size(gen_w, gen_h)
-            resolution = "2k" if max(gen_w, gen_h) >= 1536 else "1k"
-            extra_size = size_extra_cost(gen_w, gen_h)
             st.markdown("### 画質")
-            quality_choice = st.radio("画質", ["低画質（10pt）", "高画質（20pt）"])
-            if "低画質" in quality_choice:
-                quality = "low"; cost = 10
-            else:
-                quality = "medium"; cost = 20; resolution = "2k"
-            used_free = False
-            if is_premium_active() and st.session_state.get("free_gen_left", 0) > 0:
-                cost = 0
-                used_free = True
-                st.info(f"月額特典：無料生成を使います（残り {st.session_state.free_gen_left} / 100）")
+            quality_choice = st.radio("画質", ["低画質（10pt / 1K）", "高画質（20pt / 2K）"])
+            quality = "low" if "低画質" in quality_choice else "medium"
             st.markdown("### 参照")
             col_a, col_b = st.columns(2)
             with col_a:
@@ -585,12 +567,19 @@ else:
                 if char_ref:
                     st.image(char_ref, width=180)
             prompt_input = st.text_area("何を描く？", height=100)
-            ref_cost = 5 * sum(1 for x in [style_ref, char_ref] if x)
-            if used_free:
-                cost = extra_size + ref_cost
-            else:
-                cost = cost + extra_size + ref_cost
-            st.write(f"サイズ加算: {extra_size}pt ／ 参照加算: {ref_cost}pt")
+            ref_count = sum(1 for x in [style_ref, char_ref] if x)
+            can_free = (
+                is_premium_active()
+                and st.session_state.get("free_gen_left", 0) > 0
+                and quality == "low"
+                and max(gen_w, gen_h) < 1536
+            )
+            cost, resolution, size_add, ref_add = calc_generation_cost(quality, gen_w, gen_h, ref_count, use_free=can_free)
+            if can_free:
+                st.info(f"月額特典：低画質1Kの無料生成を使います（残り {st.session_state.free_gen_left} / 50）")
+            if max(gen_w, gen_h) >= 1536:
+                st.caption("1536以上は2Kになるため +5pt です")
+            st.write(f"サイズ加算: {size_add}pt ／ 参照加算: {ref_add}pt")
             st.write(f"**消費ポイント: {cost} pt**（所持: {st.session_state.points} pt）")
             if st.button("🎨 イラストを生成する", type="primary", use_container_width=True):
                 if not prompt_input.strip():
@@ -621,7 +610,7 @@ else:
                                 image_url = generate_with_references(full_prompt, aspect_ratio, resolution, quality, refs)
                             else:
                                 image_url = generate_text_image(full_prompt, aspect_ratio, resolution, quality)
-                        if used_free:
+                        if can_free:
                             st.session_state.free_gen_left = max(st.session_state.free_gen_left - 1, 0)
                         st.session_state.last_generated_image = {"url": image_url, "prompt": prompt_input, "cost": cost}
                         st.session_state.generated_history.insert(0, {
@@ -651,12 +640,12 @@ else:
     elif mode == "plan":
         st.subheader("💎 月額プラン")
         st.write("**月額 980円**")
-        st.write("- 登録時に 1500ポイント付与")
-        st.write("- 毎月 画像生成 100回無料")
+        st.write("- 登録時に 1200ポイント付与")
+        st.write("- 毎月 画像生成 50回無料")
         st.write("- 広告除去")
         if is_premium_active():
             st.success(f"月額会員です。期限: {str(st.session_state.premium_until)[:10]}")
-            st.write(f"無料生成の残り: {st.session_state.get('free_gen_left', 0)} / 100")
+            st.write(f"無料生成の残り: {st.session_state.get('free_gen_left', 0)} / 50")
             if st.button("月額を解約する"):
                 cancel_premium()
                 st.warning("解約しました。これ以降の無料回数の更新はありません。")
