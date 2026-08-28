@@ -31,6 +31,15 @@ POINT_PACKS = {
     "3000": {"yen": 3000, "points": 3000, "label": "3000ポイント / 3000円"},
 }
 
+SIZE_PRESETS = {
+    "縦長": (768, 1344),
+    "正方形": (1024, 1024),
+    "横長": (1344, 768),
+    "大きい縦長": (864, 1536),
+    "大きい正方形": (1536, 1536),
+    "大きい横長": (1536, 864),
+}
+
 if stripe is not None and STRIPE_SECRET_KEY:
     stripe.api_key = STRIPE_SECRET_KEY
 
@@ -69,6 +78,10 @@ def set_home_background():
     header[data-testid="stHeader"] {{ background: transparent; }}
     </style>
     """, unsafe_allow_html=True)
+
+def show_header_image():
+    if os.path.exists(START_HEADER):
+        st.image(START_HEADER, use_container_width=True)
 
 def hash_password(password):
     return hashlib.sha256(password.encode()).hexdigest()
@@ -369,6 +382,10 @@ if "free_gen_left" not in st.session_state:
     st.session_state.free_gen_left = 0
 if "stripe_subscription_id" not in st.session_state:
     st.session_state.stripe_subscription_id = None
+if "gen_w" not in st.session_state:
+    st.session_state.gen_w = 1024
+if "gen_h" not in st.session_state:
+    st.session_state.gen_h = 1024
 
 query = st.query_params
 if st.session_state.get("logged_in") and stripe is not None and query.get("session_id"):
@@ -463,10 +480,7 @@ if st.session_state.get("logged_in"):
     grant_free_gens_if_needed()
 
 if st.session_state.ai_name is None:
-    if os.path.exists(START_HEADER):
-        st.image(START_HEADER, use_container_width=True)
-    else:
-        st.title("nurture Ai")
+    show_header_image()
     input_name = st.text_input("AIの名前")
     gender = st.radio("性別", ["おんなのこ", "おとこのこ"], horizontal=True)
     if st.button("この設定で開始する！", type="primary") and input_name.strip():
@@ -509,6 +523,8 @@ with st.sidebar:
         st.rerun()
 
 mode = st.session_state.current_mode
+if mode != "generate":
+    show_header_image()
 
 if mode == "chat":
     st.subheader(f"💬 {st.session_state.ai_name}")
@@ -603,11 +619,28 @@ elif mode == "generate":
         st.warning("レベル4で解放されます。")
     else:
         st.markdown("### サイズ")
+        st.caption("よく使うサイズ")
+        r1 = st.columns(3)
+        for i, name in enumerate(["縦長", "正方形", "横長"]):
+            with r1[i]:
+                if st.button(name, use_container_width=True):
+                    st.session_state.gen_w, st.session_state.gen_h = SIZE_PRESETS[name]
+                    st.rerun()
+        st.caption("大きいサイズ（2K / +5pt）")
+        r2 = st.columns(3)
+        for i, name in enumerate(["大きい縦長", "大きい正方形", "大きい横長"]):
+            with r2[i]:
+                if st.button(name, use_container_width=True):
+                    st.session_state.gen_w, st.session_state.gen_h = SIZE_PRESETS[name]
+                    st.rerun()
         c1, c2 = st.columns(2)
         with c1:
-            gen_w = st.number_input("幅", min_value=512, max_value=2048, value=1024, step=64)
+            st.number_input("幅", min_value=512, max_value=2048, step=64, key="gen_w")
         with c2:
-            gen_h = st.number_input("高さ", min_value=512, max_value=2048, value=1024, step=64)
+            st.number_input("高さ", min_value=512, max_value=2048, step=64, key="gen_h")
+        gen_w = int(st.session_state.gen_w)
+        gen_h = int(st.session_state.gen_h)
+        st.write(f"今のサイズ: {gen_w} × {gen_h}")
         aspect_ratio = ratio_from_size(gen_w, gen_h)
         st.markdown("### 画質")
         quality_choice = st.radio("画質", ["低画質（10pt / 1K）", "高画質（20pt / 2K）"])
