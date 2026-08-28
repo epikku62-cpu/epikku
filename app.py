@@ -1,69 +1,85 @@
 import streamlit as st
 import os
+import json
 import uuid
 import base64
+import math
 import requests
 from io import BytesIO
-from datetime import datetime
 from openai import OpenAI
 from PIL import Image, ImageDraw, ImageFont
-import math
 
 st.set_page_config(page_title="4コマ工房", page_icon="🎨", layout="wide")
 
 grok_key = os.environ.get("XAI_API_KEY", "")
 client = OpenAI(api_key=grok_key, base_url="https://api.x.ai/v1")
-FONT_FILE = "NotoSansJP-Regular.otf"
+DATA_FILE = "studio_data.json"
+FONT_SANS = "NotoSansJP-Regular.otf"
+FONT_SERIF = "NotoSerifJP-Regular.otf"
 
 LAYOUTS = {
-    "縦に4つ": {"cols": 1, "count": 4},
-    "正方形に4つ": {"cols": 2, "count": 4},
-    "横に4つ": {"cols": 4, "count": 4},
-    "縦に3つ": {"cols": 1, "count": 3},
-    "縦に2つ": {"cols": 1, "count": 2},
-    "横に2つ": {"cols": 2, "count": 2},
+    "縦4": {"cols": 1, "count": 4},
+    "縦3": {"cols": 1, "count": 3},
+    "縦2": {"cols": 1, "count": 2},
+    "横4": {"cols": 4, "count": 4},
+    "横3": {"cols": 3, "count": 3},
+    "横2": {"cols": 2, "count": 2},
+    "2×2": {"cols": 2, "count": 4},
 }
-
-ASPECT_PRESETS = {
-    "正方形": (1024, 1024),
-    "縦長": (768, 1344),
-    "横長": (1344, 768),
+ASPECTS = {
+    "正方形（1024×1024）": (1024, 1024),
+    "縦長（768×1344）": (768, 1344),
+    "横長（1344×768）": (1344, 768),
 }
-
 POSITIONS = ["上左", "上中央", "上右", "中左", "中右", "下左", "下中央", "下右"]
 BUBBLE_TYPES = ["丸四角", "楕円", "叫び", "考え", "文字だけ"]
+TEXT_DIR = ["横書き", "縦書き", "斜め"]
+FONTS = ["ゴシック", "明朝"]
 
-def ensure_font():
-    if os.path.exists(FONT_FILE) and os.path.getsize(FONT_FILE) > 10000:
-        return FONT_FILE
-    urls = [
-        "https://github.com/googlefonts/noto-cjk/raw/main/Sans/OTF/Japanese/NotoSansCJKjp-Regular.otf",
-        "https://github.com/notofonts/noto-cjk/raw/main/Sans/OTF/Japanese/NotoSansCJKjp-Regular.otf",
-    ]
+def load_data():
+    if os.path.exists(DATA_FILE):
+        try:
+            with open(DATA_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return {"characters": []}
+    return {"characters": []}
+
+def save_data(data):
+    with open(DATA_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+def download_font(path, urls):
+    if os.path.exists(path) and os.path.getsize(path) > 10000:
+        return path
     for url in urls:
         try:
             r = requests.get(url, timeout=60)
             if r.status_code == 200 and len(r.content) > 10000:
-                with open(FONT_FILE, "wb") as f:
+                with open(path, "wb") as f:
                     f.write(r.content)
-                return FONT_FILE
+                return path
         except Exception:
             pass
     return None
 
-def load_font(size=28):
-    path = ensure_font()
-    if path:
+def ensure_fonts():
+    download_font(FONT_SANS, [
+        "https://github.com/googlefonts/noto-cjk/raw/main/Sans/OTF/Japanese/NotoSansCJKjp-Regular.otf",
+    ])
+    download_font(FONT_SERIF, [
+        "https://github.com/googlefonts/noto-cjk/raw/main/Serif/OTF/Japanese/NotoSerifCJKjp-Regular.otf",
+    ])
+
+def load_font(size=28, kind="ゴシック"):
+    ensure_fonts()
+    path = FONT_SERIF if kind == "明朝" and os.path.exists(FONT_SERIF) else FONT_SANS
+    if os.path.exists(path):
         try:
             return ImageFont.truetype(path, size)
         except Exception:
             pass
-    for p in [
-        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-        "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
-        "C:/Windows/Fonts/msgothic.ttc",
-        "C:/Windows/Fonts/YuGothR.ttc",
-    ]:
+    for p in ["C:/Windows/Fonts/msgothic.ttc", "C:/Windows/Fonts/YuGothR.ttc"]:
         if os.path.exists(p):
             try:
                 return ImageFont.truetype(p, size)
@@ -86,7 +102,7 @@ def uri_to_image(uri):
     return Image.open(BytesIO(res.content)).convert("RGB")
 
 def ratio_from_size(w, h):
-    r = w / h
+    r = w / max(h, 1)
     choices = {"1:1": 1.0, "3:4": 0.75, "4:3": 1.33, "9:16": 0.5625, "16:9": 1.777, "2:3": 0.666, "3:2": 1.5}
     return min(choices.items(), key=lambda x: abs(x[1] - r))[0]
 
@@ -98,10 +114,7 @@ def generate_panel(prompt, ref_uris, w, h):
     }
     if not ref_uris:
         response = client.images.generate(
-            model="grok-imagine-image-2.0",
-            prompt=prompt,
-            n=1,
-            extra_body=extra,
+            model="grok-imagine-image-2.0", prompt=prompt, n=1, extra_body=extra
         )
         return response.data[0].url
     payload = {
@@ -131,11 +144,7 @@ def wrap_text(text, font, max_width):
     lines, line = [], ""
     for ch in text:
         test = line + ch
-        try:
-            ok = font.getlength(test) <= max_width
-        except Exception:
-            ok = len(test) * 16 <= max_width
-        if ok:
+        if font.getlength(test) <= max_width:
             line = test
         else:
             if line:
@@ -145,27 +154,9 @@ def wrap_text(text, font, max_width):
         lines.append(line)
     return lines or [""]
 
-def jagged_polygon(x, y, w, h, spikes=14):
-    pts = []
-    steps = spikes * 2
-    for i in range(steps):
-        ang = (math.pi * 2) * i / steps
-        rx = w / 2 * (1.08 if i % 2 == 0 else 0.86)
-        ry = h / 2 * (1.08 if i % 2 == 0 else 0.86)
-        pts.append((x + w / 2 + math.cos(ang) * rx, y + h / 2 + math.sin(ang) * ry))
-    return pts
-
-def cloud_polygon(x, y, w, h):
-    pts = []
-    for i in range(16):
-        ang = (math.pi * 2) * i / 16
-        bump = 1 + 0.12 * math.sin(i * 2.2)
-        pts.append((x + w / 2 + math.cos(ang) * w / 2 * bump, y + h / 2 + math.sin(ang) * h / 2 * bump))
-    return pts
-
 def bubble_xy(pos, img_w, img_h, box_w, box_h):
-    pad = 18
-    table = {
+    pad = 16
+    return {
         "上左": (pad, pad),
         "上中央": ((img_w - box_w) // 2, pad),
         "上右": (img_w - box_w - pad, pad),
@@ -174,57 +165,101 @@ def bubble_xy(pos, img_w, img_h, box_w, box_h):
         "下左": (pad, img_h - box_h - pad),
         "下中央": ((img_w - box_w) // 2, img_h - box_h - pad),
         "下右": (img_w - box_w - pad, img_h - box_h - pad),
-    }
-    return table.get(pos, (pad, pad))
+    }.get(pos, (pad, pad))
 
-def draw_bubble(panel_img, text, pos="上左", fill="#ffffff", font_color="#111111", size=28, kind="丸四角"):
-    if not text.strip():
+def jagged_polygon(x, y, w, h, spikes=14):
+    pts = []
+    steps = spikes * 2
+    for i in range(steps):
+        ang = (math.pi * 2) * i / steps
+        rx = w / 2 * (1.1 if i % 2 == 0 else 0.84)
+        ry = h / 2 * (1.1 if i % 2 == 0 else 0.84)
+        pts.append((x + w / 2 + math.cos(ang) * rx, y + h / 2 + math.sin(ang) * ry))
+    return pts
+
+def draw_bubble(panel_img, bub):
+    text = (bub.get("text") or "").strip()
+    if not text:
         return panel_img
     img = panel_img.copy()
     draw = ImageDraw.Draw(img)
-    font = load_font(size)
+    size = int(bub.get("size", 28))
+    font = load_font(size, bub.get("font", "ゴシック"))
     w, h = img.size
-    max_w = int(w * 0.72)
-    lines = wrap_text(text.strip(), font, max_w - 24)
-    line_h = int(size * 1.25)
-    box_h = 20 + line_h * len(lines)
-    try:
-        tw = max(font.getlength(x) for x in lines)
-    except Exception:
-        tw = max(len(x) * size for x in lines)
-    box_w = min(max_w, int(tw + 36))
-    x, y = bubble_xy(pos, w, h, box_w, box_h)
+    kind = bub.get("kind", "丸四角")
+    direction = bub.get("dir", "横書き")
+    fill = bub.get("fill", "#ffffff")
+    color = bub.get("color", "#111111")
+    pad = 18
+
+    if direction == "縦書き":
+        chars = list(text.replace("\n", ""))
+        line_h = int(size * 1.15)
+        box_w = size + pad * 2
+        box_h = pad * 2 + line_h * len(chars)
+        box_w = min(box_w, w - 20)
+        box_h = min(box_h, h - 20)
+        x, y = bubble_xy(bub.get("pos", "上左"), w, h, box_w, box_h)
+        if kind == "丸四角":
+            draw.rounded_rectangle([x, y, x + box_w, y + box_h], radius=16, fill=fill, outline="#222", width=3)
+        elif kind == "楕円":
+            draw.ellipse([x, y, x + box_w, y + box_h], fill=fill, outline="#222", width=3)
+        elif kind == "叫び":
+            draw.polygon(jagged_polygon(x, y, box_w, box_h), fill=fill, outline="#222")
+        elif kind == "考え":
+            draw.rounded_rectangle([x, y, x + box_w, y + box_h], radius=24, fill=fill, outline="#222", width=3)
+        cy = y + pad
+        for ch in chars:
+            tw = font.getlength(ch)
+            draw.text((x + (box_w - tw) / 2, cy), ch, font=font, fill=color)
+            cy += line_h
+        return img
+
+    max_w = int(w * 0.62)
+    lines = wrap_text(text, font, max_w)
+    line_h = int(size * 1.3)
+    text_w = max(font.getlength(x) for x in lines)
+    box_w = int(min(w - 24, text_w + pad * 2))
+    box_h = int(min(h - 24, pad * 2 + line_h * len(lines)))
+    x, y = bubble_xy(bub.get("pos", "上左"), w, h, box_w, box_h)
+
     if kind == "丸四角":
-        draw.rounded_rectangle([x, y, x + box_w, y + box_h], radius=18, fill=fill, outline="#222222", width=3)
+        draw.rounded_rectangle([x, y, x + box_w, y + box_h], radius=16, fill=fill, outline="#222", width=3)
     elif kind == "楕円":
-        draw.ellipse([x, y, x + box_w, y + box_h], fill=fill, outline="#222222", width=3)
+        draw.ellipse([x, y, x + box_w, y + box_h + 8], fill=fill, outline="#222", width=3)
     elif kind == "叫び":
-        draw.polygon(jagged_polygon(x, y, box_w, box_h), fill=fill, outline="#222222")
+        draw.polygon(jagged_polygon(x - 6, y - 6, box_w + 12, box_h + 12), fill=fill, outline="#222")
     elif kind == "考え":
-        draw.polygon(cloud_polygon(x, y, box_w, box_h), fill=fill, outline="#222222")
-        draw.ellipse([x + 16, y + box_h - 6, x + 34, y + box_h + 14], fill=fill, outline="#222222")
-        draw.ellipse([x + 36, y + box_h + 10, x + 48, y + box_h + 22], fill=fill, outline="#222222")
-    ty = y + 10
-    for line in lines:
-        draw.text((x + 16, ty), line, font=font, fill=font_color)
-        ty += line_h
+        draw.rounded_rectangle([x, y, x + box_w, y + box_h], radius=28, fill=fill, outline="#222", width=3)
+        draw.ellipse([x + 10, y + box_h - 4, x + 26, y + box_h + 12], fill=fill, outline="#222")
+        draw.ellipse([x + 28, y + box_h + 8, x + 40, y + box_h + 20], fill=fill, outline="#222")
+
+    if direction == "斜め":
+        tmp = Image.new("RGBA", (box_w + 40, box_h + 40), (0, 0, 0, 0))
+        td = ImageDraw.Draw(tmp)
+        ty = 10
+        for line in lines:
+            td.text((10, ty), line, font=font, fill=color)
+            ty += line_h
+        tmp = tmp.rotate(-18, expand=True, resample=Image.BICUBIC)
+        img.paste(tmp, (x - 8, y - 8), tmp)
+    else:
+        ty = y + pad - 4
+        for line in lines:
+            draw.text((x + pad, ty), line, font=font, fill=color)
+            ty += line_h
     return img
 
 def combine_panels(images, cols=2):
     gap = 16
-    widths = [im.width for im in images]
-    heights = [im.height for im in images]
     n = len(images)
     rows = (n + cols - 1) // cols
-    col_w = []
-    row_h = []
+    col_w, row_h = [], []
     for c in range(cols):
         col_w.append(max((images[i].width for i in range(n) if i % cols == c), default=0))
     for r in range(rows):
         row_h.append(max((images[i].height for i in range(n) if i // cols == r), default=0))
-    canvas_w = sum(col_w) + gap * (cols + 1)
-    canvas_h = sum(row_h) + gap * (rows + 1)
-    canvas = Image.new("RGB", (canvas_w, canvas_h), "#111111")
+    canvas = Image.new("RGB", (sum(col_w) + gap * (cols + 1), sum(row_h) + gap * (rows + 1)), "#111111")
     for i, im in enumerate(images):
         r, c = divmod(i, cols)
         x = gap + sum(col_w[:c]) + gap * c
@@ -238,11 +273,9 @@ def image_to_bytes(img):
     return buf.getvalue()
 
 if "characters" not in st.session_state:
-    st.session_state.characters = []
-if "panel_count" not in st.session_state:
-    st.session_state.panel_count = 4
+    st.session_state.characters = load_data().get("characters", [])
 if "layout" not in st.session_state:
-    st.session_state.layout = "縦に4つ"
+    st.session_state.layout = "縦4"
 if "scenes" not in st.session_state:
     st.session_state.scenes = ["", "", "", ""]
 if "scene_chars" not in st.session_state:
@@ -253,7 +286,7 @@ if "panel_sizes" not in st.session_state:
     st.session_state.panel_sizes = [(1344, 768)] * 4
 if "bubbles" not in st.session_state:
     st.session_state.bubbles = [
-        {"text": "", "pos": "上左", "fill": "#ffffff", "color": "#111111", "size": 28, "kind": "丸四角"}
+        {"text": "", "pos": "上左", "fill": "#ffffff", "color": "#111111", "size": 28, "kind": "丸四角", "font": "ゴシック", "dir": "横書き"}
         for _ in range(4)
     ]
 if "mode" not in st.session_state:
@@ -262,6 +295,8 @@ if "error" not in st.session_state:
     st.session_state.error = ""
 if "busy_index" not in st.session_state:
     st.session_state.busy_index = None
+if "combined" not in st.session_state:
+    st.session_state.combined = None
 
 with st.sidebar:
     st.title("4コマ工房")
@@ -271,7 +306,6 @@ with st.sidebar:
         st.session_state.mode = "comic"; st.rerun()
     if st.button("3. 吹き出し", use_container_width=True):
         st.session_state.mode = "bubble"; st.rerun()
-    st.caption("テスト用。登録なし。")
 
 if st.session_state.error:
     st.error(st.session_state.error)
@@ -280,123 +314,129 @@ mode = st.session_state.mode
 
 if mode == "chars":
     st.header("固定キャラ")
+    st.caption("キャラ参照・絵柄参照は各3枚まで。保存すると再読み込み後も使えます。")
     name = st.text_input("キャラ名")
-    c1, c2 = st.columns(2)
-    with c1:
-        char_file = st.file_uploader("キャラ参照", type=["png", "jpg", "jpeg"], key="char_up")
-        if char_file:
-            st.image(char_file, width=180)
-    with c2:
-        style_file = st.file_uploader("絵柄参照（任意）", type=["png", "jpg", "jpeg"], key="style_up")
-        if style_file:
-            st.image(style_file, width=180)
-    if st.button("このキャラを固定する", type="primary"):
-        if not name.strip() or not char_file:
+    char_files = st.file_uploader("キャラ参照（最大3）", type=["png", "jpg", "jpeg"], accept_multiple_files=True, key="char_ups")
+    style_files = st.file_uploader("絵柄参照（最大3）", type=["png", "jpg", "jpeg"], accept_multiple_files=True, key="style_ups")
+    if char_files:
+        st.image(char_files[0], width=160)
+    if st.button("このキャラを保存する", type="primary"):
+        if not name.strip() or not char_files:
             st.warning("名前とキャラ参照は必須です")
         else:
-            st.session_state.characters.append({
+            item = {
                 "id": str(uuid.uuid4())[:8],
                 "name": name.strip(),
-                "char": uploaded_to_uri(char_file),
-                "style": uploaded_to_uri(style_file) if style_file else "",
-            })
+                "chars": [uploaded_to_uri(f) for f in char_files[:3]],
+                "styles": [uploaded_to_uri(f) for f in style_files[:3]] if style_files else [],
+            }
+            st.session_state.characters.append(item)
+            save_data({"characters": st.session_state.characters})
+            st.success("保存しました")
             st.rerun()
+
+    st.markdown("### 保存済み")
     if not st.session_state.characters:
-        st.info("まだ固定キャラはありません")
+        st.info("まだありません")
     else:
         for i, ch in enumerate(st.session_state.characters):
-            a, b, c = st.columns([2, 2, 1])
-            with a:
+            cols = st.columns([3, 1])
+            with cols[0]:
                 st.write(f"**{ch['name']}**")
-                st.image(ch["char"], width=160)
-            with b:
-                if ch.get("style"):
-                    st.caption("絵柄")
-                    st.image(ch["style"], width=160)
-            with c:
+                imgs = (ch.get("chars") or ch.get("char") and [ch["char"]] or [])
+                if imgs:
+                    st.image(imgs[0], width=140)
+            with cols[1]:
                 if st.button("削除", key=f"delc_{i}"):
                     st.session_state.characters.pop(i)
+                    save_data({"characters": st.session_state.characters})
                     st.rerun()
 
 elif mode == "comic":
-    st.header("4コマシーン")
+    st.header("4コマを作る")
     layout = st.radio("並び", list(LAYOUTS.keys()), horizontal=True)
     st.session_state.layout = layout
     n = LAYOUTS[layout]["count"]
-    st.session_state.panel_count = n
     names = [ch["name"] for ch in st.session_state.characters]
 
-    st.markdown("### 全コマの基本サイズ")
-    preset = st.radio("基本の形", list(ASPECT_PRESETS.keys()) + ["数字で指定"], horizontal=True)
-    if preset != "数字で指定":
-        bw, bh = ASPECT_PRESETS[preset]
+    st.markdown("### コマサイズ")
+    preset = st.radio("基本の形", list(ASPECTS.keys()) + ["数字で指定"], horizontal=True)
+    if preset in ASPECTS:
+        bw, bh = ASPECTS[preset]
+        st.caption(f"{bw} × {bh}")
     else:
-        bw = st.number_input("基本の幅", 512, 2048, 1344, 64)
-        bh = st.number_input("基本の高さ", 512, 2048, 768, 64)
-    if st.button("このサイズを全コマにコピー"):
-        for i in range(4):
-            st.session_state.panel_sizes[i] = (int(bw), int(bh))
+        a, b = st.columns(2)
+        with a:
+            bw = st.number_input("幅", 512, 2048, 1024, 64, key="base_w")
+        with b:
+            bh = st.number_input("高さ", 512, 2048, 1024, 64, key="base_h")
+        st.caption(f"{int(bw)} × {int(bh)}")
+    if st.button("このサイズを全コマにコピー", type="primary"):
+        size = (int(bw), int(bh))
+        st.session_state.panel_sizes = [size, size, size, size]
+        st.success(f"全コマを {size[0]}×{size[1]} にしました")
         st.rerun()
 
     if not names:
         st.warning("先にキャラを固定してください")
     else:
         for i in range(n):
-            st.markdown(f"### コマ {i+1}")
-            s1, s2, s3 = st.columns(3)
-            with s1:
-                shape = st.selectbox("このコマの形", list(ASPECT_PRESETS.keys()) + ["数字"], key=f"shape_{i}")
-            if shape in ASPECT_PRESETS:
-                st.session_state.panel_sizes[i] = ASPECT_PRESETS[shape]
-                st.caption(f"{st.session_state.panel_sizes[i][0]} × {st.session_state.panel_sizes[i][1]}")
+            st.markdown(f"---\n### コマ {i+1}　今のサイズ {st.session_state.panel_sizes[i][0]}×{st.session_state.panel_sizes[i][1]}")
+            shape = st.selectbox("このコマの形", list(ASPECTS.keys()) + ["数字で指定"], key=f"shape_{i}")
+            if shape in ASPECTS:
+                st.session_state.panel_sizes[i] = ASPECTS[shape]
+                st.caption(f"{ASPECTS[shape][0]} × {ASPECTS[shape][1]}")
             else:
-                with s2:
+                c1, c2 = st.columns(2)
+                with c1:
                     pw = st.number_input("幅", 512, 2048, st.session_state.panel_sizes[i][0], 64, key=f"pw_{i}")
-                with s3:
+                with c2:
                     ph = st.number_input("高さ", 512, 2048, st.session_state.panel_sizes[i][1], 64, key=f"ph_{i}")
                 st.session_state.panel_sizes[i] = (int(pw), int(ph))
+                st.caption(f"{int(pw)} × {int(ph)}")
 
             st.session_state.scenes[i] = st.text_input("このコマの内容", value=st.session_state.scenes[i], key=f"sc_{i}")
             current = st.session_state.scene_chars[i] if st.session_state.scene_chars[i] in names else names[0]
             st.session_state.scene_chars[i] = st.selectbox("使う固定キャラ", names, index=names.index(current), key=f"ch_{i}")
+            b1, b2 = st.columns(2)
+            with b1:
+                if st.button(f"コマ{i+1}を生成", key=f"gen_{i}", type="primary"):
+                    st.session_state.busy_index = i
+                    st.rerun()
+            with b2:
+                if st.button(f"コマ{i+1}だけ消す", key=f"clr_{i}"):
+                    st.session_state.panel_images[i] = None
+                    st.rerun()
             if st.session_state.panel_images[i]:
-                st.image(st.session_state.panel_images[i], width=260)
-            if st.button(f"コマ{i+1}を生成", key=f"gen_{i}", type="primary" if i == 0 else "secondary"):
-                st.session_state.busy_index = i
-                st.rerun()
+                st.image(st.session_state.panel_images[i], width=280)
 
         if st.button("空いているコマをまとめて生成"):
             st.session_state.busy_index = "all"
             st.rerun()
 
-    def char_by_name(name):
+    def refs_of(name):
         for ch in st.session_state.characters:
             if ch["name"] == name:
-                return ch
-        return None
+                chars = ch.get("chars") or ([ch["char"]] if ch.get("char") else [])
+                styles = ch.get("styles") or ([ch["style"]] if ch.get("style") else [])
+                return chars + styles
+        return []
 
     def make_one(i):
         scene = st.session_state.scenes[i].strip()
         if not scene:
             raise Exception(f"コマ{i+1}の内容が空です")
         w, h = st.session_state.panel_sizes[i]
-        ch = char_by_name(st.session_state.scene_chars[i])
         refs = []
         if i > 0 and st.session_state.panel_images[0]:
             refs.append(st.session_state.panel_images[0])
-        if ch:
-            if ch.get("char"):
-                refs.append(ch["char"])
-            if ch.get("style"):
-                refs.append(ch["style"])
+        refs += refs_of(st.session_state.scene_chars[i])
         prompt = (
-            "Manga comic panel, clean illustration, no speech bubbles, no text, no letters, no captions. "
-            f"Character: {st.session_state.scene_chars[i]}. "
-            f"Scene: {scene}. "
+            "Manga comic panel, clean illustration, no speech bubbles, no text, no letters. "
+            f"Character: {st.session_state.scene_chars[i]}. Scene: {scene}. "
             "Keep the same face, hair, outfit, linework and coloring as the reference."
         )
-        url = generate_panel(prompt, refs[:3], w, h)
-        st.session_state.panel_images[i] = url
+        st.session_state.panel_images[i] = generate_panel(prompt, refs[:3], w, h)
 
     busy = st.session_state.get("busy_index")
     if busy is not None:
@@ -418,35 +458,48 @@ elif mode == "comic":
                 st.session_state.error = str(e)
         st.rerun()
 
-    if all(st.session_state.panel_images[:n]):
-        st.success("全コマそろいました")
-        if st.button("吹き出し編集へ", type="primary"):
-            st.session_state.mode = "bubble"
-            st.rerun()
-
 elif mode == "bubble":
-    st.header("吹き出しと文字")
-    n = st.session_state.panel_count
-    layout = LAYOUTS[st.session_state.layout]
-    if not all(st.session_state.panel_images[:n]):
-        st.warning("先にコマを全部作ってください")
+    st.header("吹き出し")
+    n = LAYOUTS[st.session_state.layout]["count"]
+    if not any(st.session_state.panel_images[:n]):
+        st.warning("先にコマを作ってください")
     else:
-        panels = []
-        cols = st.columns(2)
         for i in range(n):
-            with cols[i % 2]:
-                st.markdown(f"**コマ {i+1}**")
-                st.session_state.bubbles[i]["text"] = st.text_area("セリフ", value=st.session_state.bubbles[i]["text"], key=f"bt_{i}", height=70)
-                st.session_state.bubbles[i]["kind"] = st.selectbox("吹き出しの種類", BUBBLE_TYPES, key=f"bk_{i}")
-                st.session_state.bubbles[i]["pos"] = st.selectbox("位置", POSITIONS, key=f"bp_{i}")
-                st.session_state.bubbles[i]["size"] = st.slider("文字サイズ", 16, 72, st.session_state.bubbles[i]["size"], key=f"bs_{i}")
-                st.session_state.bubbles[i]["fill"] = st.color_picker("吹き出し色", st.session_state.bubbles[i]["fill"], key=f"bf_{i}")
-                st.session_state.bubbles[i]["color"] = st.color_picker("文字色", st.session_state.bubbles[i]["color"], key=f"bc_{i}")
-            raw = uri_to_image(st.session_state.panel_images[i])
-            w, h = st.session_state.panel_sizes[i]
-            raw = raw.resize((w, h))
+            if not st.session_state.panel_images[i]:
+                st.markdown(f"### コマ {i+1} は未生成")
+                continue
+            st.markdown(f"### コマ {i+1}")
             bub = st.session_state.bubbles[i]
-            panels.append(draw_bubble(raw, bub["text"], bub["pos"], bub["fill"], bub["color"], bub["size"], bub["kind"]))
-        comic = combine_panels(panels, cols=layout["cols"])
-        st.image(comic, use_container_width=True)
-        st.download_button("PNGで保存", data=image_to_bytes(comic), file_name="yonkoma.png", mime="image/png")
+            bub["text"] = st.text_area("セリフ", value=bub["text"], key=f"bt_{i}", height=70)
+            a, b = st.columns(2)
+            with a:
+                bub["kind"] = st.selectbox("吹き出し", BUBBLE_TYPES, key=f"bk_{i}")
+                bub["pos"] = st.selectbox("位置", POSITIONS, key=f"bp_{i}")
+                bub["dir"] = st.selectbox("向き", TEXT_DIR, key=f"bd_{i}")
+            with b:
+                bub["font"] = st.selectbox("フォント", FONTS, key=f"bfn_{i}")
+                bub["size"] = st.slider("文字サイズ", 16, 64, bub["size"], key=f"bs_{i}")
+                bub["fill"] = st.color_picker("吹き出し色", bub["fill"], key=f"bf_{i}")
+                bub["color"] = st.color_picker("文字色", bub["color"], key=f"bc_{i}")
+            raw = uri_to_image(st.session_state.panel_images[i]).resize(st.session_state.panel_sizes[i])
+            preview = draw_bubble(raw, bub)
+            st.image(preview, width=360)
+            st.session_state.bubbles[i] = bub
+
+        if st.button("4コマにまとめる", type="primary"):
+            panels = []
+            for i in range(n):
+                if not st.session_state.panel_images[i]:
+                    st.error(f"コマ{i+1}がありません")
+                    panels = None
+                    break
+                raw = uri_to_image(st.session_state.panel_images[i]).resize(st.session_state.panel_sizes[i])
+                panels.append(draw_bubble(raw, st.session_state.bubbles[i]))
+            if panels:
+                st.session_state.combined = combine_panels(panels, cols=LAYOUTS[st.session_state.layout]["cols"])
+                st.rerun()
+
+        if st.session_state.combined is not None:
+            st.markdown("### 完成")
+            st.image(st.session_state.combined, use_container_width=True)
+            st.download_button("PNGで保存", data=image_to_bytes(st.session_state.combined), file_name="yonkoma.png", mime="image/png")
