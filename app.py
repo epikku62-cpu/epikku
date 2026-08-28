@@ -4,6 +4,7 @@ import json
 import hashlib
 import base64
 import requests
+import random
 from openai import OpenAI
 from datetime import datetime, timedelta
 from PIL import Image
@@ -84,14 +85,8 @@ def set_home_background():
 def set_guide_text_black():
     st.markdown("""
     <style>
-    .guide-card, .guide-card * {
-        color: #111111 !important;
-    }
-    .guide-card {
-        background: rgba(255,255,255,0.82);
-        padding: 16px 18px;
-        border-radius: 16px;
-    }
+    .guide-card, .guide-card * { color: #111111 !important; }
+    .guide-card { background: rgba(255,255,255,0.82); padding: 16px 18px; border-radius: 16px; }
     </style>
     """, unsafe_allow_html=True)
 
@@ -295,38 +290,83 @@ def generate_with_references(prompt, aspect_ratio, resolution, quality, image_ur
         raise Exception(data)
     return data["data"][0]["url"]
 
+def pref_raw(item):
+    if isinstance(item, dict):
+        return item.get("raw", "")
+    return str(item)
+
+def pref_prompt(item):
+    if isinstance(item, dict):
+        return item.get("prompt", item.get("raw", ""))
+    return str(item)
+
 def is_useful_pref(text):
     if not text:
         return False
     t = text.strip()
-    if len(t) < 4:
+    if len(t) < 2:
         return False
     return not any(ng in t for ng in NG_LEARN)
+
+def convert_pref_to_prompt(raw_text):
+    prompt = (
+        "次のユーザーの好みを、画像生成プロンプトとして使える短い語句に変換して1行だけ返す。"
+        "『〜が好き』はそのまま残さない。"
+        "キャラ名ならキャラ名にする。絵柄なら実際に使う修飾語にする。"
+        "例:\n"
+        "めぐみんが好き → megumin, red eye, witch hat, explosion mage\n"
+        "このすばのアクアが好き → aqua, konosuba, blue hair, priestess, water goddess\n"
+        "シンプルな絵が好き → simple illustration, clean lines, simple background, minimal shading\n"
+        "厨二病が好き → chuunibyou atmosphere, dramatic pose, glowing effect\n"
+        f"変換する文: {raw_text}"
+    )
+    try:
+        completion = client.chat.completions.create(
+            model="grok-4-fast",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=40
+        )
+        result = completion.choices[0].message.content.strip().replace("→", " ").split("\n")[0]
+        return result if result else raw_text
+    except Exception:
+        return raw_text
 
 def learn_one_from_recent_chat():
     recent = [m for m in st.session_state.messages[-16:] if m.get("content") and m.get("kind") != "levelup"]
     conversation_text = "\n".join([f"{m['role']}: {m['content']}" for m in recent])
     prompt = (
-        "ユーザーが自分から言った、画像生成に使える具体的な好みだけを日本語1文で抜き出す。"
-        "キャラ名、アニメ、絵柄、体型、服、髪型、ポーズ、雰囲気など。"
-        "具体的な好みがなければ NONE とだけ返す。"
+        "ユーザーが自分から答えた絵の好みだけを、1件ずつ短い日本語で改行して出す。"
+        "絶対に1文にまとめない。"
+        "例:\nめぐみんが好き\nシンプルな絵が好き\nこのすばのアクアが好き\n"
+        "なければ NONE だけ。"
         f"\n{conversation_text}"
     )
     try:
         completion = client.chat.completions.create(
             model="grok-4-fast",
             messages=[{"role": "user", "content": prompt}],
-            max_tokens=60
+            max_tokens=80
         )
-        result = completion.choices[0].message.content.strip()
-        if result.upper() == "NONE" or not is_useful_pref(result):
+        raw = completion.choices[0].message.content.strip()
+        already = {pref_raw(x) for x in st.session_state.learned_preferences}
+        items = []
+        for line in raw.splitlines():
+            t = line.strip(" ・-・*")
+            if is_useful_pref(t) and t not in already:
+                items.append(t)
+        if not items:
             return None
-        if result not in st.session_state.learned_preferences:
-            st.session_state.learned_preferences.append(result)
-            st.session_state.learned_preferences = st.session_state.learned_preferences[-20:]
-        return result
+        chosen_raw = random.choice(items)
+        chosen_prompt = convert_pref_to_prompt(chosen_raw)
+        st.session_state.learned_preferences.append({"raw": chosen_raw, "prompt": chosen_prompt})
+        st.session_state.learned_preferences = st.session_state.learned_preferences[-20:]
+        return {"raw": chosen_raw, "prompt": chosen_prompt}
     except Exception:
         return None
+
+def learned_prompt_text():
+    vals = [pref_prompt(x) for x in st.session_state.learned_preferences if pref_prompt(x)]
+    return " / ".join(vals[-5:])
 
 def update_personality():
     if st.session_state.get("type_locked"):
@@ -637,13 +677,13 @@ if mode == "chat":
     if st.session_state.waiting_for_ai and st.session_state.messages and st.session_state.messages[-1]["role"] == "user":
         gender_note = "女の子らしい口調で。" if st.session_state.ai_gender == "おんなのこ" else "男の子らしい口調で。"
         base = CHARACTER_PROMPTS.get(st.session_state.ai_type, CHARACTER_PROMPTS["中立"])
-        prefs = " / ".join(st.session_state.learned_preferences[-5:]) if st.session_state.learned_preferences else "まだ少ない"
+        prefs = learned_prompt_text() or "まだ少ない"
         system_prompt = (
             f"あなたは育成中のAI絵師「{st.session_state.ai_name}」。{base}{gender_note}"
-            "友達と話すように自然に短く返す。面接のように質問を連発しない。"
-            "ユーザーが好みを言ったら、受け止めて軽く返す。毎回質問しない。"
-            "ユーザーが質問したら、その質問にだけ答える。追加の質問はしない。"
-            "沈黙しそうなときだけ、絵の話をひとつ振る。"
+            "温かく、少し話好きに返す。『いいよね』だけで終わらせない。2〜4文。"
+            "ユーザーが好みを答えたら、まず感想を言ってから、まだ聞いていない絵の話題を1つだけ聞いてもよい。"
+            "話題の例: 好きなキャラ、絵柄、体型、服、髪型、雰囲気、背景。"
+            "同じ質問は繰り返さない。ユーザーが質問したら答えだけ。"
             f"すでに学習済み: {prefs}"
         )
         api_messages = [{"role": "system", "content": system_prompt}] + [
@@ -656,7 +696,7 @@ if mode == "chat":
                 completion = client.chat.completions.create(
                     model="grok-4-fast",
                     messages=api_messages,
-                    max_tokens=90
+                    max_tokens=140
                 )
             reply = completion.choices[0].message.content
         except Exception as e:
@@ -687,7 +727,11 @@ if mode == "chat":
             if type_change:
                 extra += f"\n話し方のタイプが『{type_change[0]}』から『{type_change[1]}』になりました。"
             if learned:
-                notice = f"🎉 レベルアップ！ Lv.{st.session_state.level}\n「{learned}」を学習しました。{extra}"
+                notice = (
+                    f"🎉 レベルアップ！ Lv.{st.session_state.level}\n"
+                    f"「{learned['raw']}」を学習しました。\n"
+                    f"生成用: {learned['prompt']}{extra}"
+                )
             else:
                 notice = f"🎉 レベルアップ！ Lv.{st.session_state.level}{extra}"
             st.session_state.messages.append({"role": "assistant", "content": notice, "kind": "levelup"})
@@ -716,18 +760,37 @@ elif mode == "learn":
                 st.success(desc)
     st.markdown("### 画像から覚えた絵柄")
     if st.session_state.learned_styles:
-        for i, s in enumerate(st.session_state.learned_styles, 1):
-            st.write(f"{i}. {s}")
-        if st.button("画像の学習をリセット"):
-            st.session_state.learned_styles = []; save_current_user_data(); st.rerun()
+        for i, s in enumerate(st.session_state.learned_styles):
+            c1, c2 = st.columns([5, 1])
+            with c1:
+                st.write(f"{i+1}. {s}")
+            with c2:
+                if st.button("削除", key=f"del_style_{i}"):
+                    st.session_state.learned_styles.pop(i)
+                    save_current_user_data()
+                    st.rerun()
+        if st.button("画像の学習を全部リセット"):
+            st.session_state.learned_styles = []
+            save_current_user_data()
+            st.rerun()
     else:
         st.write("まだありません")
     st.markdown("### 会話から覚えた好み")
     if st.session_state.learned_preferences:
-        for i, p in enumerate(st.session_state.learned_preferences, 1):
-            st.write(f"{i}. {p}")
-        if st.button("会話の学習をリセット"):
-            st.session_state.learned_preferences = []; save_current_user_data(); st.rerun()
+        for i, p in enumerate(st.session_state.learned_preferences):
+            c1, c2 = st.columns([5, 1])
+            with c1:
+                st.write(f"{i+1}. {pref_raw(p)}")
+                st.caption(f"生成用: {pref_prompt(p)}")
+            with c2:
+                if st.button("削除", key=f"del_pref_{i}"):
+                    st.session_state.learned_preferences.pop(i)
+                    save_current_user_data()
+                    st.rerun()
+        if st.button("会話の学習を全部リセット"):
+            st.session_state.learned_preferences = []
+            save_current_user_data()
+            st.rerun()
     else:
         st.write("まだありません")
 
@@ -739,7 +802,7 @@ elif mode == "generate":
         if st.session_state.learned_preferences or st.session_state.learned_styles:
             st.caption("今反映される学習")
             if st.session_state.learned_preferences:
-                st.write("会話: " + " / ".join(st.session_state.learned_preferences[-3:]))
+                st.write("会話: " + learned_prompt_text())
             if st.session_state.learned_styles:
                 st.write("絵柄: " + " / ".join(st.session_state.learned_styles[-3:]))
         st.markdown("### サイズ")
@@ -819,7 +882,7 @@ elif mode == "generate":
                         if st.session_state.learned_styles:
                             extra.append("Learned image styles, follow strongly: " + " / ".join(st.session_state.learned_styles[-3:]))
                         if st.session_state.learned_preferences:
-                            extra.append("Learned user preferences from chat, follow strongly: " + " / ".join(st.session_state.learned_preferences[-5:]))
+                            extra.append("Use these learned prompt tags: " + learned_prompt_text())
                         full_prompt = f"Draw this: {prompt_input}\n" + "\n".join(extra)
                         if refs:
                             image_url = generate_with_references(full_prompt, aspect_ratio, resolution, quality, refs)
@@ -874,7 +937,7 @@ elif mode == "guide":
     <p>経験値は会話だけで増えます。画像生成では増えません。</p>
     <h3>会話とタイプ</h3>
     <p>好きなキャラ、アニメ、絵柄、体型、服、雰囲気などを話すと、レベルアップ時に1つ学習します。<br>
-    学習した内容は画像生成に使われます。<br>
+    学習内容は生成用の言葉に変換してから保存します。<br>
     AIの口調タイプは、レベルアップ時に会話の雰囲気から変わることがあります。<br>
     メニューの「今のタイプを固定する」を押すと、タイプは変わりません。</p>
     </div>
