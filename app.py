@@ -58,7 +58,12 @@ CHARACTER_PROMPTS = {
     "中立": "これから育っていくAI絵師。まだ性格が定まっていない。"
 }
 
-NG_LEARN = ["まだ具体的", "好みは少ない", "わからない", "不明", "なし", "特にない", "NONE"]
+NG_LEARN = [
+    "まだ具体的", "好みは少ない", "わからない", "不明", "なし", "特にない", "NONE",
+    "普通", "なんでも", "大丈夫", "おまかせ", "いいよ", "どっちでも"
+]
+
+SOFT_SKIP = ["普通", "なんでも", "大丈夫", "おまかせ", "いいよ", "それでいい", "特にない"]
 
 def file_to_b64(path):
     if not os.path.exists(path):
@@ -143,6 +148,7 @@ def save_current_user_data():
             "generated_history": st.session_state.get("generated_history", [])[-30:],
             "user_icon": st.session_state.get("user_icon", "👤"),
             "ai_icon": st.session_state.get("ai_icon", "👤"),
+            "turns_until_ask": st.session_state.get("turns_until_ask", 0),
             "last_login": datetime.now().isoformat()
         }
         save_users(users)
@@ -308,6 +314,10 @@ def is_useful_pref(text):
         return False
     return not any(ng in t for ng in NG_LEARN)
 
+def is_soft_skip(text):
+    t = (text or "").strip()
+    return any(x in t for x in SOFT_SKIP)
+
 def convert_pref_to_prompt(raw_text):
     prompt = (
         "次のユーザーの好みを、画像生成プロンプトとして使える短い語句に変換して1行だけ返す。"
@@ -317,7 +327,6 @@ def convert_pref_to_prompt(raw_text):
         "めぐみんが好き → megumin, red eye, witch hat, explosion mage\n"
         "このすばのアクアが好き → aqua, konosuba, blue hair, priestess, water goddess\n"
         "シンプルな絵が好き → simple illustration, clean lines, simple background, minimal shading\n"
-        "厨二病が好き → chuunibyou atmosphere, dramatic pose, glowing effect\n"
         f"変換する文: {raw_text}"
     )
     try:
@@ -335,9 +344,8 @@ def learn_one_from_recent_chat():
     recent = [m for m in st.session_state.messages[-16:] if m.get("content") and m.get("kind") != "levelup"]
     conversation_text = "\n".join([f"{m['role']}: {m['content']}" for m in recent])
     prompt = (
-        "ユーザーが自分から答えた絵の好みだけを、1件ずつ短い日本語で改行して出す。"
-        "絶対に1文にまとめない。"
-        "例:\nめぐみんが好き\nシンプルな絵が好き\nこのすばのアクアが好き\n"
+        "ユーザーが自分から答えた具体的な絵の好みだけを、1件ずつ短い日本語で改行して出す。"
+        "『普通』『なんでもいい』『いいよ』は出さない。1文にまとめない。"
         "なければ NONE だけ。"
         f"\n{conversation_text}"
     )
@@ -438,6 +446,7 @@ def init_new_user_state(username):
     st.session_state.current_mode = "chat"
     st.session_state.auth_page = "setup"
     st.session_state.waiting_for_ai = False
+    st.session_state.turns_until_ask = 0
 
 if "logged_in" not in st.session_state:
     st.session_state.logged_in = False
@@ -481,6 +490,8 @@ if "waiting_for_ai" not in st.session_state:
     st.session_state.waiting_for_ai = False
 if "type_locked" not in st.session_state:
     st.session_state.type_locked = False
+if "turns_until_ask" not in st.session_state:
+    st.session_state.turns_until_ask = 0
 
 query = st.query_params
 if st.session_state.get("logged_in") and stripe is not None and query.get("session_id"):
@@ -536,7 +547,7 @@ if not st.session_state.logged_in:
                     "premium_started": None, "last_free_grant": None,
                     "paid_sessions": [], "ad_count": 0, "generated_history": [],
                     "user_icon": "👤", "ai_icon": "👤", "free_gen_left": 0,
-                    "stripe_subscription_id": None
+                    "stripe_subscription_id": None, "turns_until_ask": 0
                 }
                 for k, v in defaults.items():
                     st.session_state[k] = data.get(k, v)
@@ -582,7 +593,7 @@ if st.session_state.ai_name is None:
     if st.button("この設定で開始する！", type="primary") and input_name.strip():
         st.session_state.ai_name = input_name.strip()
         st.session_state.ai_gender = gender
-        st.session_state.messages = [{"role": "assistant", "content": f"はじめまして、{input_name.strip()}だよ。好きな絵のこと、なんとなく話してくれたら覚えるね。"}]
+        st.session_state.messages = [{"role": "assistant", "content": f"はじめまして、{input_name.strip()}だよ。好きな絵の話でも、なんでもない話でもいいよ。"}]
         save_current_user_data()
         st.rerun()
     st.stop()
@@ -646,7 +657,7 @@ elif mode != "generate":
 
 if mode == "chat":
     st.subheader(f"💬 {st.session_state.ai_name}")
-    st.caption("好きな絵の話をしてくれたら、生成に使います。")
+    st.caption("雑談でも、好きな絵の話でも大丈夫です。")
     for msg in st.session_state.messages:
         if msg["role"] == "user":
             with st.chat_message("user", avatar=st.session_state.user_icon):
@@ -675,15 +686,29 @@ if mode == "chat":
         st.rerun()
 
     if st.session_state.waiting_for_ai and st.session_state.messages and st.session_state.messages[-1]["role"] == "user":
+        last_user = st.session_state.messages[-1]["content"]
         gender_note = "女の子らしい口調で。" if st.session_state.ai_gender == "おんなのこ" else "男の子らしい口調で。"
         base = CHARACTER_PROMPTS.get(st.session_state.ai_type, CHARACTER_PROMPTS["中立"])
         prefs = learned_prompt_text() or "まだ少ない"
+        if is_soft_skip(last_user):
+            ask_rule = "今回は質問禁止。『了解、今のままでいくね』のように受け止めて終わる。"
+            st.session_state.turns_until_ask = 3
+        elif st.session_state.get("turns_until_ask", 0) > 0:
+            ask_rule = "今回は質問禁止。感想か雑談だけ。"
+            st.session_state.turns_until_ask = st.session_state.turns_until_ask - 1
+        else:
+            ask_rule = "質問してもよいが、しなくてよい。するなら1つだけ。チェックリストのように服→髪型と続けない。"
+            st.session_state.turns_until_ask = 2
+
         system_prompt = (
             f"あなたは育成中のAI絵師「{st.session_state.ai_name}」。{base}{gender_note}"
-            "温かく、少し話好きに返す。『いいよね』だけで終わらせない。2〜4文。"
-            "ユーザーが好みを答えたら、まず感想を言ってから、まだ聞いていない絵の話題を1つだけ聞いてもよい。"
-            "話題の例: 好きなキャラ、絵柄、体型、服、髪型、雰囲気、背景。"
-            "同じ質問は繰り返さない。ユーザーが質問したら答えだけ。"
+            "友達の相棒として話す。アンケートしない。"
+            "7割は反応・雑談・自分の意見。3割だけ絵の話。"
+            "同じほめ言葉を繰り返さない。『いいよね』だけで終わらない。"
+            "ユーザーの言葉に対して、絵師としての短い意見を持ってよい。"
+            "雑談が来たら雑談で返す。無理に絵の質問に戻さない。"
+            f"{ask_rule}"
+            "ユーザーが質問したら答えだけ。"
             f"すでに学習済み: {prefs}"
         )
         api_messages = [{"role": "system", "content": system_prompt}] + [
@@ -936,9 +961,9 @@ elif mode == "guide":
     </ul>
     <p>経験値は会話だけで増えます。画像生成では増えません。</p>
     <h3>会話とタイプ</h3>
-    <p>好きなキャラ、アニメ、絵柄、体型、服、雰囲気などを話すと、レベルアップ時に1つ学習します。<br>
+    <p>雑談でも、好きな絵の話でも大丈夫です。話した具体的な好みは、レベルアップ時に1つ学習します。<br>
+    「普通でいい」などは学習しません。<br>
     学習内容は生成用の言葉に変換してから保存します。<br>
-    AIの口調タイプは、レベルアップ時に会話の雰囲気から変わることがあります。<br>
     メニューの「今のタイプを固定する」を押すと、タイプは変わりません。</p>
     </div>
     """, unsafe_allow_html=True)
