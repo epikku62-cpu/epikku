@@ -275,35 +275,6 @@ def generate_with_references(prompt, aspect_ratio, resolution, quality, image_ur
         raise Exception(data)
     return data["data"][0]["url"]
 
-def update_personality():
-    if len(st.session_state.messages) < 6:
-        return
-    recent = [m for m in st.session_state.messages[-8:] if m.get("content") and not str(m["content"]).startswith("🎉")]
-    conversation_text = "\n".join([f"{m['role']}: {m['content']}" for m in recent])
-    prompt = f"会話を見て性格を1つだけ選ぶ。選択肢: 甘えん坊, ツンデレ, ヤンデレ, ヤンキー, 姫, 王子, 明るいキャラ, 口数少ないキャラ, 中立\n\n{conversation_text}\n単語だけ。"
-    try:
-        completion = client.chat.completions.create(model="grok-4-fast", messages=[{"role": "user", "content": prompt}], max_tokens=15)
-        new_type = completion.choices[0].message.content.strip()
-        if new_type in CHARACTER_PROMPTS and new_type != st.session_state.ai_type:
-            st.session_state.ai_type = new_type
-            st.session_state.messages.append({"role": "assistant", "content": f"（話し方のタイプが『{new_type}』寄りになったよ）"})
-    except:
-        pass
-
-def learn_one_from_recent_chat():
-    recent = [m for m in st.session_state.messages[-12:] if m.get("content") and not str(m["content"]).startswith("🎉")]
-    conversation_text = "\n".join([f"{m['role']}: {m['content']}" for m in recent])
-    prompt = f"直近の会話からユーザーの絵の好みを1つだけ短い日本語1文で。なければ『まだ具体的な好みは少ない』。\n{conversation_text}"
-    try:
-        completion = client.chat.completions.create(model="grok-4-fast", messages=[{"role": "user", "content": prompt}], max_tokens=80)
-        result = completion.choices[0].message.content.strip()
-        if result and result not in st.session_state.learned_preferences:
-            st.session_state.learned_preferences.append(result)
-            st.session_state.learned_preferences = st.session_state.learned_preferences[-20:]
-        return result
-    except Exception as e:
-        return f"学習に失敗（{e}）"
-
 def analyze_image_style(uploaded_file):
     try:
         image = Image.open(uploaded_file)
@@ -347,6 +318,7 @@ def init_new_user_state(username):
     st.session_state.stripe_subscription_id = None
     st.session_state.current_mode = "chat"
     st.session_state.auth_page = "setup"
+    st.session_state.waiting_for_ai = False
 
 if "logged_in" not in st.session_state:
     st.session_state.logged_in = False
@@ -386,6 +358,8 @@ if "gen_w" not in st.session_state:
     st.session_state.gen_w = 1024
 if "gen_h" not in st.session_state:
     st.session_state.gen_h = 1024
+if "waiting_for_ai" not in st.session_state:
+    st.session_state.waiting_for_ai = False
 
 query = st.query_params
 if st.session_state.get("logged_in") and stripe is not None and query.get("session_id"):
@@ -447,6 +421,7 @@ if not st.session_state.logged_in:
                     st.session_state[k] = data.get(k, v)
                 st.session_state.current_mode = "chat"
                 st.session_state.auth_page = "app"
+                st.session_state.waiting_for_ai = False
                 st.rerun()
             else:
                 st.error("ユーザー名またはパスワードが違います")
@@ -520,6 +495,7 @@ with st.sidebar:
         save_current_user_data()
         st.session_state.logged_in = False
         st.session_state.auth_page = "home"
+        st.session_state.waiting_for_ai = False
         st.rerun()
 
 mode = st.session_state.current_mode
@@ -540,11 +516,47 @@ if mode == "chat":
                 st.write(msg["content"])
                 if "image" in msg:
                     st.image(msg["image"], use_container_width=True)
-    if user_message := st.chat_input("メッセージを送る..."):
+
+    user_message = st.chat_input(
+        "考え中です..." if st.session_state.waiting_for_ai else "メッセージを送る...",
+        disabled=st.session_state.waiting_for_ai
+    )
+
+    if user_message and not st.session_state.waiting_for_ai:
         st.session_state.messages.append({"role": "user", "content": user_message})
+        st.session_state.waiting_for_ai = True
+        save_current_user_data()
+        st.rerun()
+
+    if st.session_state.waiting_for_ai and st.session_state.messages and st.session_state.messages[-1]["role"] == "user":
+        gender_note = "女の子らしい口調で。" if st.session_state.ai_gender == "おんなのこ" else "男の子らしい口調で。"
+        base = CHARACTER_PROMPTS.get(st.session_state.ai_type, CHARACTER_PROMPTS["中立"])
+        prefs = " / ".join(st.session_state.learned_preferences[-3:]) if st.session_state.learned_preferences else "まだ少ない"
+        system_prompt = (
+            f"あなたは「{st.session_state.ai_name}」。{base}{gender_note}"
+            "短く自然に返す。同じ質問を繰り返さない。"
+            f"覚えている好み: {prefs}"
+        )
+        api_messages = [{"role": "system", "content": system_prompt}] + [
+            {"role": m["role"], "content": m["content"]}
+            for m in st.session_state.messages[-6:]
+        ]
+        try:
+            with st.spinner("考え中..."):
+                completion = client.chat.completions.create(
+                    model="grok-4-fast",
+                    messages=api_messages,
+                    max_tokens=90
+                )
+            reply = completion.choices[0].message.content
+        except Exception as e:
+            reply = f"（エラー: {e}）"
+
+        st.session_state.messages.append({"role": "assistant", "content": reply})
         st.session_state.exp += 1
         if not is_premium_active():
             st.session_state.ad_count += 1
+
         need_now = needed_exp(st.session_state.level)
         if st.session_state.exp >= need_now:
             st.session_state.level += 1
@@ -553,32 +565,21 @@ if mode == "chat":
                 st.session_state.points += 50
             elif st.session_state.level > 4:
                 st.session_state.points += 5
-            learned = learn_one_from_recent_chat()
             unlock = ""
             if st.session_state.level == 3:
                 unlock = "学習モードが解放されました。"
             elif st.session_state.level == 4:
                 unlock = "画像生成モードが解放されました。50ptプレゼント！"
-            notice = f"🎉 レベルアップ！ Lv.{st.session_state.level}\n今回覚えたこと：{learned}"
+            notice = f"🎉 レベルアップ！ Lv.{st.session_state.level}"
             if unlock:
                 notice += f"\n{unlock}"
             st.session_state.messages.append({"role": "assistant", "content": notice})
-        gender_note = "女の子らしい口調で。" if st.session_state.ai_gender == "おんなのこ" else "男の子らしい口調で。"
-        base = CHARACTER_PROMPTS.get(st.session_state.ai_type, CHARACTER_PROMPTS["中立"])
-        prefs = " / ".join(st.session_state.learned_preferences[-3:]) if st.session_state.learned_preferences else "まだ少ない"
-        system_prompt = f"あなたは「{st.session_state.ai_name}」。{base}{gender_note}好きなキャラ・絵柄を自然に聞く。同じ質問を繰り返さない。短く。既に覚えている好み: {prefs}"
-        api_messages = [{"role": "system", "content": system_prompt}] + [{"role": m["role"], "content": m["content"]} for m in st.session_state.messages[-8:]]
-        try:
-            with st.spinner("考え中..."):
-                completion = client.chat.completions.create(model="grok-4-fast", messages=api_messages, max_tokens=220)
-            st.session_state.messages.append({"role": "assistant", "content": completion.choices[0].message.content})
-            if len(st.session_state.messages) % 6 == 0:
-                update_personality()
-        except Exception as e:
-            st.session_state.messages.append({"role": "assistant", "content": f"（エラー: {e}）"})
+
         if not is_premium_active() and st.session_state.ad_count >= ad_interval(st.session_state.level):
             st.session_state.ad_count = 0
             st.warning("📢 動画広告の時間です")
+
+        st.session_state.waiting_for_ai = False
         save_current_user_data()
         st.rerun()
 
