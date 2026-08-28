@@ -47,23 +47,24 @@ if stripe is not None and STRIPE_SECRET_KEY:
 client = OpenAI(api_key=grok_key, base_url="https://api.x.ai/v1")
 
 CHARACTER_PROMPTS = {
-    "甘えん坊": "甘えん坊な女の子。ユーザーを『お兄ちゃん』と呼び、語尾は『〜だよぉ』『〜なの』など可愛く話す。",
-    "ツンデレ": "ツンデレな女の子。素直になれず『アンタ』『お兄ちゃん』と呼び、きつい態度とデレを混ぜる。",
-    "ヤンデレ": "ヤンデレな女の子。ユーザーに異常に執着し、『私だけを見て』というトーンで話す。",
-    "ヤンキー": "ヤンキーな女の子。ぶっきらぼうで少し口が悪い口調。",
-    "姫": "お嬢様。『お兄様』と呼び、語尾に『〜ですわ』をつけて上品に話す。",
-    "王子": "王子様のような男の子。優しくスマートな口調。",
-    "明るいキャラ": "元気でポジティブな男の子。『〜じゃん！』『〜だぜ！』などハツラツとした口調。",
-    "口数少ないキャラ": "クールで物静かな男の子。短文で話す。",
-    "中立": "これから育っていくAI絵師。まだ性格が定まっていない。"
+    "甘えん坊": "甘えん坊な女の子。『お兄ちゃん』呼び。語尾は『〜だよぉ』『〜なの』。",
+    "ツンデレ": "ツンデレな女の子。『アンタ』『お兄ちゃん』呼び。きつい態度とデレを混ぜる。",
+    "ヤンデレ": "ヤンデレな女の子。『私だけを見て』というトーン。",
+    "ヤンキー": "ヤンキーな女の子。ぶっきらぼう。『〜だし』『〜じゃねぇし』。",
+    "姫": "お嬢様。『お兄様』呼び。語尾は『〜ですわ』。",
+    "明るいキャラ": "元気で明るい女の子。『〜だよ！』『〜なの！』『〜だね！』。男言葉は禁止。",
+    "口数少ないキャラ": "クールで物静かな女の子。短文。語尾は『〜よ』『〜ね』。",
+    "中立": "育っていく女の子のAI絵師。やさしい女の子口調。"
 }
+
+ALL_TYPES = list(CHARACTER_PROMPTS.keys())
 
 NG_LEARN = [
     "まだ具体的", "好みは少ない", "わからない", "不明", "なし", "特にない", "NONE",
     "普通", "なんでも", "大丈夫", "おまかせ", "いいよ", "どっちでも"
 ]
-
 SOFT_SKIP = ["普通", "なんでも", "大丈夫", "おまかせ", "いいよ", "それでいい", "特にない"]
+SHORT_REPLIES = ["はい", "うん", "そう", "ええ", "なるほど", "わかった", "おけ", "ok", "OK"]
 
 def file_to_b64(path):
     if not os.path.exists(path):
@@ -120,6 +121,14 @@ def save_users(users):
     with open(USERS_FILE, "w", encoding="utf-8") as f:
         json.dump(users, f, ensure_ascii=False, indent=2)
 
+def normalize_type():
+    t = st.session_state.get("ai_type", "中立")
+    if t == "王子":
+        st.session_state.ai_type = "姫"
+    elif t not in CHARACTER_PROMPTS:
+        st.session_state.ai_type = "中立"
+    st.session_state.ai_gender = "おんなのこ"
+
 def save_current_user_data():
     if "username" not in st.session_state:
         return
@@ -128,7 +137,7 @@ def save_current_user_data():
     if username in users:
         users[username]["data"] = {
             "ai_name": st.session_state.get("ai_name"),
-            "ai_gender": st.session_state.get("ai_gender", "おんなのこ"),
+            "ai_gender": "おんなのこ",
             "ai_type": st.session_state.get("ai_type", "中立"),
             "type_locked": st.session_state.get("type_locked", False),
             "level": st.session_state.get("level", 1),
@@ -318,15 +327,14 @@ def is_soft_skip(text):
     t = (text or "").strip()
     return any(x in t for x in SOFT_SKIP)
 
+def is_short_reply(text):
+    t = (text or "").strip()
+    return len(t) <= 4 or t in SHORT_REPLIES
+
 def convert_pref_to_prompt(raw_text):
     prompt = (
         "次のユーザーの好みを、画像生成プロンプトとして使える短い語句に変換して1行だけ返す。"
         "『〜が好き』はそのまま残さない。"
-        "キャラ名ならキャラ名にする。絵柄なら実際に使う修飾語にする。"
-        "例:\n"
-        "めぐみんが好き → megumin, red eye, witch hat, explosion mage\n"
-        "このすばのアクアが好き → aqua, konosuba, blue hair, priestess, water goddess\n"
-        "シンプルな絵が好き → simple illustration, clean lines, simple background, minimal shading\n"
         f"変換する文: {raw_text}"
     )
     try:
@@ -345,8 +353,7 @@ def learn_one_from_recent_chat():
     conversation_text = "\n".join([f"{m['role']}: {m['content']}" for m in recent])
     prompt = (
         "ユーザーが自分から答えた具体的な絵の好みだけを、1件ずつ短い日本語で改行して出す。"
-        "『普通』『なんでもいい』『いいよ』は出さない。1文にまとめない。"
-        "なければ NONE だけ。"
+        "『普通』『なんでもいい』『はい』は出さない。なければ NONE。"
         f"\n{conversation_text}"
     )
     try:
@@ -383,8 +390,7 @@ def update_personality():
     conversation_text = "\n".join([f"{m['role']}: {m['content']}" for m in recent])
     prompt = (
         "会話の雰囲気から性格を1つだけ選ぶ。"
-        "選択肢: 甘えん坊, ツンデレ, ヤンデレ, ヤンキー, 姫, 王子, 明るいキャラ, 口数少ないキャラ, 中立"
-        "単語だけ返す。\n" + conversation_text
+        f"選択肢: {', '.join(ALL_TYPES)}\n単語だけ返す。\n{conversation_text}"
     )
     try:
         completion = client.chat.completions.create(
@@ -551,6 +557,7 @@ if not st.session_state.logged_in:
                 }
                 for k, v in defaults.items():
                     st.session_state[k] = data.get(k, v)
+                normalize_type()
                 st.session_state.current_mode = "chat"
                 st.session_state.auth_page = "app"
                 st.session_state.waiting_for_ai = False
@@ -585,14 +592,15 @@ if not st.session_state.logged_in:
 
 if st.session_state.get("logged_in"):
     grant_free_gens_if_needed()
+    normalize_type()
 
 if st.session_state.ai_name is None:
     show_header_image()
     input_name = st.text_input("AIの名前")
-    gender = st.radio("性別", ["おんなのこ", "おとこのこ"], horizontal=True)
     if st.button("この設定で開始する！", type="primary") and input_name.strip():
         st.session_state.ai_name = input_name.strip()
-        st.session_state.ai_gender = gender
+        st.session_state.ai_gender = "おんなのこ"
+        st.session_state.ai_type = "中立"
         st.session_state.messages = [{"role": "assistant", "content": f"はじめまして、{input_name.strip()}だよ。好きな絵の話でも、なんでもない話でもいいよ。"}]
         save_current_user_data()
         st.rerun()
@@ -608,7 +616,6 @@ with st.sidebar:
         st.write(f"**無料生成残:** {st.session_state.get('free_gen_left', 0)} / 50")
     st.markdown("### AIステータス")
     st.write(f"**名前:** {st.session_state.ai_name}")
-    st.write(f"**性別:** {st.session_state.ai_gender}")
     st.write(f"**レベル:** Lv.{st.session_state.level}")
     st.write(f"**タイプ:** {st.session_state.ai_type}")
     st.write(f"**タイプ固定:** {'オン' if st.session_state.type_locked else 'オフ'}")
@@ -687,28 +694,28 @@ if mode == "chat":
 
     if st.session_state.waiting_for_ai and st.session_state.messages and st.session_state.messages[-1]["role"] == "user":
         last_user = st.session_state.messages[-1]["content"]
-        gender_note = "女の子らしい口調で。" if st.session_state.ai_gender == "おんなのこ" else "男の子らしい口調で。"
         base = CHARACTER_PROMPTS.get(st.session_state.ai_type, CHARACTER_PROMPTS["中立"])
         prefs = learned_prompt_text() or "まだ少ない"
         if is_soft_skip(last_user):
-            ask_rule = "今回は質問禁止。『了解、今のままでいくね』のように受け止めて終わる。"
-            st.session_state.turns_until_ask = 3
+            ask_rule = "今回は質問しない。やさしく受け止めて終わる。"
+            st.session_state.turns_until_ask = 2
+        elif is_short_reply(last_user):
+            ask_rule = "短い返事なので、やさしく1つだけ話題を振る。"
+            st.session_state.turns_until_ask = 2
         elif st.session_state.get("turns_until_ask", 0) > 0:
-            ask_rule = "今回は質問禁止。感想か雑談だけ。"
+            ask_rule = "今回は質問しない。感想だけ。"
             st.session_state.turns_until_ask = st.session_state.turns_until_ask - 1
         else:
-            ask_rule = "質問してもよいが、しなくてよい。するなら1つだけ。チェックリストのように服→髪型と続けない。"
+            ask_rule = "質問してもよいが、しなくてよい。するなら1つだけ。"
             st.session_state.turns_until_ask = 2
 
         system_prompt = (
-            f"あなたは育成中のAI絵師「{st.session_state.ai_name}」。{base}{gender_note}"
-            "友達の相棒として話す。アンケートしない。"
-            "7割は反応・雑談・自分の意見。3割だけ絵の話。"
-            "同じほめ言葉を繰り返さない。『いいよね』だけで終わらない。"
-            "ユーザーの言葉に対して、絵師としての短い意見を持ってよい。"
-            "雑談が来たら雑談で返す。無理に絵の質問に戻さない。"
+            f"あなたは育成中の女の子のAI絵師「{st.session_state.ai_name}」。{base}"
+            "必ず女の子として話す。"
+            "禁止: 『だぜ』『じゃん』『お前』『〜するぜ』『ノッてきたぜ』など男言葉。"
+            "使う: 『だよ』『なの』『だね』『かな』『でしょ』。"
+            "友達の相棒として話す。アンケートしない。テンションを急に上げすぎない。"
             f"{ask_rule}"
-            "ユーザーが質問したら答えだけ。"
             f"すでに学習済み: {prefs}"
         )
         api_messages = [{"role": "system", "content": system_prompt}] + [
@@ -830,8 +837,6 @@ elif mode == "generate":
                 st.write("会話: " + learned_prompt_text())
             if st.session_state.learned_styles:
                 st.write("絵柄: " + " / ".join(st.session_state.learned_styles[-3:]))
-        st.markdown("### サイズ")
-        st.caption("よく使うサイズ")
         r1 = st.columns(3)
         for i, name in enumerate(["縦長", "正方形", "横長"]):
             with r1[i]:
@@ -854,10 +859,8 @@ elif mode == "generate":
         gen_h = int(st.session_state.gen_h)
         st.write(f"今のサイズ: {gen_w} × {gen_h}")
         aspect_ratio = ratio_from_size(gen_w, gen_h)
-        st.markdown("### 画質")
         quality_choice = st.radio("画質", ["低画質（10pt / 1K）", "高画質（20pt / 2K）"])
         quality = "low" if "低画質" in quality_choice else "medium"
-        st.markdown("### 参照")
         col_a, col_b = st.columns(2)
         with col_a:
             style_ref = st.file_uploader("絵柄参照", type=["png", "jpg", "jpeg"], key="style_ref")
@@ -880,9 +883,6 @@ elif mode == "generate":
         cost, resolution, size_add, ref_add = calc_generation_cost(quality, gen_w, gen_h, ref_count, use_free=can_free)
         if can_free:
             st.info(f"月額特典：低画質1Kの無料生成を使います（残り {st.session_state.free_gen_left} / 50）")
-        if max(gen_w, gen_h) >= 1536:
-            st.caption("1536以上は2Kになるため +5pt です")
-        st.write(f"サイズ加算: {size_add}pt ／ 参照加算: {ref_add}pt")
         st.write(f"**消費ポイント: {cost} pt**（所持: {st.session_state.points} pt）")
         if st.button("🎨 イラストを生成する", type="primary", use_container_width=True):
             if not prompt_input.strip():
@@ -949,22 +949,19 @@ elif mode == "guide":
     <ol>
     <li>ホームで「登録して始める」</li>
     <li>ユーザー名とパスワードを登録</li>
-    <li>AIの名前と性別を決めてスタート</li>
+    <li>AIの名前を決めてスタート</li>
     </ol>
     <h3>育成の流れ</h3>
     <ul>
-    <li><b>レベル1</b> 何も知らないAI。会話して好みを教える</li>
+    <li><b>レベル1</b> 会話して好みを教える</li>
     <li><b>レベル2</b> アイコン変更が解放</li>
-    <li><b>レベル3</b> 学習モード解放。好きな絵を見せて絵柄を覚えさせる</li>
+    <li><b>レベル3</b> 学習モード解放</li>
     <li><b>レベル4</b> 画像生成解放。50ポイントプレゼント</li>
     <li><b>レベル5以降</b> 会話20回でレベルアップ。毎回5ポイント</li>
     </ul>
-    <p>経験値は会話だけで増えます。画像生成では増えません。</p>
     <h3>会話とタイプ</h3>
-    <p>雑談でも、好きな絵の話でも大丈夫です。話した具体的な好みは、レベルアップ時に1つ学習します。<br>
-    「普通でいい」などは学習しません。<br>
-    学習内容は生成用の言葉に変換してから保存します。<br>
-    メニューの「今のタイプを固定する」を押すと、タイプは変わりません。</p>
+    <p>AIは女の子として話します。タイプが変わっても女の子口調のままです。<br>
+    「普通でいい」「はい」だけでは学習しません。</p>
     </div>
     """, unsafe_allow_html=True)
 
@@ -973,10 +970,8 @@ elif mode == "icon":
     if st.session_state.level < 2:
         st.warning("アイコン変更はレベル2で解放されます。")
     else:
-        st.write("自分とAIのアイコンを、好きな画像に変えられます。")
         c1, c2 = st.columns(2)
         with c1:
-            st.caption("ユーザー")
             u = st.file_uploader("ユーザーアイコン", type=["png", "jpg", "jpeg"], key="user_icon_up")
             if u and st.button("ユーザーアイコンを変更"):
                 st.session_state.user_icon = uploaded_to_data_uri(u)
@@ -984,7 +979,6 @@ elif mode == "icon":
                 st.success("変更しました")
                 st.rerun()
         with c2:
-            st.caption("AI")
             a = st.file_uploader("AIアイコン", type=["png", "jpg", "jpeg"], key="ai_icon_up")
             if a and st.button("AIアイコンを変更"):
                 st.session_state.ai_icon = uploaded_to_data_uri(a)
@@ -1000,10 +994,9 @@ elif mode == "plan":
     st.write("- 広告除去")
     if is_premium_active():
         st.success(f"月額会員です。期限: {str(st.session_state.premium_until)[:10]}")
-        st.write(f"無料生成の残り: {st.session_state.get('free_gen_left', 0)} / 50")
         if st.button("月額を解約する"):
             cancel_premium()
-            st.warning("解約しました。これ以降の無料回数の更新はありません。")
+            st.warning("解約しました。")
             st.rerun()
     else:
         if stripe is None or not STRIPE_SECRET_KEY or not STRIPE_PRICE_ID:
