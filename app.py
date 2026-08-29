@@ -8,7 +8,11 @@ import math
 import io
 import zipfile
 import random
+import re
+import socket
+import smtplib
 import requests
+from email.mime.text import MIMEText
 from io import BytesIO
 from datetime import datetime, timedelta
 from PIL import Image, ImageDraw, ImageFont
@@ -24,6 +28,12 @@ NAI_KEY = os.environ.get("NOVELAI_API_KEY", "")
 STRIPE_SECRET_KEY = os.environ.get("STRIPE_SECRET_KEY", "")
 STRIPE_PRICE_ID = os.environ.get("STRIPE_PRICE_ID", "")
 SITE_URL = os.environ.get("SITE_URL", "https://aistation.onrender.com")
+RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "")
+MAIL_FROM = os.environ.get("MAIL_FROM", os.environ.get("SMTP_FROM", ""))
+SMTP_HOST = os.environ.get("SMTP_HOST", "")
+SMTP_PORT = int(os.environ.get("SMTP_PORT", "587"))
+SMTP_USER = os.environ.get("SMTP_USER", "")
+SMTP_PASS = os.environ.get("SMTP_PASS", "")
 if stripe is not None and STRIPE_SECRET_KEY:
     stripe.api_key = STRIPE_SECRET_KEY
 
@@ -104,6 +114,44 @@ def hash_password(p):
 
 def norm_mail(m):
     return (m or "").strip().lower()
+
+def valid_mail_format(m):
+    return re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", norm_mail(m)) is not None
+
+def mail_domain_ok(m):
+    try:
+        domain = norm_mail(m).split("@", 1)[1]
+        socket.getaddrinfo(domain, 80)
+        return True
+    except Exception:
+        return False
+
+def send_code_mail(to_addr, code):
+    body = f"確認コード: {code}\nこのコードをサイトに入力してください。"
+    if RESEND_API_KEY and MAIL_FROM:
+        res = requests.post(
+            "https://api.resend.com/emails",
+            headers={"Authorization": f"Bearer {RESEND_API_KEY}", "Content-Type": "application/json"},
+            json={"from": MAIL_FROM, "to": [to_addr], "subject": "panel AI. 登録確認", "text": body},
+            timeout=20,
+        )
+        if res.status_code in (200, 201):
+            return True, ""
+        return False, res.text[:200]
+    if SMTP_HOST and SMTP_USER and SMTP_PASS and MAIL_FROM:
+        try:
+            msg = MIMEText(body, "plain", "utf-8")
+            msg["Subject"] = "panel AI. 登録確認"
+            msg["From"] = MAIL_FROM
+            msg["To"] = to_addr
+            with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=20) as s:
+                s.starttls()
+                s.login(SMTP_USER, SMTP_PASS)
+                s.sendmail(MAIL_FROM, [to_addr], msg.as_string())
+            return True, ""
+        except Exception as e:
+            return False, str(e)
+    return False, "メール送信設定がありません"
 
 def load_json(path, default):
     if os.path.exists(path):
@@ -440,7 +488,7 @@ defaults = {
     "error": "", "busy_index": None, "combined": None, "points": 0, "premium_until": "",
     "simple_image": None, "simple_busy": False, "simple_history": [], "show_history": False,
     "hist_pick": None, "sq": "", "sb": "", "so": "", "sn": "", "schars": [""],
-    "icon": random.choice(ANIMALS), "email": "",
+    "icon": random.choice(ANIMALS), "email": "", "pending": None,
 }
 for k, v in defaults.items():
     if k not in st.session_state:
@@ -593,26 +641,52 @@ elif st.session_state.page == "register":
     icon_up = st.file_uploader("アイコン（任意）", type=["png", "jpg", "jpeg"])
     if icon_up:
         st.image(icon_up, width=80)
-    if st.button("登録する", type="primary"):
+    if st.button("確認コードを送る"):
         users = load_json(USERS_FILE, {})
         if not name or not mail or not pw:
             st.warning("全部入れてください")
-        elif "@" not in mail:
-            st.error("メールアドレスを正しく入れてください")
+        elif not valid_mail_format(mail):
+            st.error("メールの形が正しくありません")
+        elif not mail_domain_ok(mail):
+            st.error("存在しないアドレス、または受け取れないドメインです")
         elif name in users:
             st.error("その名前は使われています")
         elif email_taken(users, mail):
-            st.error("このメールアドレスは登録済みです。ログインしてください。")
+            st.error("このメールアドレスは登録済みです")
         else:
-            icon = uploaded_to_uri(icon_up) if icon_up else random.choice(ANIMALS)
-            users[name] = {
-                "password": hash_password(pw), "email": norm_mail(mail), "icon": icon,
-                "characters": [], "points": SIGNUP_POINTS, "premium_until": "",
-                "rank": "ブロンズ", "history": [],
-            }
-            save_json(USERS_FILE, users)
-            apply_login(name, users[name])
-            st.session_state.page = "simple"; st.rerun()
+            code = f"{random.randint(100000, 999999)}"
+            ok, err = send_code_mail(norm_mail(mail), code)
+            if not ok:
+                st.error(f"メールを送れませんでした: {err}")
+            else:
+                st.session_state.pending = {
+                    "name": name,
+                    "email": norm_mail(mail),
+                    "password": hash_password(pw),
+                    "icon": uploaded_to_uri(icon_up) if icon_up else random.choice(ANIMALS),
+                    "code": code,
+                }
+                st.success("確認コードを送りました。メールを見てください。")
+    if st.session_state.pending:
+        code_in = st.text_input("確認コード")
+        if st.button("登録する", type="primary"):
+            p = st.session_state.pending
+            users = load_json(USERS_FILE, {})
+            if code_in.strip() != p["code"]:
+                st.error("コードが違います")
+            elif email_taken(users, p["email"]) or p["name"] in users:
+                st.error("すでに登録されています")
+            else:
+                users[p["name"]] = {
+                    "password": p["password"], "email": p["email"], "icon": p["icon"],
+                    "characters": [], "points": SIGNUP_POINTS, "premium_until": "",
+                    "rank": "ブロンズ", "history": [],
+                }
+                save_json(USERS_FILE, users)
+                apply_login(p["name"], users[p["name"]])
+                st.session_state.pending = None
+                st.session_state.page = "simple"
+                st.rerun()
     st.write("ログイン")
     lu = st.text_input("メールまたはユーザーネーム", key="lu")
     lp = st.text_input("ログイン用パスワード", type="password", key="lp")
