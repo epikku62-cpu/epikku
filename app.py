@@ -683,4 +683,207 @@ elif st.session_state.page == "chars":
         char_files = st.file_uploader("キャラ（最大3）", type=["png", "jpg", "jpeg"], accept_multiple_files=True, key="char_ups")
         for i, f in enumerate((char_files or [])[:3]):
             st.image(f, width=110)
-            char_strengths.append(st.slider(f"キャラ強度{i+1}", 1, 
+            char_strengths.append(st.slider(f"キャラ強度{i+1}", 1, 10, 8, key=f"cs_{i}"))
+    if use_type != "キャラだけ":
+        style_files = st.file_uploader("絵柄（最大3）", type=["png", "jpg", "jpeg"], accept_multiple_files=True, key="style_ups")
+        for i, f in enumerate((style_files or [])[:3]):
+            st.image(f, width=110)
+            style_strengths.append(st.slider(f"絵柄強度{i+1}", 1, 10, 8, key=f"ss_{i}"))
+    if st.button("保存", type="primary"):
+        chars = [{"uri": uploaded_to_uri(f), "strength": char_strengths[i]} for i, f in enumerate((char_files or [])[:3])]
+        styles = [{"uri": uploaded_to_uri(f), "strength": style_strengths[i]} for i, f in enumerate((style_files or [])[:3])]
+        if not chars and not styles:
+            st.warning("画像を入れてください")
+        else:
+            st.session_state.characters.append({
+                "id": str(uuid.uuid4())[:8],
+                "save_name": save_name.strip() or f"セット{len(st.session_state.characters)+1}",
+                "kind": use_type, "chars": chars, "styles": styles,
+            })
+            save_user_state()
+            st.success("保存しました")
+            st.rerun()
+    for i, ch in enumerate(st.session_state.characters):
+        c1, c2 = st.columns([4, 1])
+        with c1:
+            st.write(char_label(ch))
+        with c2:
+            if st.button("削除", key=f"delc_{i}"):
+                st.session_state.characters.pop(i)
+                save_user_state()
+                st.rerun()
+    show_ad()
+
+elif st.session_state.page == "simple":
+    st.subheader("画像生成モード")
+    quality = st.text_area("画質プロンプト")
+    background = st.text_area("背景プロンプト")
+    character = st.text_area("キャラクタープロンプト")
+    other = st.text_area("その他プロンプト")
+    size_name = st.radio("サイズ", list(SIMPLE_SIZES.keys()), horizontal=True)
+    scale = st.slider("プロンプトガイダンス", 1.0, 10.0, 5.0, 0.1)
+    if st.button("生成する", type="primary"):
+        st.session_state.simple_busy = True
+        st.rerun()
+    if st.session_state.simple_busy:
+        st.session_state.simple_busy = False
+        parts = [x.strip() for x in [quality, background, character, other] if x.strip()]
+        if not parts:
+            st.session_state.error = "プロンプトを入れてください"
+        else:
+            try:
+                w, h = SIMPLE_SIZES[size_name]
+                prompt = ", ".join(parts)
+                with st.spinner("生成中..."):
+                    st.session_state.simple_image = nai_request(
+                        prompt, w, h, "nai-diffusion-5-full", steps=20, scale=scale
+                    )
+                if V5_COST > 0:
+                    st.session_state.points -= V5_COST
+                    save_user_state()
+                st.session_state.error = ""
+            except Exception as e:
+                st.session_state.error = str(e)
+        st.rerun()
+    if st.session_state.simple_image:
+        st.image(st.session_state.simple_image, use_container_width=True)
+        raw = uri_to_image(st.session_state.simple_image)
+        st.download_button("PNG保存", data=image_to_bytes(raw), file_name="simple.png", mime="image/png")
+    show_ad()
+
+else:
+    st.subheader("4コマ")
+    layout = st.radio("並べ方", list(LAYOUTS.keys()), horizontal=True)
+    st.session_state.layout = layout
+    n = LAYOUTS[layout]["count"]
+    names = [char_label(ch) for ch in st.session_state.characters]
+    size_opts = [k for k, v in SIZES.items() if (is_premium() or not v["paid"])]
+
+    def set_by_name(name):
+        for ch in st.session_state.characters:
+            if char_label(ch) == name:
+                return ch
+        return None
+
+    def make_one(i):
+        scene = st.session_state.scenes[i].strip()
+        if not scene:
+            raise Exception("内容が空です")
+        shape = st.session_state.panel_shape[i]
+        spec = SIZES.get(shape, SIZES["横長"])
+        if spec["paid"] and not is_premium():
+            raise Exception("このサイズはVIPだけです")
+        chosen = st.session_state.scene_chars[i]
+        if chosen != "セットなし" and not is_premium():
+            raise Exception("セットはVIPだけです")
+        pack = {} if chosen == "セットなし" else (set_by_name(chosen) or {})
+        chars = normalize_refs(pack.get("chars"))
+        styles = normalize_refs(pack.get("styles"))
+        ref_n = min(3, len(chars)) + min(3, len(styles))
+        cost = spec["cost"] + REF_SITE * ref_n
+        if cost > 0 and st.session_state.points < cost:
+            raise Exception(f"ポイントが足りません。必要 {cost}")
+        gw, gh = spec["gen"]
+        st.session_state.panel_images[i] = nai_request(
+            scene, gw, gh, "nai-diffusion-4-5-full", steps=23, scale=5.0,
+            char_refs=chars, style_refs=styles
+        )
+        st.session_state.panel_sizes[i] = spec["wh"]
+        if cost > 0:
+            st.session_state.points -= cost
+            save_user_state()
+
+    for i in range(n):
+        with st.expander(f"コマ {i+1}", expanded=True):
+            cur = st.session_state.panel_shape[i]
+            if cur not in size_opts:
+                cur = "横長"
+            shape = st.selectbox("サイズ", size_opts, index=size_opts.index(cur), key=f"shape_{i}")
+            st.session_state.panel_shape[i] = shape
+            spec = SIZES[shape]
+            st.session_state.panel_sizes[i] = spec["wh"]
+            st.caption(f"{spec['wh'][0]} × {spec['wh'][1]}　消費 {spec['cost']}（セットは1枚+{REF_SITE}）")
+            up = st.file_uploader("持っている画像を使う", type=["png", "jpg", "jpeg"], key=f"up_{i}")
+            if up:
+                st.session_state.panel_images[i] = uploaded_to_uri(up)
+            st.session_state.scenes[i] = st.text_input("生成する内容", value=st.session_state.scenes[i], key=f"sc_{i}")
+            options = ["セットなし"] + (names if is_premium() else [])
+            curc = st.session_state.scene_chars[i]
+            idx = options.index(curc) if curc in options else 0
+            st.session_state.scene_chars[i] = st.selectbox("セット", options, index=idx, key=f"ch_{i}")
+            c1, c2 = st.columns(2)
+            with c1:
+                if st.button("生成", key=f"gen_{i}", type="primary"):
+                    st.session_state.busy_index = i
+                    st.rerun()
+            with c2:
+                if st.button("消す", key=f"clr_{i}"):
+                    st.session_state.panel_images[i] = None
+                    st.session_state.panel_bubbles[i] = []
+                    st.rerun()
+            if st.session_state.panel_images[i]:
+                draft = st.session_state.drafts[i]
+                draft["text"] = st.text_input("新しいセリフ", value=draft.get("text", ""), key=f"bt_{i}")
+                d1, d2 = st.columns(2)
+                with d1:
+                    draft["kind"] = st.selectbox("形", BUBBLE_TYPES, key=f"bk_{i}")
+                    draft["tail"] = st.selectbox("しっぽ", TAILS, key=f"tl_{i}")
+                    draft["font"] = st.selectbox("フォント", usable_fonts, key=f"bfn_{i}")
+                    draft["dir"] = st.selectbox("向き", TEXT_DIR, key=f"bd_{i}")
+                with d2:
+                    draft["size"] = st.slider("文字の大きさ", 16, 64, int(draft.get("size", 28)), key=f"bs_{i}")
+                    draft["bold"] = st.slider("太さ", 0, 4, int(draft.get("bold", 0)), key=f"bb_{i}")
+                    draft["tail_size"] = st.slider("しっぽの大きさ", 8, 80, int(draft.get("tail_size", 28)), key=f"bts_{i}")
+                    draft["x"] = st.slider("左右", 0, 80, int(draft.get("x", 8)), key=f"bx_{i}")
+                    draft["y"] = st.slider("上下", 0, 80, int(draft.get("y", 8)), key=f"by_{i}")
+                    draft["angle"] = st.slider("傾き", -45, 45, int(draft.get("angle", 0)), key=f"ba_{i}")
+                draft["fill"] = st.color_picker("吹き出し色", draft.get("fill", "#ffffff"), key=f"bf_{i}")
+                draft["color"] = st.color_picker("文字色", draft.get("color", "#111111"), key=f"bc_{i}")
+                st.session_state.drafts[i] = draft
+                if st.button("このセリフを追加", key=f"addb_{i}"):
+                    if draft["text"].strip():
+                        st.session_state.panel_bubbles[i].append(dict(draft))
+                        st.session_state.drafts[i] = empty_bubble()
+                        st.rerun()
+                for bi, bb in enumerate(st.session_state.panel_bubbles[i]):
+                    k1, k2 = st.columns([5, 1])
+                    with k1:
+                        st.caption(bb.get("text", ""))
+                    with k2:
+                        if st.button("×", key=f"delb_{i}_{bi}"):
+                            st.session_state.panel_bubbles[i].pop(bi)
+                            st.rerun()
+                raw = uri_to_image(st.session_state.panel_images[i]).resize(st.session_state.panel_sizes[i])
+                preview = draw_all_bubbles(raw, st.session_state.panel_bubbles[i])
+                if draft["text"].strip():
+                    preview = draw_one_bubble(preview, draft)
+                st.image(preview, width=340)
+
+    busy = st.session_state.get("busy_index")
+    if busy is not None:
+        st.session_state.busy_index = None
+        try:
+            with st.spinner("生成中..."):
+                make_one(int(busy))
+            st.session_state.error = ""
+        except Exception as e:
+            st.session_state.error = str(e)
+        st.rerun()
+
+    st.markdown("---")
+    if st.button("1枚にまとめる", type="primary"):
+        panels = []
+        for i in range(n):
+            if not st.session_state.panel_images[i]:
+                st.error(f"コマ{i+1}がありません")
+                panels = None
+                break
+            raw = uri_to_image(st.session_state.panel_images[i]).resize(st.session_state.panel_sizes[i])
+            panels.append(draw_all_bubbles(raw, st.session_state.panel_bubbles[i]))
+        if panels:
+            st.session_state.combined = combine_panels(panels, cols=LAYOUTS[layout]["cols"])
+            st.rerun()
+    if st.session_state.combined is not None:
+        st.image(st.session_state.combined, use_container_width=True)
+        st.download_button("PNG保存", data=image_to_bytes(st.session_state.combined), file_name="yonkoma.png", mime="image/png")
+    show_ad()
