@@ -38,6 +38,7 @@ PHONE_W, PHONE_H = 1080, 1920
 MONTHLY_PRICE = 1000
 MONTHLY_POINTS = 2500
 REF_SITE = 10
+V5_COST = 20
 
 LAYOUTS = {
     "縦4": {"cols": 1, "count": 4},
@@ -57,6 +58,11 @@ SIZES = {
     "大・正 1472×1472": {"wh": (1472, 1472), "gen": (1472, 1472), "cost": 72, "paid": True},
     "壁紙・横 1920×1088": {"wh": (1920, 1088), "gen": (1920, 1088), "cost": 68, "paid": True},
     "壁紙・縦 1088×1920": {"wh": (1088, 1920), "gen": (1088, 1920), "cost": 68, "paid": True},
+}
+SIMPLE_SIZES = {
+    "横長 1216×832": (1216, 832),
+    "縦長 832×1216": (832, 1216),
+    "正方形 1024×1024": (1024, 1024),
 }
 BUBBLE_TYPES = ["ふきだし", "叫び", "考え", "文字だけ"]
 TAILS = ["下", "下左", "下右", "左", "右"]
@@ -189,7 +195,7 @@ def nai_wh(w, h):
     h = max(64, min(1920, int(round(h / 64) * 64)))
     return w, h
 
-def nai_generate(prompt, width, height, char_refs=None, style_refs=None):
+def nai_request(prompt, width, height, model, steps=23, scale=5.0, char_refs=None, style_refs=None):
     if not NAI_KEY:
         raise Exception("NOVELAI_API_KEY がありません")
     gw, gh = nai_wh(width, height)
@@ -199,13 +205,14 @@ def nai_generate(prompt, width, height, char_refs=None, style_refs=None):
         "params_version": 3,
         "width": gw,
         "height": gh,
-        "scale": 5.0,
+        "scale": float(scale),
         "sampler": "k_euler_ancestral",
-        "steps": 23,
+        "steps": int(steps),
         "n_samples": 1,
         "qualityToggle": False,
         "ucPreset": 0,
         "negative_prompt": "",
+        "noise_schedule": "karras",
         "v4_prompt": {
             "caption": {"base_caption": prompt, "char_captions": []},
             "use_coords": False,
@@ -216,22 +223,23 @@ def nai_generate(prompt, width, height, char_refs=None, style_refs=None):
             "legacy_uc": False,
         },
     }
-    refs, kinds = [], []
-    if char_refs and style_refs:
-        refs.append(pad_ref(char_refs[0]["uri"])); kinds.append("character&style")
-    elif char_refs:
-        refs.append(pad_ref(char_refs[0]["uri"])); kinds.append("character")
-    elif style_refs:
-        refs.append(pad_ref(style_refs[0]["uri"])); kinds.append("style")
-    if refs:
-        parameters["director_reference_images"] = refs
-        parameters["director_reference_descriptions"] = [
-            {"caption": {"base_caption": kinds[0], "char_captions": []}, "legacy_uc": False}
-        ]
-        parameters["director_reference_information_extracted"] = [1]
-        parameters["director_reference_strength_values"] = [1]
-        parameters["director_reference_secondary_strength_values"] = [0.75]
-    payload = {"input": prompt, "model": "nai-diffusion-4-5-full", "action": "generate", "parameters": parameters}
+    if model.startswith("nai-diffusion-4-5"):
+        refs, kinds = [], []
+        if char_refs and style_refs:
+            refs.append(pad_ref(char_refs[0]["uri"])); kinds.append("character&style")
+        elif char_refs:
+            refs.append(pad_ref(char_refs[0]["uri"])); kinds.append("character")
+        elif style_refs:
+            refs.append(pad_ref(style_refs[0]["uri"])); kinds.append("style")
+        if refs:
+            parameters["director_reference_images"] = refs
+            parameters["director_reference_descriptions"] = [
+                {"caption": {"base_caption": kinds[0], "char_captions": []}, "legacy_uc": False}
+            ]
+            parameters["director_reference_information_extracted"] = [1]
+            parameters["director_reference_strength_values"] = [1]
+            parameters["director_reference_secondary_strength_values"] = [0.75]
+    payload = {"input": prompt, "model": model, "action": "generate", "parameters": parameters}
     last_err = None
     for url in NAI_URLS:
         res = requests.post(
@@ -438,6 +446,10 @@ if "points" not in st.session_state:
     st.session_state.points = 0
 if "premium_until" not in st.session_state:
     st.session_state.premium_until = ""
+if "simple_image" not in st.session_state:
+    st.session_state.simple_image = None
+if "simple_busy" not in st.session_state:
+    st.session_state.simple_busy = False
 
 qs = st.query_params
 if st.session_state.logged_in and qs.get("checkout") == "success":
@@ -522,6 +534,8 @@ with st.sidebar:
     st.caption("月額会員" if is_premium() else "無料")
     if st.button("4コマ", use_container_width=True):
         st.session_state.page = "make"; st.rerun()
+    if st.button("画像生成", use_container_width=True):
+        st.session_state.page = "simple"; st.rerun()
     if st.button("セット", use_container_width=True):
         st.session_state.page = "chars"; st.rerun()
     if st.button("月額", use_container_width=True):
@@ -542,9 +556,8 @@ if st.session_state.page == "help":
         """
         <div style="color:#111;background:#fff;padding:16px;border-radius:12px;">
         <h3>説明書</h3>
-        <p>無料は普通サイズ（横長・縦長・正方形）だけ、セットなしで生成できます。</p>
-        <p>月額1000円で2500ポイント。セットと大サイズ・壁紙が使えます。</p>
-        <p>セット1枚10、大・横/縦52、大・正72、壁紙68。4枚をまとめてもNovelAIは減りません。</p>
+        <p>4コマは V4.5 Full。セットなし普通サイズは無料。セットと大サイズ・壁紙は月額。</p>
+        <p>画像生成は V5 Full。普通サイズ3種だけ。1回20ポイント。ステップは20固定。</p>
         </div>
         """,
         unsafe_allow_html=True,
@@ -556,6 +569,7 @@ elif st.session_state.page == "plan":
     st.write(f"- {MONTHLY_POINTS}ポイント付与")
     st.write("- セット機能")
     st.write("- 大サイズ・壁紙")
+    st.write("- 画像生成ページ（V5）")
     if is_premium():
         st.success(f"月額会員です。期限 {str(st.session_state.premium_until)[:10]}")
     elif stripe is None or not STRIPE_SECRET_KEY or not STRIPE_PRICE_ID:
@@ -615,6 +629,44 @@ elif st.session_state.page == "chars":
                 save_user_state()
                 st.rerun()
 
+elif st.session_state.page == "simple":
+    st.subheader("画像生成（V5 Full）")
+    st.caption(f"1回 {V5_COST}ポイント　ステップは20固定　セットなし")
+    quality = st.text_area("画質プロンプト")
+    background = st.text_area("背景プロンプト")
+    character = st.text_area("キャラクタープロンプト")
+    other = st.text_area("その他プロンプト")
+    size_name = st.radio("サイズ", list(SIMPLE_SIZES.keys()), horizontal=True)
+    scale = st.slider("プロンプトガイダンス", 1.0, 10.0, 5.0, 0.1)
+    if st.button("生成する", type="primary"):
+        st.session_state.simple_busy = True
+        st.rerun()
+    if st.session_state.simple_busy:
+        st.session_state.simple_busy = False
+        parts = [x.strip() for x in [quality, background, character, other] if x.strip()]
+        if not parts:
+            st.session_state.error = "プロンプトを入れてください"
+        elif st.session_state.points < V5_COST:
+            st.session_state.error = f"ポイントが足りません。必要 {V5_COST}"
+        else:
+            try:
+                w, h = SIMPLE_SIZES[size_name]
+                prompt = ", ".join(parts)
+                with st.spinner("生成中..."):
+                    st.session_state.simple_image = nai_request(
+                        prompt, w, h, "nai-diffusion-5-full", steps=20, scale=scale
+                    )
+                st.session_state.points -= V5_COST
+                save_user_state()
+                st.session_state.error = ""
+            except Exception as e:
+                st.session_state.error = str(e)
+        st.rerun()
+    if st.session_state.simple_image:
+        st.image(st.session_state.simple_image, use_container_width=True)
+        raw = uri_to_image(st.session_state.simple_image)
+        st.download_button("PNG保存", data=image_to_bytes(raw), file_name="simple.png", mime="image/png")
+
 else:
     st.subheader("4コマ")
     layout = st.radio("並べ方", list(LAYOUTS.keys()), horizontal=True)
@@ -648,7 +700,10 @@ else:
         if cost > 0 and st.session_state.points < cost:
             raise Exception(f"ポイントが足りません。必要 {cost}")
         gw, gh = spec["gen"]
-        st.session_state.panel_images[i] = nai_generate(scene, gw, gh, chars, styles)
+        st.session_state.panel_images[i] = nai_request(
+            scene, gw, gh, "nai-diffusion-4-5-full", steps=23, scale=5.0,
+            char_refs=chars, style_refs=styles
+        )
         st.session_state.panel_sizes[i] = spec["wh"]
         if cost > 0:
             st.session_state.points -= cost
