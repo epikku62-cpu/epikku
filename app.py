@@ -10,8 +10,6 @@ import zipfile
 import random
 import re
 import socket
-import smtplib
-from email.mime.text import MIMEText
 import requests
 from io import BytesIO
 from datetime import datetime, timedelta
@@ -28,11 +26,6 @@ NAI_KEY = os.environ.get("NOVELAI_API_KEY", "")
 STRIPE_SECRET_KEY = os.environ.get("STRIPE_SECRET_KEY", "")
 STRIPE_PRICE_ID = os.environ.get("STRIPE_PRICE_ID", "")
 SITE_URL = os.environ.get("SITE_URL", "https://aistation.onrender.com")
-SMTP_HOST = os.environ.get("SMTP_HOST", "")
-SMTP_PORT = int(os.environ.get("SMTP_PORT", "587"))
-SMTP_USER = os.environ.get("SMTP_USER", "")
-SMTP_PASS = os.environ.get("SMTP_PASS", "")
-SMTP_FROM = os.environ.get("SMTP_FROM", SMTP_USER)
 if stripe is not None and STRIPE_SECRET_KEY:
     stripe.api_key = STRIPE_SECRET_KEY
 
@@ -48,8 +41,14 @@ PHONE_W, PHONE_H = 1080, 1920
 MONTHLY_PRICE = 980
 MONTHLY_POINTS = 2000
 REF_SITE = 10
-V5_COST = 0
+V5_COST = 20
 SIGNUP_POINTS = 20
+POINT_PACKS = [
+    {"points": 300, "yen": 300},
+    {"points": 900, "yen": 900},
+    {"points": 1500, "yen": 1500},
+    {"points": 3000, "yen": 3000},
+]
 ANIMALS = ["🐱", "🐶", "🐰", "🐻", "🦊", "🐼", "🐸", "🦉", "🐧", "🐯"]
 
 LAYOUTS = {
@@ -103,33 +102,6 @@ def hash_password(p):
 
 def norm_mail(m):
     return (m or "").strip().lower()
-
-def valid_mail_format(m):
-    return re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", norm_mail(m)) is not None
-
-def mail_domain_ok(m):
-    try:
-        domain = norm_mail(m).split("@", 1)[1]
-        socket.getaddrinfo(domain, 80)
-        return True
-    except Exception:
-        return False
-
-def send_code_mail(to_addr, code):
-    if not (SMTP_HOST and SMTP_USER and SMTP_PASS and SMTP_FROM):
-        return False, "メール送信設定がありません"
-    try:
-        msg = MIMEText(f"確認コード: {code}\nこのコードをサイトに入力してください。", "plain", "utf-8")
-        msg["Subject"] = "panel AI. 登録確認"
-        msg["From"] = SMTP_FROM
-        msg["To"] = to_addr
-        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=20) as s:
-            s.starttls()
-            s.login(SMTP_USER, SMTP_PASS)
-            s.sendmail(SMTP_FROM, [to_addr], msg.as_string())
-        return True, ""
-    except Exception as e:
-        return False, str(e)
 
 def load_json(path, default):
     if os.path.exists(path):
@@ -221,6 +193,18 @@ def pad_ref(uri):
     canvas.save(buf, format="PNG")
     return base64.b64encode(buf.getvalue()).decode()
 
+def is_premium():
+    until = st.session_state.get("premium_until") or ""
+    if not until:
+        return False
+    try:
+        return datetime.fromisoformat(until) > datetime.now()
+    except Exception:
+        return False
+
+def member_label():
+    return "VIP" if is_premium() else "ブロンズ"
+
 def save_user_state():
     users = load_json(USERS_FILE, {})
     name = st.session_state.get("username")
@@ -233,18 +217,6 @@ def save_user_state():
         users[name]["history"] = st.session_state.get("simple_history", [])[-30:]
         save_json(USERS_FILE, users)
         save_json(DATA_FILE, {"characters": st.session_state.characters})
-
-def is_premium():
-    until = st.session_state.get("premium_until") or ""
-    if not until:
-        return False
-    try:
-        return datetime.fromisoformat(until) > datetime.now()
-    except Exception:
-        return False
-
-def member_label():
-    return "VIP" if is_premium() else "ブロンズ"
 
 def nai_wh(w, h):
     w = max(64, min(1920, int(round(w / 64) * 64)))
@@ -270,7 +242,7 @@ def nai_request(prompt, width, height, model, steps=23, scale=5.0, negative="", 
         "qualityToggle": False, "ucPreset": 0,
         "negative_prompt": negative or "", "noise_schedule": "karras",
         "use_coords": True, "characterPrompts": character_prompts,
-        "v4_prompt": {"caption": {"base_caption": prompt, "char_captions": char_captions}, "use_coords": True, "use_order": True},
+        "v4_prompt": {"caption": {"base_caption": prompt or "", "char_captions": char_captions}, "use_coords": True, "use_order": True},
         "v4_negative_prompt": {"caption": {"base_caption": negative or "", "char_captions": []}, "legacy_uc": False},
     }
     if model.startswith("nai-diffusion-4-5"):
@@ -287,7 +259,7 @@ def nai_request(prompt, width, height, model, steps=23, scale=5.0, negative="", 
             parameters["director_reference_information_extracted"] = [1]
             parameters["director_reference_strength_values"] = [1]
             parameters["director_reference_secondary_strength_values"] = [0.75]
-    payload = {"input": prompt, "model": model, "action": "generate", "parameters": parameters}
+    payload = {"input": prompt or "", "model": model, "action": "generate", "parameters": parameters}
     last_err = None
     for url in NAI_URLS:
         res = requests.post(url, headers={"Authorization": f"Bearer {NAI_KEY}", "Content-Type": "application/json"}, json=payload, timeout=180)
@@ -464,7 +436,7 @@ defaults = {
     "error": "", "busy_index": None, "combined": None, "points": 0, "premium_until": "",
     "simple_image": None, "simple_busy": False, "simple_history": [], "show_history": False,
     "hist_pick": None, "sq": "", "sb": "", "so": "", "sn": "", "schars": [""],
-    "icon": random.choice(ANIMALS), "email": "", "pending": None,
+    "icon": random.choice(ANIMALS), "email": "",
 }
 for k, v in defaults.items():
     if k not in st.session_state:
@@ -477,6 +449,15 @@ if st.session_state.logged_in and qs.get("checkout") == "success":
     st.session_state.premium_until = (datetime.now() + timedelta(days=30)).isoformat()
     st.session_state.points = int(st.session_state.points) + MONTHLY_POINTS
     save_user_state()
+    st.query_params.clear()
+if st.session_state.logged_in and qs.get("buypoints"):
+    try:
+        add = int(str(qs.get("buypoints")))
+        if add in [p["points"] for p in POINT_PACKS]:
+            st.session_state.points = int(st.session_state.points) + add
+            save_user_state()
+    except Exception:
+        pass
     st.query_params.clear()
 
 st.markdown("""
@@ -520,7 +501,10 @@ with st.sidebar:
             st.session_state.page = "register"; st.rerun()
     st.write(f"ポイント {st.session_state.points}")
     st.write(f"会員 {member_label() if st.session_state.logged_in else '未登録'}")
-    for label, page in [("画像生成モード", "simple"), ("セット", "chars"), ("4コマ", "make"), ("説明書", "help"), ("月額登録", "plan"), ("お問い合わせ", "contact")]:
+    for label, page in [
+        ("画像生成モード", "simple"), ("セット", "chars"), ("4コマ", "make"),
+        ("ポイント購入", "shop"), ("説明書", "help"), ("月額登録", "plan"), ("お問い合わせ", "contact"),
+    ]:
         if st.button(label, use_container_width=True):
             st.session_state.page = page; st.rerun()
 
@@ -544,13 +528,46 @@ elif st.session_state.page == "icon":
         st.image(up, width=80)
     if st.button("この画像にする", type="primary") and up:
         st.session_state.icon = uploaded_to_uri(up)
-        save_user_state()
-        st.success("変更しました")
-        st.rerun()
+        save_user_state(); st.success("変更しました"); st.rerun()
     if st.button("動物アイコンに戻す"):
         st.session_state.icon = random.choice(ANIMALS)
-        save_user_state()
-        st.rerun()
+        save_user_state(); st.rerun()
+    show_ad()
+
+elif st.session_state.page == "shop":
+    st.subheader("ポイント購入")
+    st.write("1ポイント = 1円")
+    st.caption("月額は980円で2000ポイントです。単発より得です。")
+    if not st.session_state.logged_in:
+        st.warning("購入にはログインが必要です。")
+    elif stripe is None or not STRIPE_SECRET_KEY:
+        st.error("決済設定がまだです。")
+    else:
+        for pack in POINT_PACKS:
+            c1, c2 = st.columns([3, 2])
+            with c1:
+                st.write(f"**{pack['points']}ポイント**")
+                st.caption(f"{pack['yen']}円")
+            with c2:
+                if st.button(f"{pack['yen']}円で買う", key=f"buy_{pack['points']}"):
+                    try:
+                        session = stripe.checkout.Session.create(
+                            mode="payment",
+                            line_items=[{
+                                "price_data": {
+                                    "currency": "jpy",
+                                    "unit_amount": pack["yen"],
+                                    "product_data": {"name": f"{pack['points']}ポイント"},
+                                },
+                                "quantity": 1,
+                            }],
+                            success_url=f"{SITE_URL}/?buypoints={pack['points']}",
+                            cancel_url=f"{SITE_URL}/?buypoints=cancel",
+                            client_reference_id=st.session_state.get("username", ""),
+                        )
+                        st.markdown(f"[決済ページへ進む]({session.url})")
+                    except Exception as e:
+                        st.error(str(e))
     show_ad()
 
 elif st.session_state.page == "register":
@@ -561,51 +578,26 @@ elif st.session_state.page == "register":
     icon_up = st.file_uploader("アイコン（任意）", type=["png", "jpg", "jpeg"])
     if icon_up:
         st.image(icon_up, width=80)
-    if st.button("確認コードを送る"):
+    if st.button("登録する", type="primary"):
         users = load_json(USERS_FILE, {})
         if not name or not mail or not pw:
             st.warning("全部入れてください")
-        elif not valid_mail_format(mail):
-            st.error("メールの形が正しくありません")
-        elif not mail_domain_ok(mail):
-            st.error("存在しないアドレス、または受け取れないドメインです")
+        elif "@" not in mail:
+            st.error("メールアドレスを正しく入れてください")
         elif name in users:
             st.error("その名前は使われています")
         elif email_taken(users, mail):
-            st.error("このメールアドレスは登録済みです")
+            st.error("このメールアドレスは登録済みです。ログインしてください。")
         else:
-            code = f"{random.randint(100000, 999999)}"
-            ok, err = send_code_mail(norm_mail(mail), code)
-            st.session_state.pending = {
-                "name": name, "email": norm_mail(mail), "password": hash_password(pw),
-                "icon": uploaded_to_uri(icon_up) if icon_up else random.choice(ANIMALS),
-                "code": code,
+            icon = uploaded_to_uri(icon_up) if icon_up else random.choice(ANIMALS)
+            users[name] = {
+                "password": hash_password(pw), "email": norm_mail(mail), "icon": icon,
+                "characters": [], "points": SIGNUP_POINTS, "premium_until": "",
+                "rank": "ブロンズ", "history": [],
             }
-            if ok:
-                st.success("確認コードを送りました")
-            else:
-                st.warning("メール送信設定がないため、この画面のコードで確認します（本番はSMTPを入れてください）")
-                st.info(f"確認コード: {code}")
-    if st.session_state.pending:
-        code_in = st.text_input("確認コード")
-        if st.button("登録する", type="primary"):
-            p = st.session_state.pending
-            users = load_json(USERS_FILE, {})
-            if code_in.strip() != p["code"]:
-                st.error("コードが違います")
-            elif email_taken(users, p["email"]) or p["name"] in users:
-                st.error("すでに登録されています")
-            else:
-                users[p["name"]] = {
-                    "password": p["password"], "email": p["email"], "icon": p["icon"],
-                    "characters": [], "points": SIGNUP_POINTS, "premium_until": "",
-                    "rank": "ブロンズ", "history": [],
-                }
-                save_json(USERS_FILE, users)
-                apply_login(p["name"], users[p["name"]])
-                st.session_state.pending = None
-                st.session_state.page = "simple"
-                st.rerun()
+            save_json(USERS_FILE, users)
+            apply_login(name, users[name])
+            st.session_state.page = "simple"; st.rerun()
     st.write("ログイン")
     lu = st.text_input("メールまたはユーザーネーム", key="lu")
     lp = st.text_input("ログイン用パスワード", type="password", key="lp")
@@ -628,6 +620,7 @@ elif st.session_state.page == "plan":
     st.subheader("月額登録")
     st.write(f"**{MONTHLY_PRICE}円 / 30日**")
     st.write(f"- {MONTHLY_POINTS}ポイント付与")
+    st.write("- 会員状態 VIP")
     if is_premium():
         st.success(f"VIPです。期限 {str(st.session_state.premium_until)[:10]}")
     elif stripe is None or not STRIPE_SECRET_KEY or not STRIPE_PRICE_ID:
@@ -682,6 +675,7 @@ elif st.session_state.page == "chars":
 
 elif st.session_state.page == "simple":
     st.subheader("画像生成モード")
+    st.caption(f"1回 {V5_COST}ポイント")
     if st.button("履歴"):
         st.session_state.show_history = True; st.rerun()
     if st.session_state.show_history:
@@ -736,12 +730,15 @@ elif st.session_state.page == "simple":
         parts = [x.strip() for x in [st.session_state.sq, st.session_state.sb, st.session_state.so] if x.strip()]
         if not parts and not chars:
             st.session_state.error = "プロンプトを入れてください"
+        elif st.session_state.points < V5_COST:
+            st.session_state.error = f"ポイントが足りません。必要 {V5_COST}"
         else:
             try:
                 w, h = SIMPLE_SIZES[size_name]
                 img = nai_request(", ".join(parts), w, h, "nai-diffusion-5-full", steps=20, scale=scale, negative=st.session_state.sn.strip(), char_texts=chars)
                 st.session_state.simple_image = img
                 st.session_state.simple_history.append({"url": img, "quality": st.session_state.sq, "background": st.session_state.sb, "chars": list(st.session_state.schars), "other": st.session_state.so, "negative": st.session_state.sn, "size": size_name, "scale": scale})
+                st.session_state.points -= V5_COST
                 save_user_state()
                 st.session_state.error = ""
             except Exception as e:
