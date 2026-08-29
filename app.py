@@ -35,6 +35,7 @@ DATA_FILE = "studio_data.json"
 USERS_FILE = "users_data.json"
 HOME_IMG = "IMG_1106.jpeg"
 HEADER_IMG = "IMG_1107.jpeg"
+LOAD_GIF = "loading.gif"
 PHONE_W, PHONE_H = 1080, 1920
 MONTHLY_PRICE = 980
 MONTHLY_POINTS = 2000
@@ -220,6 +221,11 @@ def save_user_state():
         save_json(USERS_FILE, users)
         save_json(DATA_FILE, {"characters": st.session_state.characters})
 
+def show_loading():
+    if os.path.exists(LOAD_GIF):
+        st.image(LOAD_GIF, width=180)
+    st.write("生成中...")
+
 def nai_wh(w, h):
     w = max(64, min(1920, int(round(w / 64) * 64)))
     h = max(64, min(1920, int(round(h / 64) * 64)))
@@ -261,10 +267,7 @@ def nai_request(prompt, width, height, model, steps=23, scale=5.0, negative="", 
             parameters["director_reference_information_extracted"] = [1]
             parameters["director_reference_strength_values"] = [1]
             parameters["director_reference_secondary_strength_values"] = [0.75]
-    if model == "nai-diffusion-4-5-full":
-        models = ["nai-diffusion-4-5-full", "nai-diffusion-4-5-curated"]
-    else:
-        models = [model]
+    models = ["nai-diffusion-4-5-full", "nai-diffusion-4-5-curated"] if model == "nai-diffusion-4-5-full" else [model]
     last_err = None
     for mdl in models:
         payload = {"input": prompt or "", "model": mdl, "action": "generate", "parameters": parameters}
@@ -473,6 +476,7 @@ section[data-testid="stSidebar"] { background:#fff !important; }
 section[data-testid="stSidebar"] * { color:#111 !important; }
 section[data-testid="stSidebar"] button { background:#fff !important; color:#111 !important; border:2px solid #111 !important; }
 section[data-testid="stSidebar"] button p { color:#111 !important; }
+[data-testid="stStatusWidget"] { display: none !important; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -517,6 +521,9 @@ with st.sidebar:
 
 if st.session_state.error:
     st.error(st.session_state.error)
+    if st.button("閉じる"):
+        st.session_state.error = ""
+        st.rerun()
 
 if st.session_state.page == "help":
     st.markdown("""
@@ -739,6 +746,7 @@ elif st.session_state.page == "simple":
     st.caption(f"{spec['gen'][0]} × {spec['gen'][1]}　{spec['cost']}ポイント")
     scale = st.slider("プロンプトガイダンス", 1.0, 10.0, 5.0, 0.1)
     if st.button("生成する", type="primary"):
+        st.session_state.error = ""
         st.session_state.simple_busy = True; st.rerun()
     if st.session_state.simple_busy:
         st.session_state.simple_busy = False
@@ -753,6 +761,7 @@ elif st.session_state.page == "simple":
             st.session_state.error = f"ポイントが足りません。必要 {cost}"
         else:
             try:
+                show_loading()
                 w, h = spec["gen"]
                 img = nai_request(", ".join(parts), w, h, "nai-diffusion-5-full", steps=20, scale=scale, negative=st.session_state.sn.strip(), char_texts=chars)
                 st.session_state.simple_image = img
@@ -824,6 +833,7 @@ else:
             c1, c2 = st.columns(2)
             with c1:
                 if st.button("生成", key=f"gen_{i}", type="primary"):
+                    st.session_state.error = ""
                     st.session_state.busy_index = i; st.rerun()
             with c2:
                 if st.button("消す", key=f"clr_{i}"):
@@ -868,8 +878,8 @@ else:
         i = int(st.session_state.busy_index)
         st.session_state.busy_index = None
         try:
-            with st.spinner("生成中..."):
-                make_one(i)
+            show_loading()
+            make_one(i)
             st.session_state.error = ""
         except Exception as e:
             st.session_state.error = str(e)
