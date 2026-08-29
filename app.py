@@ -5,20 +5,24 @@ import uuid
 import base64
 import hashlib
 import math
+import io
+import zipfile
 import requests
 from io import BytesIO
-from openai import OpenAI
 from PIL import Image, ImageDraw, ImageFont
 
 st.set_page_config(page_title="panel AI.", page_icon="🎨", layout="wide")
 
-grok_key = os.environ.get("XAI_API_KEY", "")
-client = OpenAI(api_key=grok_key, base_url="https://api.x.ai/v1")
+NAI_KEY = os.environ.get("NOVELAI_API_KEY", "")
+NAI_URLS = [
+    "https://image.novelai.net/ai/generate-image",
+    "https://api.novelai.net/ai/generate-image",
+]
+NAI_MODEL = os.environ.get("NOVELAI_MODEL", "nai-diffusion-4-5-full")
 DATA_FILE = "studio_data.json"
 USERS_FILE = "users_data.json"
 HOME_IMG = "IMG_1106.jpeg"
 HEADER_IMG = "IMG_1107.jpeg"
-PHONE_W, PHONE_H = 1080, 1920
 
 LAYOUTS = {
     "縦4": {"cols": 1, "count": 4},
@@ -47,21 +51,15 @@ FONT_SPECS = {
     },
     "丸文字": {
         "file": "font_maru.ttf",
-        "urls": [
-            "https://cdn.jsdelivr.net/gh/google/fonts@main/ofl/kosugimaru/KosugiMaru-Regular.ttf",
-        ],
+        "urls": ["https://cdn.jsdelivr.net/gh/google/fonts@main/ofl/kosugimaru/KosugiMaru-Regular.ttf"],
     },
     "かわいい": {
         "file": "font_kawaii.ttf",
-        "urls": [
-            "https://cdn.jsdelivr.net/gh/google/fonts@main/ofl/hachimarupop/HachiMaruPop-Regular.ttf",
-        ],
+        "urls": ["https://cdn.jsdelivr.net/gh/google/fonts@main/ofl/hachimarupop/HachiMaruPop-Regular.ttf"],
     },
     "手書き風": {
         "file": "font_te.ttf",
-        "urls": [
-            "https://cdn.jsdelivr.net/gh/google/fonts@main/ofl/yuseimagic/YuseiMagic-Regular.ttf",
-        ],
+        "urls": ["https://cdn.jsdelivr.net/gh/google/fonts@main/ofl/yuseimagic/YuseiMagic-Regular.ttf"],
     },
 }
 
@@ -138,38 +136,68 @@ def uri_to_image(uri):
     res.raise_for_status()
     return Image.open(BytesIO(res.content)).convert("RGB")
 
-def ratio_from_size(w, h):
-    r = w / max(h, 1)
-    choices = {"1:1": 1.0, "3:4": 0.75, "4:3": 1.33, "9:16": 0.5625, "16:9": 1.777, "2:3": 0.666, "3:2": 1.5}
-    return min(choices.items(), key=lambda x: abs(x[1] - r))[0]
+def uri_to_b64(uri):
+    img = uri_to_image(uri)
+    buf = BytesIO()
+    img.save(buf, format="PNG")
+    return base64.b64encode(buf.getvalue()).decode()
 
-def generate_panel(prompt, ref_uris, w, h):
-    extra = {"aspect_ratio": ratio_from_size(w, h), "resolution": "1k", "quality": "low"}
-    if not ref_uris:
-        response = client.images.generate(model="grok-imagine-image-2.0", prompt=prompt, n=1, extra_body=extra)
-        return response.data[0].url
-    payload = {
-        "model": "grok-imagine-image-2.0",
-        "prompt": prompt,
-        "aspect_ratio": extra["aspect_ratio"],
-        "resolution": "1k",
-        "quality": "low",
-        "response_format": "url",
+def nai_size(w, h):
+    w = max(64, min(1536, int(round(w / 64) * 64)))
+    h = max(64, min(1536, int(round(h / 64) * 64)))
+    return w, h
+
+def nai_generate(prompt, width, height, ref_uris=None, strengths=None):
+    if not NAI_KEY:
+        raise Exception("NOVELAI_API_KEY がありません")
+    width, height = nai_size(width, height)
+    ref_uris = [u for u in (ref_uris or []) if u]
+    strengths = strengths or []
+    parameters = {
+        "width": width,
+        "height": height,
+        "scale": 5.0,
+        "sampler": "k_euler_ancestral",
+        "steps": 28,
+        "n_samples": 1,
+        "qualityToggle": True,
+        "ucPreset": 0,
+        "negative_prompt": "lowres, bad anatomy, text, speech bubble, watermark, logo",
     }
-    if len(ref_uris) == 1:
-        payload["image"] = {"url": ref_uris[0], "type": "image_url"}
-    else:
-        payload["images"] = [{"url": u, "type": "image_url"} for u in ref_uris[:3]]
-    res = requests.post(
-        "https://api.x.ai/v1/images/edits",
-        headers={"Authorization": f"Bearer {grok_key}", "Content-Type": "application/json"},
-        json=payload,
-        timeout=180,
-    )
-    data = res.json()
-    if res.status_code != 200:
-        raise Exception(data)
-    return data["data"][0]["url"]
+    action = "generate"
+    if ref_uris:
+        parameters["image"] = uri_to_b64(ref_uris[0])
+        s = strengths[0] if strengths else 6
+        parameters["strength"] = max(0.25, min(0.75, s / 10))
+        parameters["noise"] = 0.1
+        action = "img2img"
+        if len(ref_uris) > 1:
+            parameters["reference_image_multiple"] = [uri_to_b64(u) for u in ref_uris[:3]]
+            parameters["reference_information_extracted_multiple"] = [0.7] * min(3, len(ref_uris))
+            parameters["reference_strength_multiple"] = [
+                max(0.2, min(1.0, (strengths[i] if i < len(strengths) else 6) / 10))
+                for i in range(min(3, len(ref_uris)))
+            ]
+    payload = {
+        "input": prompt,
+        "model": NAI_MODEL,
+        "action": action,
+        "parameters": parameters,
+    }
+    last_err = None
+    for url in NAI_URLS:
+        res = requests.post(
+            url,
+            headers={"Authorization": f"Bearer {NAI_KEY}", "Content-Type": "application/json"},
+            json=payload,
+            timeout=180,
+        )
+        if res.status_code == 200:
+            with zipfile.ZipFile(io.BytesIO(res.content)) as zf:
+                png = zf.read(zf.namelist()[0])
+            return "data:image/png;base64," + base64.b64encode(png).decode()
+        last_err = f"{res.status_code}: {res.text[:400]}"
+    raise Exception(last_err or "NovelAIの生成に失敗しました")
 
 def wrap_text(text, font, max_width):
     lines, line = [], ""
@@ -230,28 +258,25 @@ def draw_one_bubble(img, bub):
             text_w = max(len(x) * size for x in lines)
         box_w = int(text_w + pad * 2 + bold * 2)
         box_h = int(pad * 2 + line_h * len(lines) + bold * 2)
-
-    extra = 36
     layer = Image.new("RGBA", (box_w + 80, box_h + 80), (0, 0, 0, 0))
     draw = ImageDraw.Draw(layer)
     x0, y0 = 40, 28
     if kind == "ふきだし":
         draw.rounded_rectangle([x0, y0, x0 + box_w, y0 + box_h], radius=22, fill=fill, outline="#222222", width=3)
         if tail == "下":
-            draw.polygon([(x0 + box_w * 0.38, y0 + box_h - 2), (x0 + box_w * 0.52, y0 + box_h - 2), (x0 + box_w * 0.34, y0 + box_h + 28)], fill=fill, outline="#222222")
+            draw.polygon([(x0 + box_w * 0.38, y0 + box_h - 2), (x0 + box_w * 0.52, y0 + box_h - 2), (x0 + box_w * 0.34, y0 + box_h + 28)], fill=fill)
         elif tail == "下左":
-            draw.polygon([(x0 + 18, y0 + box_h - 2), (x0 + 48, y0 + box_h - 2), (x0 + 8, y0 + box_h + 28)], fill=fill, outline="#222222")
+            draw.polygon([(x0 + 18, y0 + box_h - 2), (x0 + 48, y0 + box_h - 2), (x0 + 8, y0 + box_h + 28)], fill=fill)
         elif tail == "下右":
-            draw.polygon([(x0 + box_w - 48, y0 + box_h - 2), (x0 + box_w - 18, y0 + box_h - 2), (x0 + box_w - 8, y0 + box_h + 28)], fill=fill, outline="#222222")
+            draw.polygon([(x0 + box_w - 48, y0 + box_h - 2), (x0 + box_w - 18, y0 + box_h - 2), (x0 + box_w - 8, y0 + box_h + 28)], fill=fill)
         elif tail == "左":
-            draw.polygon([(x0 + 2, y0 + box_h * 0.45), (x0 + 2, y0 + box_h * 0.62), (x0 - 26, y0 + box_h * 0.58)], fill=fill, outline="#222222")
+            draw.polygon([(x0 + 2, y0 + box_h * 0.45), (x0 + 2, y0 + box_h * 0.62), (x0 - 26, y0 + box_h * 0.58)], fill=fill)
         else:
-            draw.polygon([(x0 + box_w - 2, y0 + box_h * 0.45), (x0 + box_w - 2, y0 + box_h * 0.62), (x0 + box_w + 26, y0 + box_h * 0.58)], fill=fill, outline="#222222")
+            draw.polygon([(x0 + box_w - 2, y0 + box_h * 0.45), (x0 + box_w - 2, y0 + box_h * 0.62), (x0 + box_w + 26, y0 + box_h * 0.58)], fill=fill)
     elif kind == "叫び":
         pts = []
-        steps = 28
-        for i in range(steps):
-            ang = math.pi * 2 * i / steps
+        for i in range(28):
+            ang = math.pi * 2 * i / 28
             rx = box_w / 2 * (1.12 if i % 2 == 0 else 0.86)
             ry = box_h / 2 * (1.12 if i % 2 == 0 else 0.86)
             pts.append((x0 + box_w / 2 + math.cos(ang) * rx, y0 + box_h / 2 + math.sin(ang) * ry))
@@ -259,8 +284,6 @@ def draw_one_bubble(img, bub):
     elif kind == "考え":
         draw.rounded_rectangle([x0, y0, x0 + box_w, y0 + box_h], radius=28, fill=fill, outline="#222222", width=3)
         draw.ellipse([x0 + 16, y0 + box_h + 6, x0 + 34, y0 + box_h + 24], fill=fill, outline="#222222")
-        draw.ellipse([x0 + 36, y0 + box_h + 22, x0 + 48, y0 + box_h + 34], fill=fill, outline="#222222")
-
     if direction == "縦書き":
         cy = y0 + pad
         for ch in lines:
@@ -275,7 +298,6 @@ def draw_one_bubble(img, bub):
         for line in lines:
             draw_text(draw, (x0 + pad, ty), line, font, color, bold)
             ty += int(size * 1.3)
-
     angle = int(bub.get("angle", 0))
     if angle:
         layer = layer.rotate(-angle, expand=True, resample=Image.BICUBIC)
@@ -362,7 +384,6 @@ if "busy_index" not in st.session_state:
 if "combined" not in st.session_state:
     st.session_state.combined = None
 
-# ---------- 未ログイン ----------
 if not st.session_state.logged_in:
     if st.session_state.page == "home":
         b64 = file_b64(HOME_IMG)
@@ -373,8 +394,7 @@ if not st.session_state.logged_in:
                 .stApp {{
                     background-image: linear-gradient(rgba(255,255,255,.18), rgba(255,255,255,.18)),
                     url("data:image/jpeg;base64,{b64}");
-                    background-size: cover;
-                    background-position: center;
+                    background-size: cover; background-position: center;
                 }}
                 </style>
                 """,
@@ -409,7 +429,6 @@ if not st.session_state.logged_in:
         if st.button("ホームへ"):
             st.session_state.page = "home"; st.rerun()
         st.stop()
-
     st.subheader("会員登録")
     u = st.text_input("ユーザー名")
     p = st.text_input("パスワード", type="password")
@@ -430,12 +449,11 @@ if not st.session_state.logged_in:
         st.session_state.page = "home"; st.rerun()
     st.stop()
 
-# ---------- ログイン後 ----------
 show_header()
 done = sum(1 for x in st.session_state.panel_images if x)
 need = LAYOUTS[st.session_state.layout]["count"]
 with st.sidebar:
-    st.write(f"{st.session_state.get('username','')}")
+    st.write(st.session_state.get("username", ""))
     if st.button("セット", use_container_width=True):
         st.session_state.page = "chars"; st.rerun()
     if st.button("4コマ", use_container_width=True):
@@ -511,15 +529,13 @@ else:
             raise Exception("内容が空です")
         w, h = st.session_state.panel_sizes[i]
         pack = set_by_name(st.session_state.scene_chars[i]) or {}
-        refs, extra = [], []
+        refs, strengths = [], []
         if i > 0 and st.session_state.panel_images[0]:
-            refs.append(st.session_state.panel_images[0])
-        for item in normalize_refs(pack.get("chars")):
-            refs.append(item["uri"]); extra.append(f"CHARACTER REFERENCE strength {item['strength']}/10.")
-        for item in normalize_refs(pack.get("styles")):
-            refs.append(item["uri"]); extra.append(f"STYLE REFERENCE strength {item['strength']}/10.")
-        prompt = "Manga panel, no text, no speech bubbles. Scene: " + scene + " " + " ".join(extra)
-        st.session_state.panel_images[i] = generate_panel(prompt, refs[:3], w, h)
+            refs.append(st.session_state.panel_images[0]); strengths.append(6)
+        for item in normalize_refs(pack.get("chars")) + normalize_refs(pack.get("styles")):
+            refs.append(item["uri"]); strengths.append(item["strength"])
+        prompt = f"manga panel, anime, {scene}, no text, no speech bubble"
+        st.session_state.panel_images[i] = nai_generate(prompt, w, h, refs, strengths)
 
     for i in range(n):
         with st.expander(f"コマ {i+1}", expanded=True):
@@ -534,7 +550,6 @@ else:
                 with b:
                     ph = st.number_input("高さ", 256, 2048, st.session_state.panel_sizes[i][1], 16, key=f"ph_{i}")
                 st.session_state.panel_sizes[i] = (int(pw), int(ph))
-
             up = st.file_uploader("持っている画像を使う", type=["png", "jpg", "jpeg"], key=f"up_{i}")
             if up:
                 st.session_state.panel_images[i] = uploaded_to_uri(up)
@@ -552,7 +567,6 @@ else:
                     st.session_state.panel_images[i] = None
                     st.session_state.panel_bubbles[i] = []
                     st.rerun()
-
             if st.session_state.panel_images[i]:
                 draft = st.session_state.drafts[i]
                 draft["text"] = st.text_input("新しいセリフ", value=draft.get("text", ""), key=f"bt_{i}")
@@ -593,15 +607,12 @@ else:
     busy = st.session_state.get("busy_index")
     if busy is not None:
         st.session_state.busy_index = None
-        if not grok_key:
-            st.session_state.error = "XAI_API_KEY がありません"
-        else:
-            try:
-                with st.spinner("生成中..."):
-                    make_one(int(busy))
-                st.session_state.error = ""
-            except Exception as e:
-                st.session_state.error = str(e)
+        try:
+            with st.spinner("生成中..."):
+                make_one(int(busy))
+            st.session_state.error = ""
+        except Exception as e:
+            st.session_state.error = str(e)
         st.rerun()
 
     st.markdown("---")
