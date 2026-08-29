@@ -101,6 +101,9 @@ def file_b64(path):
 def hash_password(p):
     return hashlib.sha256(p.encode()).hexdigest()
 
+def norm_mail(m):
+    return (m or "").strip().lower()
+
 def load_json(path, default):
     if os.path.exists(path):
         try:
@@ -113,6 +116,22 @@ def load_json(path, default):
 def save_json(path, data):
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
+
+def email_taken(users, mail):
+    mail = norm_mail(mail)
+    for v in users.values():
+        if isinstance(v, dict) and norm_mail(v.get("email")) == mail:
+            return True
+    return False
+
+def find_user(users, key):
+    if key in users:
+        return key
+    k = norm_mail(key)
+    for name, v in users.items():
+        if isinstance(v, dict) and (norm_mail(v.get("email")) == k or name == key):
+            return name
+    return None
 
 def download_one(path, urls):
     if os.path.exists(path) and os.path.getsize(path) > 8000:
@@ -184,7 +203,9 @@ def save_user_state():
         users[name]["premium_until"] = st.session_state.premium_until
         users[name]["rank"] = "vip" if is_premium() else "ブロンズ"
         users[name]["icon"] = st.session_state.get("icon", "")
+        users[name]["history"] = st.session_state.get("simple_history", [])[-30:]
         save_json(USERS_FILE, users)
+        save_json(DATA_FILE, {"characters": st.session_state.characters})
 
 def is_premium():
     until = st.session_state.get("premium_until") or ""
@@ -203,7 +224,7 @@ def nai_wh(w, h):
     h = max(64, min(1920, int(round(h / 64) * 64)))
     return w, h
 
-def nai_request(prompt, width, height, model, steps=23, scale=5.0, char_refs=None, style_refs=None):
+def nai_request(prompt, width, height, model, steps=23, scale=5.0, negative="", char_refs=None, style_refs=None):
     if not NAI_KEY:
         raise Exception("NOVELAI_API_KEY がありません")
     gw, gh = nai_wh(width, height)
@@ -219,7 +240,7 @@ def nai_request(prompt, width, height, model, steps=23, scale=5.0, char_refs=Non
         "n_samples": 1,
         "qualityToggle": False,
         "ucPreset": 0,
-        "negative_prompt": "",
+        "negative_prompt": negative or "",
         "noise_schedule": "karras",
         "v4_prompt": {
             "caption": {"base_caption": prompt, "char_captions": []},
@@ -227,7 +248,7 @@ def nai_request(prompt, width, height, model, steps=23, scale=5.0, char_refs=Non
             "use_order": True,
         },
         "v4_negative_prompt": {
-            "caption": {"base_caption": "", "char_captions": []},
+            "caption": {"base_caption": negative or "", "char_captions": []},
             "legacy_uc": False,
         },
     }
@@ -429,49 +450,36 @@ def empty_bubble():
         "size": 28, "bold": 0, "tail_size": 28, "kind": "ふきだし", "font": "ゴシック", "dir": "横書き", "tail": "下",
     }
 
+def apply_login(name, data):
+    st.session_state.logged_in = True
+    st.session_state.username = name
+    st.session_state.email = data.get("email", "")
+    st.session_state.icon = data.get("icon", random.choice(ANIMALS))
+    st.session_state.characters = data.get("characters", [])
+    st.session_state.points = int(data.get("points", 0))
+    st.session_state.premium_until = data.get("premium_until", "")
+    st.session_state.simple_history = data.get("history", [])
+
 font_ready = prepare_fonts()
 usable_fonts = [k for k, ok in font_ready.items() if ok] or ["ゴシック"]
 
-if "logged_in" not in st.session_state:
-    st.session_state.logged_in = False
-if "page" not in st.session_state:
-    st.session_state.page = "home"
+defaults = {
+    "logged_in": False, "page": "home", "layout": "縦4",
+    "scenes": ["", "", "", ""], "scene_chars": ["セットなし"] * 4,
+    "panel_images": [None] * 4, "panel_sizes": [SIZES["横長"]["wh"]] * 4,
+    "panel_shape": ["横長"] * 4, "panel_bubbles": [[], [], [], []],
+    "drafts": [empty_bubble() for _ in range(4)], "error": "",
+    "busy_index": None, "combined": None, "points": 0, "premium_until": "",
+    "simple_image": None, "simple_busy": False, "simple_history": [],
+    "show_history": False, "hist_pick": None,
+    "sq": "", "sb": "", "so": "", "sn": "",
+    "schars": [""], "icon": random.choice(ANIMALS), "email": "",
+}
+for k, v in defaults.items():
+    if k not in st.session_state:
+        st.session_state[k] = v
 if "characters" not in st.session_state:
     st.session_state.characters = load_json(DATA_FILE, {"characters": []}).get("characters", [])
-if "layout" not in st.session_state:
-    st.session_state.layout = "縦4"
-if "scenes" not in st.session_state:
-    st.session_state.scenes = ["", "", "", ""]
-if "scene_chars" not in st.session_state:
-    st.session_state.scene_chars = ["セットなし"] * 4
-if "panel_images" not in st.session_state:
-    st.session_state.panel_images = [None] * 4
-if "panel_sizes" not in st.session_state:
-    st.session_state.panel_sizes = [SIZES["横長"]["wh"]] * 4
-if "panel_shape" not in st.session_state:
-    st.session_state.panel_shape = ["横長"] * 4
-if "panel_bubbles" not in st.session_state:
-    st.session_state.panel_bubbles = [[], [], [], []]
-if "drafts" not in st.session_state:
-    st.session_state.drafts = [empty_bubble() for _ in range(4)]
-if "error" not in st.session_state:
-    st.session_state.error = ""
-if "busy_index" not in st.session_state:
-    st.session_state.busy_index = None
-if "combined" not in st.session_state:
-    st.session_state.combined = None
-if "points" not in st.session_state:
-    st.session_state.points = 0
-if "premium_until" not in st.session_state:
-    st.session_state.premium_until = ""
-if "simple_image" not in st.session_state:
-    st.session_state.simple_image = None
-if "simple_busy" not in st.session_state:
-    st.session_state.simple_busy = False
-if "icon" not in st.session_state:
-    st.session_state.icon = random.choice(ANIMALS)
-if "email" not in st.session_state:
-    st.session_state.email = ""
 
 qs = st.query_params
 if st.session_state.logged_in and qs.get("checkout") == "success":
@@ -490,9 +498,7 @@ st.markdown(
         color: #111111 !important;
         border: 2px solid #111111 !important;
     }
-    section[data-testid="stSidebar"] button p {
-        color: #111111 !important;
-    }
+    section[data-testid="stSidebar"] button p { color: #111111 !important; }
     </style>
     """,
     unsafe_allow_html=True,
@@ -517,8 +523,7 @@ if st.session_state.page == "home":
     mid = st.columns([1, 2, 1])
     with mid[1]:
         if st.button("生成開始", type="primary", use_container_width=True):
-            st.session_state.page = "help"
-            st.rerun()
+            st.session_state.page = "help"; st.rerun()
     show_ad()
     st.stop()
 
@@ -533,8 +538,15 @@ with st.sidebar:
         else:
             st.write(icon)
         st.write(st.session_state.get("username", ""))
-    if st.button("登録", use_container_width=True):
-        st.session_state.page = "register"; st.rerun()
+        if st.button("ログアウト", use_container_width=True):
+            st.session_state.logged_in = False
+            st.session_state.page = "home"
+            st.rerun()
+    else:
+        if st.button("登録", use_container_width=True):
+            st.session_state.page = "register"; st.rerun()
+        if st.button("ログイン", use_container_width=True):
+            st.session_state.page = "register"; st.rerun()
     st.write(f"ポイント {st.session_state.points}")
     st.write(f"会員 {member_label() if st.session_state.logged_in else '未登録'}")
     if st.button("画像生成モード", use_container_width=True):
@@ -550,10 +562,6 @@ with st.sidebar:
     if st.button("お問い合わせ", use_container_width=True):
         st.session_state.page = "contact"; st.rerun()
     st.caption(f"{done}/{need}")
-    if st.session_state.logged_in and st.button("ログアウト"):
-        st.session_state.logged_in = False
-        st.session_state.page = "home"
-        st.rerun()
 
 if st.session_state.error:
     st.error(st.session_state.error)
@@ -577,8 +585,7 @@ if st.session_state.page == "help":
     show_ad()
 
 elif st.session_state.page == "register":
-    st.markdown("<div style='color:#111;background:#fff;padding:16px;'>", unsafe_allow_html=True)
-    st.subheader("登録")
+    st.subheader("登録 / ログイン")
     name = st.text_input("ユーザーネーム")
     mail = st.text_input("メールアドレス")
     pw = st.text_input("パスワード", type="password")
@@ -589,53 +596,40 @@ elif st.session_state.page == "register":
         users = load_json(USERS_FILE, {})
         if not name or not mail or not pw:
             st.warning("全部入れてください")
-        elif name in users or any(u.get("email") == mail for u in users.values() if isinstance(u, dict)):
-            st.error("その名前かメールは使われています")
+        elif "@" not in mail:
+            st.error("メールアドレスを正しく入れてください")
+        elif name in users:
+            st.error("その名前は使われています")
+        elif email_taken(users, mail):
+            st.error("このメールアドレスは登録済みです。ログインしてください。")
         else:
             icon = uploaded_to_uri(icon_up) if icon_up else random.choice(ANIMALS)
             users[name] = {
                 "password": hash_password(pw),
-                "email": mail,
+                "email": norm_mail(mail),
                 "icon": icon,
                 "characters": [],
                 "points": SIGNUP_POINTS,
                 "premium_until": "",
                 "rank": "ブロンズ",
+                "history": [],
             }
             save_json(USERS_FILE, users)
-            st.session_state.logged_in = True
-            st.session_state.username = name
-            st.session_state.email = mail
-            st.session_state.icon = icon
-            st.session_state.points = SIGNUP_POINTS
+            apply_login(name, users[name])
             st.session_state.page = "simple"
             st.rerun()
     st.write("ログイン")
     lu = st.text_input("メールまたはユーザーネーム", key="lu")
-    lp = st.text_input("パスワード", type="password", key="lp")
+    lp = st.text_input("ログイン用パスワード", type="password", key="lp")
     if st.button("ログインする"):
         users = load_json(USERS_FILE, {})
-        found = None
-        if lu in users:
-            found = lu
-        else:
-            for k, v in users.items():
-                if isinstance(v, dict) and v.get("email") == lu:
-                    found = k
-                    break
+        found = find_user(users, lu)
         if found and users[found]["password"] == hash_password(lp):
-            st.session_state.logged_in = True
-            st.session_state.username = found
-            st.session_state.email = users[found].get("email", "")
-            st.session_state.icon = users[found].get("icon", random.choice(ANIMALS))
-            st.session_state.characters = users[found].get("characters", [])
-            st.session_state.points = int(users[found].get("points", 0))
-            st.session_state.premium_until = users[found].get("premium_until", "")
+            apply_login(found, users[found])
             st.session_state.page = "simple"
             st.rerun()
         else:
             st.error("ログインできません")
-    st.markdown("</div>", unsafe_allow_html=True)
     show_ad()
 
 elif st.session_state.page == "contact":
@@ -650,8 +644,6 @@ elif st.session_state.page == "plan":
     st.write(f"**{MONTHLY_PRICE}円 / 30日**")
     st.write(f"- {MONTHLY_POINTS}ポイント付与")
     st.write("- 会員状態 VIP")
-    st.write("- セット機能")
-    st.write("- サイズの変更機能")
     if is_premium():
         st.success(f"VIPです。期限 {str(st.session_state.premium_until)[:10]}")
     elif stripe is None or not STRIPE_SECRET_KEY or not STRIPE_PRICE_ID:
@@ -701,14 +693,14 @@ elif st.session_state.page == "chars":
                 "kind": use_type, "chars": chars, "styles": styles,
             })
             save_user_state()
-            st.success("保存しました")
+            st.success("保存しました。ログアウトしても残ります。")
             st.rerun()
     for i, ch in enumerate(st.session_state.characters):
         c1, c2 = st.columns([4, 1])
         with c1:
             st.write(char_label(ch))
         with c2:
-            if st.button("削除", key=f"delc_{i}"):
+            if st.button("消去", key=f"delc_{i}"):
                 st.session_state.characters.pop(i)
                 save_user_state()
                 st.rerun()
@@ -716,10 +708,48 @@ elif st.session_state.page == "chars":
 
 elif st.session_state.page == "simple":
     st.subheader("画像生成モード")
-    quality = st.text_area("画質プロンプト")
-    background = st.text_area("背景プロンプト")
-    character = st.text_area("キャラクタープロンプト")
-    other = st.text_area("その他プロンプト")
+    if st.button("履歴"):
+        st.session_state.show_history = not st.session_state.show_history
+    if st.session_state.show_history:
+        if not st.session_state.simple_history:
+            st.write("まだありません")
+        for hi, item in enumerate(reversed(st.session_state.simple_history)):
+            st.image(item["url"], width=160)
+            if st.button("この画像", key=f"hpick_{hi}"):
+                st.session_state.hist_pick = item
+                st.rerun()
+        if st.session_state.hist_pick:
+            st.write("反映しますか？")
+            a, b = st.columns(2)
+            with a:
+                if st.button("はい"):
+                    item = st.session_state.hist_pick
+                    st.session_state.sq = item.get("quality", "")
+                    st.session_state.sb = item.get("background", "")
+                    st.session_state.so = item.get("other", "")
+                    st.session_state.sn = item.get("negative", "")
+                    st.session_state.schars = item.get("chars") or [""]
+                    st.session_state.simple_image = item.get("url")
+                    st.session_state.hist_pick = None
+                    st.session_state.show_history = False
+                    st.rerun()
+            with b:
+                if st.button("いいえ"):
+                    st.session_state.hist_pick = None
+                    st.rerun()
+        show_ad()
+        st.stop()
+
+    st.session_state.sq = st.text_area("画質プロンプト", value=st.session_state.sq)
+    st.session_state.sb = st.text_area("背景プロンプト", value=st.session_state.sb)
+    st.write("キャラクタープロンプト")
+    if st.button("➕") and len(st.session_state.schars) < 3:
+        st.session_state.schars.append("")
+        st.rerun()
+    for i in range(len(st.session_state.schars)):
+        st.session_state.schars[i] = st.text_area(f"キャラ{i+1}", value=st.session_state.schars[i], key=f"scarea_{i}")
+    st.session_state.so = st.text_area("その他プロンプト", value=st.session_state.so)
+    st.session_state.sn = st.text_area("除外プロンプト", value=st.session_state.sn)
     size_name = st.radio("サイズ", list(SIMPLE_SIZES.keys()), horizontal=True)
     scale = st.slider("プロンプトガイダンス", 1.0, 10.0, 5.0, 0.1)
     if st.button("生成する", type="primary"):
@@ -727,7 +757,8 @@ elif st.session_state.page == "simple":
         st.rerun()
     if st.session_state.simple_busy:
         st.session_state.simple_busy = False
-        parts = [x.strip() for x in [quality, background, character, other] if x.strip()]
+        chars = [x.strip() for x in st.session_state.schars if x.strip()]
+        parts = [x.strip() for x in [st.session_state.sq, st.session_state.sb] + chars + [st.session_state.so] if x.strip()]
         if not parts:
             st.session_state.error = "プロンプトを入れてください"
         else:
@@ -735,12 +766,24 @@ elif st.session_state.page == "simple":
                 w, h = SIMPLE_SIZES[size_name]
                 prompt = ", ".join(parts)
                 with st.spinner("生成中..."):
-                    st.session_state.simple_image = nai_request(
-                        prompt, w, h, "nai-diffusion-5-full", steps=20, scale=scale
+                    img = nai_request(
+                        prompt, w, h, "nai-diffusion-5-full", steps=20, scale=scale,
+                        negative=st.session_state.sn.strip(),
                     )
+                st.session_state.simple_image = img
+                st.session_state.simple_history.append({
+                    "url": img,
+                    "quality": st.session_state.sq,
+                    "background": st.session_state.sb,
+                    "chars": list(st.session_state.schars),
+                    "other": st.session_state.so,
+                    "negative": st.session_state.sn,
+                    "size": size_name,
+                    "scale": scale,
+                })
                 if V5_COST > 0:
                     st.session_state.points -= V5_COST
-                    save_user_state()
+                save_user_state()
                 st.session_state.error = ""
             except Exception as e:
                 st.session_state.error = str(e)
