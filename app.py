@@ -14,20 +14,16 @@ st.set_page_config(page_title="4コマ工房", page_icon="🎨", layout="wide")
 grok_key = os.environ.get("XAI_API_KEY", "")
 client = OpenAI(api_key=grok_key, base_url="https://api.x.ai/v1")
 DATA_FILE = "studio_data.json"
+PHONE_W, PHONE_H = 1080, 1920
 
 LAYOUTS = {
-    "縦4": {"cols": 1, "count": 4},
-    "縦3": {"cols": 1, "count": 3},
-    "縦2": {"cols": 1, "count": 2},
-    "横4": {"cols": 4, "count": 4},
-    "横3": {"cols": 3, "count": 3},
-    "横2": {"cols": 2, "count": 2},
-    "2×2": {"cols": 2, "count": 4},
-}
-ASPECTS = {
-    "正方形（1024×1024）": (1024, 1024),
-    "縦長（768×1344）": (768, 1344),
-    "横長（1344×768）": (1344, 768),
+    "縦4": {"cols": 1, "count": 4, "size": (PHONE_W, PHONE_H // 4)},
+    "縦3": {"cols": 1, "count": 3, "size": (PHONE_W, PHONE_H // 3)},
+    "縦2": {"cols": 1, "count": 2, "size": (PHONE_W, PHONE_H // 2)},
+    "横4": {"cols": 4, "count": 4, "size": (PHONE_H // 4, PHONE_W)},
+    "横3": {"cols": 3, "count": 3, "size": (PHONE_H // 3, PHONE_W)},
+    "横2": {"cols": 2, "count": 2, "size": (PHONE_H // 2, PHONE_W)},
+    "2×2": {"cols": 2, "count": 4, "size": (512, 512)},
 }
 BUBBLE_TYPES = ["丸四角", "楕円", "叫び", "考え", "文字だけ"]
 TEXT_DIR = ["横書き", "縦書き"]
@@ -109,7 +105,7 @@ def load_font(size=28, kind="ゴシック"):
             return ImageFont.truetype(path, size)
         except Exception:
             pass
-    if kind != "ゴシック" and os.path.exists(FONT_SPECS["ゴシック"]["file"]):
+    if os.path.exists(FONT_SPECS["ゴシック"]["file"]):
         try:
             return ImageFont.truetype(FONT_SPECS["ゴシック"]["file"], size)
         except Exception:
@@ -138,7 +134,7 @@ def ratio_from_size(w, h):
 def generate_panel(prompt, ref_uris, w, h):
     extra = {
         "aspect_ratio": ratio_from_size(w, h),
-        "resolution": "1k" if max(w, h) < 1536 else "2k",
+        "resolution": "1k",
         "quality": "low",
     }
     if not ref_uris:
@@ -197,12 +193,24 @@ def jagged_polygon(x, y, w, h, spikes=14):
         pts.append((x + w / 2 + math.cos(ang) * rx, y + h / 2 + math.sin(ang) * ry))
     return pts
 
+def draw_text(draw, xy, text, font, fill, bold=0):
+    x, y = xy
+    if bold <= 0:
+        draw.text((x, y), text, font=font, fill=fill)
+        return
+    for dx in range(-bold, bold + 1):
+        for dy in range(-bold, bold + 1):
+            if dx or dy:
+                draw.text((x + dx, y + dy), text, font=font, fill=fill)
+    draw.text((x, y), text, font=font, fill=fill)
+
 def draw_bubble(panel_img, bub):
     text = (bub.get("text") or "").strip()
     if not text:
         return panel_img
     img = panel_img.convert("RGBA")
     size = int(bub.get("size", 28))
+    bold = int(bub.get("bold", 0))
     font = load_font(size, bub.get("font", "ゴシック"))
     w, h = img.size
     kind = bub.get("kind", "丸四角")
@@ -210,13 +218,12 @@ def draw_bubble(panel_img, bub):
     fill = bub.get("fill", "#ffffff")
     color = bub.get("color", "#111111")
     pad = 16
-    max_w = int(w * 0.55)
+    max_w = int(w * 0.7)
     if direction == "縦書き":
-        chars = list(text.replace("\n", ""))
+        lines = list(text.replace("\n", ""))
         line_h = int(size * 1.15)
-        box_w = size + pad * 2
-        box_h = pad * 2 + line_h * len(chars)
-        lines = chars
+        box_w = size + pad * 2 + bold * 2
+        box_h = pad * 2 + line_h * len(lines) + bold * 2
     else:
         lines = wrap_text(text, font, max_w)
         line_h = int(size * 1.3)
@@ -224,11 +231,11 @@ def draw_bubble(panel_img, bub):
             text_w = max(font.getlength(x) for x in lines)
         except Exception:
             text_w = max(len(x) * size for x in lines)
-        box_w = int(text_w + pad * 2)
-        box_h = int(pad * 2 + line_h * len(lines))
-    layer = Image.new("RGBA", (box_w + 40, box_h + 40), (0, 0, 0, 0))
+        box_w = int(text_w + pad * 2 + bold * 2)
+        box_h = int(pad * 2 + line_h * len(lines) + bold * 2)
+    layer = Image.new("RGBA", (box_w + 48, box_h + 48), (0, 0, 0, 0))
     draw = ImageDraw.Draw(layer)
-    x0, y0 = 20, 20
+    x0, y0 = 24, 24
     if kind == "丸四角":
         draw.rounded_rectangle([x0, y0, x0 + box_w, y0 + box_h], radius=16, fill=fill, outline="#222222", width=3)
     elif kind == "楕円":
@@ -244,12 +251,12 @@ def draw_bubble(panel_img, bub):
                 tw = font.getlength(ch)
             except Exception:
                 tw = size
-            draw.text((x0 + (box_w - tw) / 2, cy), ch, font=font, fill=color)
+            draw_text(draw, (x0 + (box_w - tw) / 2, cy), ch, font, color, bold)
             cy += int(size * 1.15)
     else:
         ty = y0 + pad - 2
         for line in lines:
-            draw.text((x0 + pad, ty), line, font=font, fill=color)
+            draw_text(draw, (x0 + pad, ty), line, font, color, bold)
             ty += int(size * 1.3)
     angle = int(bub.get("angle", 0))
     if angle:
@@ -260,7 +267,7 @@ def draw_bubble(panel_img, bub):
     return img.convert("RGB")
 
 def combine_panels(images, cols=2):
-    gap = 16
+    gap = 8
     n = len(images)
     rows = (n + cols - 1) // cols
     col_w, row_h = [], []
@@ -304,12 +311,16 @@ if "scene_chars" not in st.session_state:
     st.session_state.scene_chars = ["", "", "", ""]
 if "panel_images" not in st.session_state:
     st.session_state.panel_images = [None, None, None, None]
-if "panel_sizes" not in st.session_state:
-    st.session_state.panel_sizes = [(1344, 768)] * 4
+if "use_custom_size" not in st.session_state:
+    st.session_state.use_custom_size = False
+if "custom_w" not in st.session_state:
+    st.session_state.custom_w = 1080
+if "custom_h" not in st.session_state:
+    st.session_state.custom_h = 480
 if "bubbles" not in st.session_state:
     st.session_state.bubbles = [
         {"text": "", "x": 6, "y": 6, "angle": 0, "fill": "#ffffff", "color": "#111111",
-         "size": 28, "kind": "丸四角", "font": "ゴシック", "dir": "横書き"}
+         "size": 28, "bold": 0, "kind": "丸四角", "font": "ゴシック", "dir": "横書き"}
         for _ in range(4)
     ]
 if "mode" not in st.session_state:
@@ -321,13 +332,17 @@ if "busy_index" not in st.session_state:
 if "combined" not in st.session_state:
     st.session_state.combined = None
 
+def current_panel_size():
+    if st.session_state.use_custom_size:
+        return (int(st.session_state.custom_w), int(st.session_state.custom_h))
+    return LAYOUTS[st.session_state.layout]["size"]
+
 done = sum(1 for x in st.session_state.panel_images if x)
 need = LAYOUTS[st.session_state.layout]["count"]
 
 with st.sidebar:
     st.markdown("## 4コマ工房")
-    st.markdown("**使い方**")
-    st.markdown("1. セットを保存\n2. コマを1つずつ作る\n3. セリフを付ける\n4. 下で1枚にまとめる")
+    st.markdown("1. セットを保存\n2. コマを作る\n3. セリフを付ける\n4. 下でまとめる")
     st.progress(min(done / max(need, 1), 1.0))
     st.caption(f"できたコマ {done} / {need}")
     if st.button("① セット保存", use_container_width=True):
@@ -341,7 +356,7 @@ if st.session_state.error:
 
 if st.session_state.mode == "chars":
     st.header("① セット保存")
-    st.write("4コマで使う顔や絵柄を、ここで先に登録します。保存名はメモです。絵の中には出ません。")
+    st.write("4コマで使う顔や絵柄を先に登録します。保存名はメモです。")
     save_name = st.text_input("保存名（任意）", placeholder="例: 赤ずきん")
     use_type = st.radio("何を保存する？", ["キャラだけ", "絵柄だけ", "キャラ＋絵柄"], horizontal=True)
     char_files, style_files, char_strengths, style_strengths = [], [], [], []
@@ -369,7 +384,7 @@ if st.session_state.mode == "chars":
                 "styles": styles,
             })
             save_data({"characters": st.session_state.characters})
-            st.success("保存しました。左の「② 4コマを作る」を押してください。")
+            st.success("保存しました。左の「② 4コマを作る」へ進んでください。")
     st.markdown("### 保存済み")
     if not st.session_state.characters:
         st.info("まだありません")
@@ -386,24 +401,22 @@ if st.session_state.mode == "chars":
 
 else:
     st.header("② 4コマを作る")
-    st.write("上から順に、コマを作ってください。セリフもこの画面で付けます。全部できたら一番下でまとめます。")
     layout = st.radio("並べ方", list(LAYOUTS.keys()), horizontal=True)
     st.session_state.layout = layout
     n = LAYOUTS[layout]["count"]
-    names = [char_label(ch) for ch in st.session_state.characters]
-    preset = st.radio("コマの大きさ", list(ASPECTS.keys()) + ["数字で指定"], horizontal=True)
-    if preset in ASPECTS:
-        bw, bh = ASPECTS[preset]
-        st.caption(f"{bw} × {bh}")
-    else:
+    auto_w, auto_h = LAYOUTS[layout]["size"]
+    st.caption(f"基本サイズ: 1コマ {auto_w}×{auto_h}　完成イメージはスマホ画面（{PHONE_W}×{PHONE_H}）を分割した大きさです")
+    st.session_state.use_custom_size = st.checkbox("数字でサイズを変える", value=st.session_state.use_custom_size)
+    if st.session_state.use_custom_size:
         a, b = st.columns(2)
         with a:
-            bw = st.number_input("幅", 512, 2048, 1024, 64, key="base_w")
+            st.session_state.custom_w = st.number_input("1コマの幅", 256, 2048, int(st.session_state.custom_w), 16)
         with b:
-            bh = st.number_input("高さ", 512, 2048, 1024, 64, key="base_h")
-    if st.button("この大きさを全部のコマに使う"):
-        st.session_state.panel_sizes = [(int(bw), int(bh))] * 4
-        st.rerun()
+            st.session_state.custom_h = st.number_input("1コマの高さ", 256, 2048, int(st.session_state.custom_h), 16)
+    pw, ph = current_panel_size()
+    st.write(f"今使う1コマのサイズ: **{pw} × {ph}**")
+
+    names = [char_label(ch) for ch in st.session_state.characters]
 
     def set_by_name(name):
         for ch in st.session_state.characters:
@@ -415,7 +428,7 @@ else:
         scene = st.session_state.scenes[i].strip()
         if not scene:
             raise Exception(f"コマ{i+1}の内容が空です")
-        w, h = st.session_state.panel_sizes[i]
+        w, h = current_panel_size()
         pack = set_by_name(st.session_state.scene_chars[i]) or {}
         refs, extra = [], []
         if i > 0 and st.session_state.panel_images[0]:
@@ -430,23 +443,13 @@ else:
         st.session_state.panel_images[i] = generate_panel(prompt, refs[:3], w, h)
 
     if not names:
-        st.warning("まだセットがありません。左の「① セット保存」から画像を登録してください。")
+        st.warning("先に「① セット保存」で画像を登録してください。")
     else:
         for i in range(n):
-            with st.expander(f"コマ {i+1}　{'完成' if st.session_state.panel_images[i] else '未作成'}", expanded=not st.session_state.panel_images[i]):
+            with st.expander(f"コマ {i+1}　{'完成' if st.session_state.panel_images[i] else '未作成'}", expanded=True):
                 st.session_state.scenes[i] = st.text_input("このコマで何が起きる？", value=st.session_state.scenes[i], key=f"sc_{i}")
                 current = st.session_state.scene_chars[i] if st.session_state.scene_chars[i] in names else names[0]
                 st.session_state.scene_chars[i] = st.selectbox("使うセット", names, index=names.index(current), key=f"ch_{i}")
-                shape = st.selectbox("このコマの大きさ", list(ASPECTS.keys()) + ["数字で指定"], key=f"shape_{i}")
-                if shape in ASPECTS:
-                    st.session_state.panel_sizes[i] = ASPECTS[shape]
-                else:
-                    c1, c2 = st.columns(2)
-                    with c1:
-                        pw = st.number_input("幅", 512, 2048, st.session_state.panel_sizes[i][0], 64, key=f"pw_{i}")
-                    with c2:
-                        ph = st.number_input("高さ", 512, 2048, st.session_state.panel_sizes[i][1], 64, key=f"ph_{i}")
-                    st.session_state.panel_sizes[i] = (int(pw), int(ph))
                 b1, b2 = st.columns(2)
                 with b1:
                     if st.button("このコマを生成", key=f"gen_{i}", type="primary"):
@@ -464,12 +467,13 @@ else:
                     bub["kind"] = st.selectbox("吹き出しの形", BUBBLE_TYPES, key=f"bk_{i}")
                     bub["dir"] = st.selectbox("横書き / 縦書き", TEXT_DIR, key=f"bd_{i}")
                     bub["size"] = st.slider("文字の大きさ", 16, 64, int(bub.get("size", 28)), key=f"bs_{i}")
+                    bub["bold"] = st.slider("文字の太さ", 0, 4, int(bub.get("bold", 0)), key=f"bb_{i}")
                     bub["x"] = st.slider("左右", 0, 80, int(bub.get("x", 6)), key=f"bx_{i}")
                     bub["y"] = st.slider("上下", 0, 80, int(bub.get("y", 6)), key=f"by_{i}")
                     bub["angle"] = st.slider("傾き", -45, 45, int(bub.get("angle", 0)), key=f"ba_{i}")
                     bub["fill"] = st.color_picker("吹き出し色", bub.get("fill", "#ffffff"), key=f"bf_{i}")
                     bub["color"] = st.color_picker("文字色", bub.get("color", "#111111"), key=f"bc_{i}")
-                    raw = uri_to_image(st.session_state.panel_images[i]).resize(st.session_state.panel_sizes[i])
+                    raw = uri_to_image(st.session_state.panel_images[i]).resize(current_panel_size())
                     st.image(draw_bubble(raw, bub), width=320)
                     st.session_state.bubbles[i] = bub
 
@@ -489,19 +493,20 @@ else:
 
     st.markdown("---")
     st.header("③ 1枚にまとめる")
-    st.write("コマが全部できたら、ここを押します。")
     if st.button("まとめて完成画像にする", type="primary"):
         panels = []
+        size = current_panel_size()
         for i in range(n):
             if not st.session_state.panel_images[i]:
                 st.error(f"コマ{i+1}がまだありません")
                 panels = None
                 break
-            raw = uri_to_image(st.session_state.panel_images[i]).resize(st.session_state.panel_sizes[i])
+            raw = uri_to_image(st.session_state.panel_images[i]).resize(size)
             panels.append(draw_bubble(raw, st.session_state.bubbles[i]))
         if panels:
             st.session_state.combined = combine_panels(panels, cols=LAYOUTS[layout]["cols"])
             st.rerun()
     if st.session_state.combined is not None:
         st.image(st.session_state.combined, use_container_width=True)
+        st.caption(f"完成サイズ: {st.session_state.combined.size[0]} × {st.session_state.combined.size[1]}")
         st.download_button("PNGを保存", data=image_to_bytes(st.session_state.combined), file_name="yonkoma.png", mime="image/png")
