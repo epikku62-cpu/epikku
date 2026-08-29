@@ -79,12 +79,6 @@ def load_font(size=28, kind="ゴシック"):
             return ImageFont.truetype(path, size)
         except Exception:
             pass
-    for p in ["C:/Windows/Fonts/msgothic.ttc", "C:/Windows/Fonts/YuGothR.ttc"]:
-        if os.path.exists(p):
-            try:
-                return ImageFont.truetype(p, size)
-            except Exception:
-                pass
     return ImageFont.load_default()
 
 def uploaded_to_uri(uploaded):
@@ -195,19 +189,11 @@ def draw_bubble(panel_img, bub):
     if direction == "縦書き":
         chars = list(text.replace("\n", ""))
         line_h = int(size * 1.15)
-        box_w = size + pad * 2
-        box_h = pad * 2 + line_h * len(chars)
-        box_w = min(box_w, w - 20)
-        box_h = min(box_h, h - 20)
+        box_w = min(w - 20, size + pad * 2)
+        box_h = min(h - 20, pad * 2 + line_h * len(chars))
         x, y = bubble_xy(bub.get("pos", "上左"), w, h, box_w, box_h)
-        if kind == "丸四角":
+        if kind != "文字だけ":
             draw.rounded_rectangle([x, y, x + box_w, y + box_h], radius=16, fill=fill, outline="#222", width=3)
-        elif kind == "楕円":
-            draw.ellipse([x, y, x + box_w, y + box_h], fill=fill, outline="#222", width=3)
-        elif kind == "叫び":
-            draw.polygon(jagged_polygon(x, y, box_w, box_h), fill=fill, outline="#222")
-        elif kind == "考え":
-            draw.rounded_rectangle([x, y, x + box_w, y + box_h], radius=24, fill=fill, outline="#222", width=3)
         cy = y + pad
         for ch in chars:
             tw = font.getlength(ch)
@@ -222,7 +208,6 @@ def draw_bubble(panel_img, bub):
     box_w = int(min(w - 24, text_w + pad * 2))
     box_h = int(min(h - 24, pad * 2 + line_h * len(lines)))
     x, y = bubble_xy(bub.get("pos", "上左"), w, h, box_w, box_h)
-
     if kind == "丸四角":
         draw.rounded_rectangle([x, y, x + box_w, y + box_h], radius=16, fill=fill, outline="#222", width=3)
     elif kind == "楕円":
@@ -231,9 +216,6 @@ def draw_bubble(panel_img, bub):
         draw.polygon(jagged_polygon(x - 6, y - 6, box_w + 12, box_h + 12), fill=fill, outline="#222")
     elif kind == "考え":
         draw.rounded_rectangle([x, y, x + box_w, y + box_h], radius=28, fill=fill, outline="#222", width=3)
-        draw.ellipse([x + 10, y + box_h - 4, x + 26, y + box_h + 12], fill=fill, outline="#222")
-        draw.ellipse([x + 28, y + box_h + 8, x + 40, y + box_h + 20], fill=fill, outline="#222")
-
     if direction == "斜め":
         tmp = Image.new("RGBA", (box_w + 40, box_h + 40), (0, 0, 0, 0))
         td = ImageDraw.Draw(tmp)
@@ -271,6 +253,18 @@ def image_to_bytes(img):
     buf = BytesIO()
     img.save(buf, format="PNG")
     return buf.getvalue()
+
+def char_label(ch):
+    return ch.get("save_name") or ch.get("name") or "無名"
+
+def normalize_refs(items):
+    out = []
+    for x in items or []:
+        if isinstance(x, dict):
+            out.append({"uri": x.get("uri", ""), "strength": int(x.get("strength", 8))})
+        elif isinstance(x, str):
+            out.append({"uri": x, "strength": 8})
+    return [x for x in out if x.get("uri")]
 
 if "characters" not in st.session_state:
     st.session_state.characters = load_data().get("characters", [])
@@ -313,22 +307,44 @@ if st.session_state.error:
 mode = st.session_state.mode
 
 if mode == "chars":
-    st.header("固定キャラ")
-    st.caption("キャラ参照・絵柄参照は各3枚まで。保存すると再読み込み後も使えます。")
-    name = st.text_input("キャラ名")
-    char_files = st.file_uploader("キャラ参照（最大3）", type=["png", "jpg", "jpeg"], accept_multiple_files=True, key="char_ups")
-    style_files = st.file_uploader("絵柄参照（最大3）", type=["png", "jpg", "jpeg"], accept_multiple_files=True, key="style_ups")
-    if char_files:
-        st.image(char_files[0], width=160)
-    if st.button("このキャラを保存する", type="primary"):
-        if not name.strip() or not char_files:
-            st.warning("名前とキャラ参照は必須です")
+    st.header("固定セット")
+    st.caption("保存名は一覧用です。生成の文章には使いません。キャラだけ、絵柄だけ、両方、どれでも保存できます。")
+    save_name = st.text_input("保存名（任意）", placeholder="例: 赤ずきんセット")
+    use_type = st.radio("このセットの種類", ["キャラだけ", "絵柄だけ", "キャラ＋絵柄"], horizontal=True)
+
+    char_files = []
+    style_files = []
+    char_strengths = []
+    style_strengths = []
+
+    if use_type in ["キャラだけ", "キャラ＋絵柄"]:
+        char_files = st.file_uploader("キャラ参照（最大3）", type=["png", "jpg", "jpeg"], accept_multiple_files=True, key="char_ups")
+        for i, f in enumerate((char_files or [])[:3]):
+            st.image(f, width=140)
+            char_strengths.append(st.slider(f"キャラ参照{i+1}の強度", 1, 10, 8, key=f"cs_{i}"))
+
+    if use_type in ["絵柄だけ", "キャラ＋絵柄"]:
+        style_files = st.file_uploader("絵柄参照（最大3）", type=["png", "jpg", "jpeg"], accept_multiple_files=True, key="style_ups")
+        for i, f in enumerate((style_files or [])[:3]):
+            st.image(f, width=140)
+            style_strengths.append(st.slider(f"絵柄参照{i+1}の強度", 1, 10, 8, key=f"ss_{i}"))
+
+    if st.button("このセットを保存する", type="primary"):
+        chars = [{"uri": uploaded_to_uri(f), "strength": char_strengths[i]} for i, f in enumerate((char_files or [])[:3])]
+        styles = [{"uri": uploaded_to_uri(f), "strength": style_strengths[i]} for i, f in enumerate((style_files or [])[:3])]
+        if use_type == "キャラだけ" and not chars:
+            st.warning("キャラ参照を1枚以上入れてください")
+        elif use_type == "絵柄だけ" and not styles:
+            st.warning("絵柄参照を1枚以上入れてください")
+        elif use_type == "キャラ＋絵柄" and (not chars or not styles):
+            st.warning("キャラ参照と絵柄参照の両方を入れてください")
         else:
             item = {
                 "id": str(uuid.uuid4())[:8],
-                "name": name.strip(),
-                "chars": [uploaded_to_uri(f) for f in char_files[:3]],
-                "styles": [uploaded_to_uri(f) for f in style_files[:3]] if style_files else [],
+                "save_name": save_name.strip() or f"セット{len(st.session_state.characters)+1}",
+                "kind": use_type,
+                "chars": chars,
+                "styles": styles,
             }
             st.session_state.characters.append(item)
             save_data({"characters": st.session_state.characters})
@@ -340,12 +356,12 @@ if mode == "chars":
         st.info("まだありません")
     else:
         for i, ch in enumerate(st.session_state.characters):
-            cols = st.columns([3, 1])
+            cols = st.columns([4, 1])
             with cols[0]:
-                st.write(f"**{ch['name']}**")
-                imgs = (ch.get("chars") or ch.get("char") and [ch["char"]] or [])
-                if imgs:
-                    st.image(imgs[0], width=140)
+                st.write(f"**{char_label(ch)}**　({ch.get('kind', 'セット')})")
+                thumbs = normalize_refs(ch.get("chars")) + normalize_refs(ch.get("styles"))
+                if thumbs:
+                    st.image(thumbs[0]["uri"], width=140)
             with cols[1]:
                 if st.button("削除", key=f"delc_{i}"):
                     st.session_state.characters.pop(i)
@@ -357,7 +373,7 @@ elif mode == "comic":
     layout = st.radio("並び", list(LAYOUTS.keys()), horizontal=True)
     st.session_state.layout = layout
     n = LAYOUTS[layout]["count"]
-    names = [ch["name"] for ch in st.session_state.characters]
+    names = [char_label(ch) for ch in st.session_state.characters]
 
     st.markdown("### コマサイズ")
     preset = st.radio("基本の形", list(ASPECTS.keys()) + ["数字で指定"], horizontal=True)
@@ -378,7 +394,7 @@ elif mode == "comic":
         st.rerun()
 
     if not names:
-        st.warning("先にキャラを固定してください")
+        st.warning("先にセットを保存してください")
     else:
         for i in range(n):
             st.markdown(f"---\n### コマ {i+1}　今のサイズ {st.session_state.panel_sizes[i][0]}×{st.session_state.panel_sizes[i][1]}")
@@ -393,11 +409,10 @@ elif mode == "comic":
                 with c2:
                     ph = st.number_input("高さ", 512, 2048, st.session_state.panel_sizes[i][1], 64, key=f"ph_{i}")
                 st.session_state.panel_sizes[i] = (int(pw), int(ph))
-                st.caption(f"{int(pw)} × {int(ph)}")
 
             st.session_state.scenes[i] = st.text_input("このコマの内容", value=st.session_state.scenes[i], key=f"sc_{i}")
             current = st.session_state.scene_chars[i] if st.session_state.scene_chars[i] in names else names[0]
-            st.session_state.scene_chars[i] = st.selectbox("使う固定キャラ", names, index=names.index(current), key=f"ch_{i}")
+            st.session_state.scene_chars[i] = st.selectbox("使うセット", names, index=names.index(current), key=f"ch_{i}")
             b1, b2 = st.columns(2)
             with b1:
                 if st.button(f"コマ{i+1}を生成", key=f"gen_{i}", type="primary"):
@@ -414,27 +429,34 @@ elif mode == "comic":
             st.session_state.busy_index = "all"
             st.rerun()
 
-    def refs_of(name):
+    def set_by_name(name):
         for ch in st.session_state.characters:
-            if ch["name"] == name:
-                chars = ch.get("chars") or ([ch["char"]] if ch.get("char") else [])
-                styles = ch.get("styles") or ([ch["style"]] if ch.get("style") else [])
-                return chars + styles
-        return []
+            if char_label(ch) == name:
+                return ch
+        return None
 
     def make_one(i):
         scene = st.session_state.scenes[i].strip()
         if not scene:
             raise Exception(f"コマ{i+1}の内容が空です")
         w, h = st.session_state.panel_sizes[i]
+        pack = set_by_name(st.session_state.scene_chars[i]) or {}
+        chars = normalize_refs(pack.get("chars"))
+        styles = normalize_refs(pack.get("styles"))
         refs = []
+        extra = []
         if i > 0 and st.session_state.panel_images[0]:
             refs.append(st.session_state.panel_images[0])
-        refs += refs_of(st.session_state.scene_chars[i])
+            extra.append("Use panel 1 as consistency reference.")
+        for item in chars:
+            refs.append(item["uri"])
+            extra.append(f"CHARACTER REFERENCE strength {item['strength']}/10: keep identity, face, hair, outfit.")
+        for item in styles:
+            refs.append(item["uri"])
+            extra.append(f"STYLE REFERENCE strength {item['strength']}/10: use only art style, not the character unless also a character ref.")
         prompt = (
             "Manga comic panel, clean illustration, no speech bubbles, no text, no letters. "
-            f"Character: {st.session_state.scene_chars[i]}. Scene: {scene}. "
-            "Keep the same face, hair, outfit, linework and coloring as the reference."
+            f"Scene: {scene}. " + " ".join(extra)
         )
         st.session_state.panel_images[i] = generate_panel(prompt, refs[:3], w, h)
 
@@ -445,9 +467,10 @@ elif mode == "comic":
             st.session_state.error = "XAI_API_KEY がありません"
         else:
             try:
+                nnow = LAYOUTS[st.session_state.layout]["count"]
                 if busy == "all":
                     with st.spinner("生成中..."):
-                        for i in range(n):
+                        for i in range(nnow):
                             if not st.session_state.panel_images[i]:
                                 make_one(i)
                 else:
@@ -482,8 +505,7 @@ elif mode == "bubble":
                 bub["fill"] = st.color_picker("吹き出し色", bub["fill"], key=f"bf_{i}")
                 bub["color"] = st.color_picker("文字色", bub["color"], key=f"bc_{i}")
             raw = uri_to_image(st.session_state.panel_images[i]).resize(st.session_state.panel_sizes[i])
-            preview = draw_bubble(raw, bub)
-            st.image(preview, width=360)
+            st.image(draw_bubble(raw, bub), width=360)
             st.session_state.bubbles[i] = bub
 
         if st.button("4コマにまとめる", type="primary"):
@@ -498,7 +520,6 @@ elif mode == "bubble":
             if panels:
                 st.session_state.combined = combine_panels(panels, cols=LAYOUTS[st.session_state.layout]["cols"])
                 st.rerun()
-
         if st.session_state.combined is not None:
             st.markdown("### 完成")
             st.image(st.session_state.combined, use_container_width=True)
