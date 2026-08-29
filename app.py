@@ -135,10 +135,14 @@ def uri_to_image(uri):
     res.raise_for_status()
     return Image.open(BytesIO(res.content)).convert("RGB")
 
-def uri_to_b64(uri):
-    img = uri_to_image(uri)
+def pad_ref(uri):
+    img = uri_to_image(uri).convert("RGB")
+    tw, th = 1024, 1536
+    canvas = Image.new("RGB", (tw, th), (0, 0, 0))
+    img.thumbnail((tw, th))
+    canvas.paste(img, ((tw - img.width) // 2, (th - img.height) // 2))
     buf = BytesIO()
-    img.save(buf, format="PNG")
+    canvas.save(buf, format="PNG")
     return base64.b64encode(buf.getvalue()).decode()
 
 def nai_generate(prompt, width, height, char_refs=None, style_refs=None):
@@ -150,8 +154,8 @@ def nai_generate(prompt, width, height, char_refs=None, style_refs=None):
         width, height = 832, 1216
     else:
         width, height = 1024, 1024
-    char_refs = [x for x in (char_refs or []) if x.get("uri")]
-    style_refs = [x for x in (style_refs or []) if x.get("uri")]
+    char_refs = [x for x in (char_refs or []) if x.get("uri")][:1]
+    style_refs = [x for x in (style_refs or []) if x.get("uri")][:1]
     parameters = {
         "params_version": 3,
         "width": width,
@@ -173,48 +177,43 @@ def nai_generate(prompt, width, height, char_refs=None, style_refs=None):
             "legacy_uc": False,
         },
     }
-    refs = []
-    kinds = []
-    strengths = []
-    for x in char_refs[:3]:
-        refs.append(uri_to_b64(x["uri"]))
+    refs, kinds = [], []
+    if char_refs and style_refs:
+        refs.append(pad_ref(char_refs[0]["uri"]))
+        kinds.append("character&style")
+    elif char_refs:
+        refs.append(pad_ref(char_refs[0]["uri"]))
         kinds.append("character")
-        strengths.append(max(0.3, min(1.0, x.get("strength", 8) / 10)))
-    for x in style_refs[:3]:
-        refs.append(uri_to_b64(x["uri"]))
+    elif style_refs:
+        refs.append(pad_ref(style_refs[0]["uri"]))
         kinds.append("style")
-        strengths.append(max(0.3, min(1.0, x.get("strength", 8) / 10)))
     if refs:
         parameters["director_reference_images"] = refs
         parameters["director_reference_descriptions"] = [
-            {"caption": {"base_caption": k, "char_captions": []}, "legacy_uc": False}
-            for k in kinds
+            {"caption": {"base_caption": kinds[0], "char_captions": []}, "legacy_uc": False}
         ]
-        parameters["director_reference_information_extracted"] = [1] * len(refs)
-        parameters["director_reference_strength_values"] = strengths
-        parameters["director_reference_secondary_strength_values"] = [0.75] * len(refs)
+        parameters["director_reference_information_extracted"] = [1]
+        parameters["director_reference_strength_values"] = [1]
+        parameters["director_reference_secondary_strength_values"] = [0.75]
+    payload = {
+        "input": prompt,
+        "model": "nai-diffusion-4-5-full",
+        "action": "generate",
+        "parameters": parameters,
+    }
     last_err = None
-    for model in ["nai-diffusion-4-5-full", "nai-diffusion-4-5-curated", "nai-diffusion-4-full"]:
-        payload = {
-            "input": prompt,
-            "model": model,
-            "action": "generate",
-            "parameters": parameters,
-        }
-        for url in NAI_URLS:
-            res = requests.post(
-                url,
-                headers={"Authorization": f"Bearer {NAI_KEY}", "Content-Type": "application/json"},
-                json=payload,
-                timeout=180,
-            )
-            if res.status_code == 200:
-                with zipfile.ZipFile(io.BytesIO(res.content)) as zf:
-                    png = zf.read(zf.namelist()[0])
-                return "data:image/png;base64," + base64.b64encode(png).decode()
-            last_err = f"{model} / {res.status_code}: {res.text[:300]}"
-            if "enum" in (res.text or ""):
-                break
+    for url in NAI_URLS:
+        res = requests.post(
+            url,
+            headers={"Authorization": f"Bearer {NAI_KEY}", "Content-Type": "application/json"},
+            json=payload,
+            timeout=180,
+        )
+        if res.status_code == 200:
+            with zipfile.ZipFile(io.BytesIO(res.content)) as zf:
+                png = zf.read(zf.namelist()[0])
+            return "data:image/png;base64," + base64.b64encode(png).decode()
+        last_err = f"{res.status_code}: {res.text[:400]}"
     raise Exception(last_err or "NovelAIの生成に失敗しました")
 
 def wrap_text(text, font, max_width):
@@ -386,7 +385,7 @@ if "layout" not in st.session_state:
 if "scenes" not in st.session_state:
     st.session_state.scenes = ["", "", "", ""]
 if "scene_chars" not in st.session_state:
-    st.session_state.scene_chars = ["", "", "", ""]
+    st.session_state.scene_chars = ["セットなし", "セットなし", "セットなし", "セットなし"]
 if "panel_images" not in st.session_state:
     st.session_state.panel_images = [None, None, None, None]
 if "panel_sizes" not in st.session_state:
@@ -546,7 +545,8 @@ else:
         if not scene:
             raise Exception("内容が空です")
         w, h = st.session_state.panel_sizes[i]
-        pack = set_by_name(st.session_state.scene_chars[i]) or {}
+        chosen = st.session_state.scene_chars[i]
+        pack = {} if chosen == "セットなし" else (set_by_name(chosen) or {})
         chars = normalize_refs(pack.get("chars"))
         styles = normalize_refs(pack.get("styles"))
         st.session_state.panel_images[i] = nai_generate(scene, w, h, chars, styles)
@@ -568,9 +568,10 @@ else:
             if up:
                 st.session_state.panel_images[i] = uploaded_to_uri(up)
             st.session_state.scenes[i] = st.text_input("生成する内容", value=st.session_state.scenes[i], key=f"sc_{i}")
-            if names:
-                current = st.session_state.scene_chars[i] if st.session_state.scene_chars[i] in names else names[0]
-                st.session_state.scene_chars[i] = st.selectbox("セット", names, index=names.index(current), key=f"ch_{i}")
+            options = ["セットなし"] + names
+            cur = st.session_state.scene_chars[i]
+            idx = options.index(cur) if cur in options else 0
+            st.session_state.scene_chars[i] = st.selectbox("セット", options, index=idx, key=f"ch_{i}")
             c1, c2 = st.columns(2)
             with c1:
                 if st.button("生成", key=f"gen_{i}", type="primary"):
