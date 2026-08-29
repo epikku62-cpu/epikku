@@ -141,22 +141,17 @@ def uri_to_b64(uri):
     img.save(buf, format="PNG")
     return base64.b64encode(buf.getvalue()).decode()
 
-def nai_size(w, h):
-    w = max(64, min(1216, int(round(w / 64) * 64)))
-    h = max(64, min(1216, int(round(h / 64) * 64)))
-    if w >= h:
-        return 1216, 832
-    if h > w:
-        return 832, 1216
-    return 1024, 1024
-
-def nai_generate(prompt, width, height, ref_uris=None, strengths=None):
+def nai_generate(prompt, width, height, char_refs=None, style_refs=None):
     if not NAI_KEY:
         raise Exception("NOVELAI_API_KEY がありません")
-    width, height = nai_size(width, height)
-    uc = "lowres, bad anatomy, text, speech bubble, watermark, logo"
-    ref_uris = [u for u in (ref_uris or []) if u]
-    strengths = strengths or []
+    if width >= height:
+        width, height = 1216, 832
+    elif height > width * 1.2:
+        width, height = 832, 1216
+    else:
+        width, height = 1024, 1024
+    char_refs = [x for x in (char_refs or []) if x.get("uri")]
+    style_refs = [x for x in (style_refs or []) if x.get("uri")]
     parameters = {
         "params_version": 3,
         "width": width,
@@ -165,30 +160,47 @@ def nai_generate(prompt, width, height, ref_uris=None, strengths=None):
         "sampler": "k_euler_ancestral",
         "steps": 23,
         "n_samples": 1,
-        "qualityToggle": True,
+        "qualityToggle": False,
         "ucPreset": 0,
-        "negative_prompt": uc,
+        "negative_prompt": "",
         "v4_prompt": {
             "caption": {"base_caption": prompt, "char_captions": []},
             "use_coords": False,
             "use_order": True,
         },
         "v4_negative_prompt": {
-            "caption": {"base_caption": uc, "char_captions": []},
+            "caption": {"base_caption": "", "char_captions": []},
             "legacy_uc": False,
         },
     }
-    action = "generate"
-    if ref_uris:
-        parameters["image"] = uri_to_b64(ref_uris[0])
-        s = strengths[0] if strengths else 6
-        parameters["strength"] = max(0.25, min(0.75, s / 10))
-        parameters["noise"] = 0.1
-        action = "img2img"
-    models = ["nai-diffusion-4-5-full", "nai-diffusion-4-5-curated", "nai-diffusion-4-full"]
+    refs = []
+    kinds = []
+    strengths = []
+    for x in char_refs[:3]:
+        refs.append(uri_to_b64(x["uri"]))
+        kinds.append("character")
+        strengths.append(max(0.3, min(1.0, x.get("strength", 8) / 10)))
+    for x in style_refs[:3]:
+        refs.append(uri_to_b64(x["uri"]))
+        kinds.append("style")
+        strengths.append(max(0.3, min(1.0, x.get("strength", 8) / 10)))
+    if refs:
+        parameters["director_reference_images"] = refs
+        parameters["director_reference_descriptions"] = [
+            {"caption": {"base_caption": k, "char_captions": []}, "legacy_uc": False}
+            for k in kinds
+        ]
+        parameters["director_reference_information_extracted"] = [1] * len(refs)
+        parameters["director_reference_strength_values"] = strengths
+        parameters["director_reference_secondary_strength_values"] = [0.75] * len(refs)
     last_err = None
-    for model in models:
-        payload = {"input": prompt, "model": model, "action": action, "parameters": parameters}
+    for model in ["nai-diffusion-4-5-full", "nai-diffusion-4-5-curated", "nai-diffusion-4-full"]:
+        payload = {
+            "input": prompt,
+            "model": model,
+            "action": "generate",
+            "parameters": parameters,
+        }
         for url in NAI_URLS:
             res = requests.post(
                 url,
@@ -535,13 +547,9 @@ else:
             raise Exception("内容が空です")
         w, h = st.session_state.panel_sizes[i]
         pack = set_by_name(st.session_state.scene_chars[i]) or {}
-        refs, strengths = [], []
-        if i > 0 and st.session_state.panel_images[0]:
-            refs.append(st.session_state.panel_images[0]); strengths.append(6)
-        for item in normalize_refs(pack.get("chars")) + normalize_refs(pack.get("styles")):
-            refs.append(item["uri"]); strengths.append(item["strength"])
-        prompt = f"manga panel, anime, {scene}, no text, no speech bubble"
-        st.session_state.panel_images[i] = nai_generate(prompt, w, h, refs, strengths)
+        chars = normalize_refs(pack.get("chars"))
+        styles = normalize_refs(pack.get("styles"))
+        st.session_state.panel_images[i] = nai_generate(scene, w, h, chars, styles)
 
     for i in range(n):
         with st.expander(f"コマ {i+1}", expanded=True):
