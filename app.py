@@ -8,8 +8,6 @@ import math
 import io
 import zipfile
 import random
-import re
-import socket
 import requests
 from io import BytesIO
 from datetime import datetime, timedelta
@@ -41,7 +39,6 @@ PHONE_W, PHONE_H = 1080, 1920
 MONTHLY_PRICE = 980
 MONTHLY_POINTS = 2000
 REF_SITE = 10
-V5_COST = 20
 SIGNUP_POINTS = 20
 POINT_PACKS = [
     {"points": 300, "yen": 300},
@@ -71,9 +68,14 @@ SIZES = {
     "壁紙・縦 1088×1920": {"wh": (1088, 1920), "gen": (1088, 1920), "cost": 68, "paid": True},
 }
 SIMPLE_SIZES = {
-    "横長 1216×832": (1216, 832),
-    "縦長 832×1216": (832, 1216),
-    "正方形 1024×1024": (1024, 1024),
+    "横長 1216×832": {"gen": (1216, 832), "cost": 20, "paid": False},
+    "縦長 832×1216": {"gen": (832, 1216), "cost": 20, "paid": False},
+    "正方形 1024×1024": {"gen": (1024, 1024), "cost": 20, "paid": False},
+    "大・横 1536×1024": {"gen": (1536, 1024), "cost": 70, "paid": True},
+    "大・縦 1024×1536": {"gen": (1024, 1536), "cost": 70, "paid": True},
+    "大・正 1472×1472": {"gen": (1472, 1472), "cost": 96, "paid": True},
+    "壁紙・横 1920×1088": {"gen": (1920, 1088), "cost": 94, "paid": True},
+    "壁紙・縦 1088×1920": {"gen": (1088, 1920), "cost": 94, "paid": True},
 }
 BUBBLE_TYPES = ["ふきだし", "叫び", "考え", "文字だけ"]
 TAILS = ["下", "下左", "下右", "左", "右"]
@@ -259,15 +261,20 @@ def nai_request(prompt, width, height, model, steps=23, scale=5.0, negative="", 
             parameters["director_reference_information_extracted"] = [1]
             parameters["director_reference_strength_values"] = [1]
             parameters["director_reference_secondary_strength_values"] = [0.75]
-    payload = {"input": prompt or "", "model": model, "action": "generate", "parameters": parameters}
+    if model == "nai-diffusion-4-5-full":
+        models = ["nai-diffusion-4-5-full", "nai-diffusion-4-5-curated"]
+    else:
+        models = [model]
     last_err = None
-    for url in NAI_URLS:
-        res = requests.post(url, headers={"Authorization": f"Bearer {NAI_KEY}", "Content-Type": "application/json"}, json=payload, timeout=180)
-        if res.status_code == 200:
-            with zipfile.ZipFile(io.BytesIO(res.content)) as zf:
-                png = zf.read(zf.namelist()[0])
-            return "data:image/png;base64," + base64.b64encode(png).decode()
-        last_err = f"{res.status_code}: {res.text[:400]}"
+    for mdl in models:
+        payload = {"input": prompt or "", "model": mdl, "action": "generate", "parameters": parameters}
+        for url in NAI_URLS:
+            res = requests.post(url, headers={"Authorization": f"Bearer {NAI_KEY}", "Content-Type": "application/json"}, json=payload, timeout=180)
+            if res.status_code == 200:
+                with zipfile.ZipFile(io.BytesIO(res.content)) as zf:
+                    png = zf.read(zf.namelist()[0])
+                return "data:image/png;base64," + base64.b64encode(png).decode()
+            last_err = f"{res.status_code}: {res.text[:400]}"
     raise Exception(last_err or "NovelAIの生成に失敗しました")
 
 def wrap_text(text, font, max_width):
@@ -512,11 +519,18 @@ if st.session_state.error:
     st.error(st.session_state.error)
 
 if st.session_state.page == "help":
-    st.markdown("""<div style="color:#111;background:#fff;padding:16px;border-radius:12px;">
-    <h3>ーーー画像生成モードーーー</h3><p>会員登録して画像を作ろう！4コマにも反映できるよ！</p>
-    <h3>ーーーセットーーー</h3><p>絵柄の登録<br>キャラの登録<br>登録したら4コマ画像生成の時に絵柄、キャラが反映される</p>
-    <h3>ーーー4コマーーー</h3><p>セットした絵柄、キャラを使って画像生成して文字や吹き出しをつけよう！<br>1コマずつ作れるので、最後に合体させて4コマ完成！</p>
-    <h3>ーーー月額登録ーーー</h3><p>細かい設定の画像生成<br>セット機能<br>サイズの変更機能<br>ポイント付与</p></div>""", unsafe_allow_html=True)
+    st.markdown("""
+    <div style="color:#111;background:#fff;padding:16px;border-radius:12px;">
+    <h2>画像生成モード</h2>
+    <p>ポイントを消費して画像生成<br>日本語で作成可能<br>おすすめ</p>
+    <h2>セット</h2>
+    <p>絵柄の登録<br>キャラの登録<br>登録したら4コマ画像生成の時、絵柄、キャラが反映される</p>
+    <h2>4コマ</h2>
+    <p>セット絵柄、キャラを使えて画像生成して、会話、吹き出しをつけれるよ！<br>最後に合体させて4コマ完成！</p>
+    <h2>月額登録</h2>
+    <p>セット機能開放<br>サイズの変更開放<br>ポイント付与</p>
+    </div>
+    """, unsafe_allow_html=True)
     show_ad()
 
 elif st.session_state.page == "icon":
@@ -675,7 +689,6 @@ elif st.session_state.page == "chars":
 
 elif st.session_state.page == "simple":
     st.subheader("画像生成モード")
-    st.caption(f"1回 {V5_COST}ポイント")
     if st.button("履歴"):
         st.session_state.show_history = True; st.rerun()
     if st.session_state.show_history:
@@ -720,7 +733,10 @@ elif st.session_state.page == "simple":
                 st.session_state.schars.pop(i); st.rerun()
     st.session_state.so = st.text_area("その他プロンプト", value=st.session_state.so)
     st.session_state.sn = st.text_area("除外プロンプト", value=st.session_state.sn)
-    size_name = st.radio("サイズ", list(SIMPLE_SIZES.keys()), horizontal=True)
+    size_opts = [k for k, v in SIMPLE_SIZES.items() if (is_premium() or not v["paid"])]
+    size_name = st.radio("サイズ", size_opts, horizontal=True)
+    spec = SIMPLE_SIZES[size_name]
+    st.caption(f"{spec['gen'][0]} × {spec['gen'][1]}　{spec['cost']}ポイント")
     scale = st.slider("プロンプトガイダンス", 1.0, 10.0, 5.0, 0.1)
     if st.button("生成する", type="primary"):
         st.session_state.simple_busy = True; st.rerun()
@@ -728,17 +744,20 @@ elif st.session_state.page == "simple":
         st.session_state.simple_busy = False
         chars = [x.strip() for x in st.session_state.schars if x.strip()]
         parts = [x.strip() for x in [st.session_state.sq, st.session_state.sb, st.session_state.so] if x.strip()]
+        cost = spec["cost"]
         if not parts and not chars:
             st.session_state.error = "プロンプトを入れてください"
-        elif st.session_state.points < V5_COST:
-            st.session_state.error = f"ポイントが足りません。必要 {V5_COST}"
+        elif spec["paid"] and not is_premium():
+            st.session_state.error = "このサイズはVIPだけです"
+        elif st.session_state.points < cost:
+            st.session_state.error = f"ポイントが足りません。必要 {cost}"
         else:
             try:
-                w, h = SIMPLE_SIZES[size_name]
+                w, h = spec["gen"]
                 img = nai_request(", ".join(parts), w, h, "nai-diffusion-5-full", steps=20, scale=scale, negative=st.session_state.sn.strip(), char_texts=chars)
                 st.session_state.simple_image = img
                 st.session_state.simple_history.append({"url": img, "quality": st.session_state.sq, "background": st.session_state.sb, "chars": list(st.session_state.schars), "other": st.session_state.so, "negative": st.session_state.sn, "size": size_name, "scale": scale})
-                st.session_state.points -= V5_COST
+                st.session_state.points -= cost
                 save_user_state()
                 st.session_state.error = ""
             except Exception as e:
