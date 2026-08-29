@@ -35,10 +35,9 @@ USERS_FILE = "users_data.json"
 HOME_IMG = "IMG_1106.jpeg"
 HEADER_IMG = "IMG_1107.jpeg"
 PHONE_W, PHONE_H = 1080, 1920
-MONTHLY_PRICE = 980
-MONTHLY_POINTS = 500
-COST_TEXT = 2
-COST_REF = 8
+MONTHLY_PRICE = 1000
+MONTHLY_POINTS = 2500
+REF_SITE = 10
 
 LAYOUTS = {
     "縦4": {"cols": 1, "count": 4},
@@ -50,9 +49,14 @@ LAYOUTS = {
     "2×2": {"cols": 2, "count": 4},
 }
 SIZES = {
-    "横長": (PHONE_W, PHONE_H // 4),
-    "縦長": (PHONE_H // 4, PHONE_W),
-    "正方形": (512, 512),
+    "横長": {"wh": (PHONE_W, PHONE_H // 4), "gen": (1216, 832), "cost": 0, "paid": False},
+    "縦長": {"wh": (PHONE_H // 4, PHONE_W), "gen": (832, 1216), "cost": 0, "paid": False},
+    "正方形": {"wh": (512, 512), "gen": (1024, 1024), "cost": 0, "paid": False},
+    "大・横 1536×1024": {"wh": (1536, 1024), "gen": (1536, 1024), "cost": 52, "paid": True},
+    "大・縦 1024×1536": {"wh": (1024, 1536), "gen": (1024, 1536), "cost": 52, "paid": True},
+    "大・正 1472×1472": {"wh": (1472, 1472), "gen": (1472, 1472), "cost": 72, "paid": True},
+    "壁紙・横 1920×1088": {"wh": (1920, 1088), "gen": (1920, 1088), "cost": 68, "paid": True},
+    "壁紙・縦 1088×1920": {"wh": (1088, 1920), "gen": (1088, 1920), "cost": 68, "paid": True},
 }
 BUBBLE_TYPES = ["ふきだし", "叫び", "考え", "文字だけ"]
 TAILS = ["下", "下左", "下右", "左", "右"]
@@ -180,17 +184,17 @@ def is_premium():
     except Exception:
         return False
 
+def nai_wh(w, h):
+    w = max(64, min(1920, int(round(w / 64) * 64)))
+    h = max(64, min(1920, int(round(h / 64) * 64)))
+    return w, h
+
 def nai_generate(prompt, width, height, char_refs=None, style_refs=None):
     if not NAI_KEY:
         raise Exception("NOVELAI_API_KEY がありません")
-    if width >= height:
-        gw, gh = 1216, 832
-    elif height > width * 1.2:
-        gw, gh = 832, 1216
-    else:
-        gw, gh = 1024, 1024
-    char_refs = [x for x in (char_refs or []) if x.get("uri")][:1]
-    style_refs = [x for x in (style_refs or []) if x.get("uri")][:1]
+    gw, gh = nai_wh(width, height)
+    char_refs = [x for x in (char_refs or []) if x.get("uri")][:3]
+    style_refs = [x for x in (style_refs or []) if x.get("uri")][:3]
     parameters = {
         "params_version": 3,
         "width": gw,
@@ -415,9 +419,11 @@ if "scenes" not in st.session_state:
 if "scene_chars" not in st.session_state:
     st.session_state.scene_chars = ["セットなし"] * 4
 if "panel_images" not in st.session_state:
-    st.session_state.panel_images = [None, None, None, None]
+    st.session_state.panel_images = [None] * 4
 if "panel_sizes" not in st.session_state:
-    st.session_state.panel_sizes = [SIZES["横長"]] * 4
+    st.session_state.panel_sizes = [SIZES["横長"]["wh"]] * 4
+if "panel_shape" not in st.session_state:
+    st.session_state.panel_shape = ["横長"] * 4
 if "panel_bubbles" not in st.session_state:
     st.session_state.panel_bubbles = [[], [], [], []]
 if "drafts" not in st.session_state:
@@ -513,6 +519,7 @@ need = LAYOUTS[st.session_state.layout]["count"]
 with st.sidebar:
     st.write(st.session_state.get("username", ""))
     st.write(f"ポイント {st.session_state.points}")
+    st.caption("月額会員" if is_premium() else "無料")
     if st.button("4コマ", use_container_width=True):
         st.session_state.page = "make"; st.rerun()
     if st.button("セット", use_container_width=True):
@@ -535,11 +542,9 @@ if st.session_state.page == "help":
         """
         <div style="color:#111;background:#fff;padding:16px;border-radius:12px;">
         <h3>説明書</h3>
-        <p>1. セットでキャラや絵柄を保存できます。使わないときは「セットなし」。</p>
-        <p>2. 4コマで各コマの内容を書いて生成します。書いた文だけが送られます。</p>
-        <p>3. できた絵に吹き出しを足して、最後に1枚にまとめます。</p>
-        <p>4. 横長は 1080×480、縦長は 480×1080、正方形は 512×512 です。</p>
-        <p>5. 生成はポイントを使います。文章だけ2、セットあり8。</p>
+        <p>無料は普通サイズ（横長・縦長・正方形）だけ、セットなしで生成できます。</p>
+        <p>月額1000円で2500ポイント。セットと大サイズ・壁紙が使えます。</p>
+        <p>セット1枚10、大・横/縦52、大・正72、壁紙68。4枚をまとめてもNovelAIは減りません。</p>
         </div>
         """,
         unsafe_allow_html=True,
@@ -548,9 +553,9 @@ if st.session_state.page == "help":
 elif st.session_state.page == "plan":
     st.subheader("月額")
     st.write(f"**{MONTHLY_PRICE}円 / 30日**")
-    st.write(f"- 登録時 {MONTHLY_POINTS}ポイント")
-    st.write(f"- 文章生成 {COST_TEXT}ポイント")
-    st.write(f"- セット参照 {COST_REF}ポイント")
+    st.write(f"- {MONTHLY_POINTS}ポイント付与")
+    st.write("- セット機能")
+    st.write("- 大サイズ・壁紙")
     if is_premium():
         st.success(f"月額会員です。期限 {str(st.session_state.premium_until)[:10]}")
     elif stripe is None or not STRIPE_SECRET_KEY or not STRIPE_PRICE_ID:
@@ -570,6 +575,9 @@ elif st.session_state.page == "plan":
 
 elif st.session_state.page == "chars":
     st.subheader("セット")
+    if not is_premium():
+        st.warning("セットは月額会員だけです。")
+        st.stop()
     save_name = st.text_input("保存名", placeholder="任意")
     use_type = st.radio("種類", ["キャラだけ", "絵柄だけ", "キャラ＋絵柄"], horizontal=True)
     char_files, style_files, char_strengths, style_strengths = [], [], [], []
@@ -594,7 +602,6 @@ elif st.session_state.page == "chars":
                 "save_name": save_name.strip() or f"セット{len(st.session_state.characters)+1}",
                 "kind": use_type, "chars": chars, "styles": styles,
             })
-            save_json(DATA_FILE, {"characters": st.session_state.characters})
             save_user_state()
             st.success("保存しました")
             st.rerun()
@@ -614,6 +621,7 @@ else:
     st.session_state.layout = layout
     n = LAYOUTS[layout]["count"]
     names = [char_label(ch) for ch in st.session_state.characters]
+    size_opts = [k for k, v in SIZES.items() if (is_premium() or not v["paid"])]
 
     def set_by_name(name):
         for ch in st.session_state.characters:
@@ -625,38 +633,44 @@ else:
         scene = st.session_state.scenes[i].strip()
         if not scene:
             raise Exception("内容が空です")
-        w, h = st.session_state.panel_sizes[i]
+        shape = st.session_state.panel_shape[i]
+        spec = SIZES.get(shape, SIZES["横長"])
+        if spec["paid"] and not is_premium():
+            raise Exception("このサイズは月額会員だけです")
         chosen = st.session_state.scene_chars[i]
+        if chosen != "セットなし" and not is_premium():
+            raise Exception("セットは月額会員だけです")
         pack = {} if chosen == "セットなし" else (set_by_name(chosen) or {})
         chars = normalize_refs(pack.get("chars"))
         styles = normalize_refs(pack.get("styles"))
-        cost = COST_REF if (chars or styles) else COST_TEXT
-        if st.session_state.points < cost:
+        ref_n = min(3, len(chars)) + min(3, len(styles))
+        cost = spec["cost"] + REF_SITE * ref_n
+        if cost > 0 and st.session_state.points < cost:
             raise Exception(f"ポイントが足りません。必要 {cost}")
-        st.session_state.panel_images[i] = nai_generate(scene, w, h, chars, styles)
-        st.session_state.points -= cost
-        save_user_state()
+        gw, gh = spec["gen"]
+        st.session_state.panel_images[i] = nai_generate(scene, gw, gh, chars, styles)
+        st.session_state.panel_sizes[i] = spec["wh"]
+        if cost > 0:
+            st.session_state.points -= cost
+            save_user_state()
 
     for i in range(n):
         with st.expander(f"コマ {i+1}", expanded=True):
-            shape = st.selectbox("サイズ", list(SIZES.keys()) + ["数字"], key=f"shape_{i}")
-            if shape in SIZES:
-                st.session_state.panel_sizes[i] = SIZES[shape]
-                st.caption(f"{SIZES[shape][0]} × {SIZES[shape][1]}")
-            else:
-                a, b = st.columns(2)
-                with a:
-                    pw = st.number_input("幅", 256, 2048, st.session_state.panel_sizes[i][0], 16, key=f"pw_{i}")
-                with b:
-                    ph = st.number_input("高さ", 256, 2048, st.session_state.panel_sizes[i][1], 16, key=f"ph_{i}")
-                st.session_state.panel_sizes[i] = (int(pw), int(ph))
+            cur = st.session_state.panel_shape[i]
+            if cur not in size_opts:
+                cur = "横長"
+            shape = st.selectbox("サイズ", size_opts, index=size_opts.index(cur), key=f"shape_{i}")
+            st.session_state.panel_shape[i] = shape
+            spec = SIZES[shape]
+            st.session_state.panel_sizes[i] = spec["wh"]
+            st.caption(f"{spec['wh'][0]} × {spec['wh'][1]}　消費 {spec['cost']}（セットは1枚+{REF_SITE}）")
             up = st.file_uploader("持っている画像を使う", type=["png", "jpg", "jpeg"], key=f"up_{i}")
             if up:
                 st.session_state.panel_images[i] = uploaded_to_uri(up)
             st.session_state.scenes[i] = st.text_input("生成する内容", value=st.session_state.scenes[i], key=f"sc_{i}")
-            options = ["セットなし"] + names
-            cur = st.session_state.scene_chars[i]
-            idx = options.index(cur) if cur in options else 0
+            options = ["セットなし"] + (names if is_premium() else [])
+            curc = st.session_state.scene_chars[i]
+            idx = options.index(curc) if curc in options else 0
             st.session_state.scene_chars[i] = st.selectbox("セット", options, index=idx, key=f"ch_{i}")
             c1, c2 = st.columns(2)
             with c1:
