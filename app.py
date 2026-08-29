@@ -7,6 +7,7 @@ import hashlib
 import math
 import io
 import zipfile
+import random
 import requests
 from io import BytesIO
 from datetime import datetime, timedelta
@@ -35,10 +36,11 @@ USERS_FILE = "users_data.json"
 HOME_IMG = "IMG_1106.jpeg"
 HEADER_IMG = "IMG_1107.jpeg"
 PHONE_W, PHONE_H = 1080, 1920
-MONTHLY_PRICE = 1000
-MONTHLY_POINTS = 2500
+MONTHLY_PRICE = 980
+MONTHLY_POINTS = 2000
 REF_SITE = 10
-V5_COST = 20
+V5_COST = 0
+ANIMALS = ["🐱", "🐶", "🐰", "🐻", "🦊", "🐼", "🐸", "🦉", "🐧", "🐯"]
 
 LAYOUTS = {
     "縦4": {"cols": 1, "count": 4},
@@ -179,6 +181,8 @@ def save_user_state():
         users[name]["characters"] = st.session_state.characters
         users[name]["points"] = st.session_state.points
         users[name]["premium_until"] = st.session_state.premium_until
+        users[name]["rank"] = "vip" if is_premium() else "ブロンズ"
+        users[name]["icon"] = st.session_state.get("icon", "")
         save_json(USERS_FILE, users)
 
 def is_premium():
@@ -189,6 +193,9 @@ def is_premium():
         return datetime.fromisoformat(until) > datetime.now()
     except Exception:
         return False
+
+def member_label():
+    return "VIP" if is_premium() else "ブロンズ"
 
 def nai_wh(w, h):
     w = max(64, min(1920, int(round(w / 64) * 64)))
@@ -405,6 +412,16 @@ def show_header():
     if os.path.exists(HEADER_IMG):
         st.image(HEADER_IMG, use_container_width=True)
 
+def show_ad():
+    st.markdown(
+        """
+        <div style="margin-top:24px;background:#eee;color:#111;text-align:center;padding:18px;border:1px dashed #999;">
+        広告バナー（あとから貼ります）
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
 def empty_bubble():
     return {
         "text": "", "x": 8, "y": 8, "angle": 0, "fill": "#ffffff", "color": "#111111",
@@ -450,6 +467,10 @@ if "simple_image" not in st.session_state:
     st.session_state.simple_image = None
 if "simple_busy" not in st.session_state:
     st.session_state.simple_busy = False
+if "icon" not in st.session_state:
+    st.session_state.icon = random.choice(ANIMALS)
+if "email" not in st.session_state:
+    st.session_state.email = ""
 
 qs = st.query_params
 if st.session_state.logged_in and qs.get("checkout") == "success":
@@ -458,92 +479,64 @@ if st.session_state.logged_in and qs.get("checkout") == "success":
     save_user_state()
     st.query_params.clear()
 
-if not st.session_state.logged_in:
-    if st.session_state.page == "home":
-        b64 = file_b64(HOME_IMG)
-        if b64:
-            st.markdown(
-                f"""
-                <style>
-                .stApp {{
-                    background-image: linear-gradient(rgba(255,255,255,.18), rgba(255,255,255,.18)),
-                    url("data:image/jpeg;base64,{b64}");
-                    background-size: cover; background-position: center;
-                }}
-                </style>
-                """,
-                unsafe_allow_html=True,
-            )
-        top = st.columns([6, 2])
-        with top[1]:
-            if st.button("ログイン"):
-                st.session_state.page = "login"; st.rerun()
-        st.markdown("<div style='height:58vh'></div>", unsafe_allow_html=True)
-        mid = st.columns([1, 2, 1])
-        with mid[1]:
-            if st.button("会員登録してはじめる", type="primary", use_container_width=True):
-                st.session_state.page = "register"; st.rerun()
-        st.stop()
-    show_header()
-    if st.session_state.page == "login":
-        st.subheader("ログイン")
-        u = st.text_input("ユーザー名")
-        p = st.text_input("パスワード", type="password")
-        if st.button("ログインする", type="primary"):
-            users = load_json(USERS_FILE, {})
-            if u in users and users[u]["password"] == hash_password(p):
-                st.session_state.logged_in = True
-                st.session_state.username = u
-                st.session_state.characters = users[u].get("characters", [])
-                st.session_state.points = int(users[u].get("points", 0))
-                st.session_state.premium_until = users[u].get("premium_until", "")
-                st.session_state.page = "make"
-                st.rerun()
-            else:
-                st.error("ログインできません")
-        if st.button("ホームへ"):
-            st.session_state.page = "home"; st.rerun()
-        st.stop()
-    st.subheader("会員登録")
-    u = st.text_input("ユーザー名")
-    p = st.text_input("パスワード", type="password")
-    if st.button("登録する", type="primary"):
-        users = load_json(USERS_FILE, {})
-        if not u or not p:
-            st.warning("入力してください")
-        elif u in users:
-            st.error("その名前は使われています")
-        else:
-            users[u] = {"password": hash_password(p), "characters": [], "points": 0, "premium_until": ""}
-            save_json(USERS_FILE, users)
-            st.session_state.logged_in = True
-            st.session_state.username = u
-            st.session_state.points = 0
-            st.session_state.page = "make"
+st.markdown(
+    """
+    <style>
+    section[data-testid="stSidebar"] { background: #ffffff !important; }
+    section[data-testid="stSidebar"] * { color: #111111 !important; }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+if st.session_state.page == "home":
+    b64 = file_b64(HOME_IMG)
+    if b64:
+        st.markdown(
+            f"""
+            <style>
+            .stApp {{
+                background-image: linear-gradient(rgba(255,255,255,.18), rgba(255,255,255,.18)),
+                url("data:image/jpeg;base64,{b64}");
+                background-size: cover; background-position: center;
+            }}
+            </style>
+            """,
+            unsafe_allow_html=True,
+        )
+    st.markdown("<div style='height:58vh'></div>", unsafe_allow_html=True)
+    mid = st.columns([1, 2, 1])
+    with mid[1]:
+        if st.button("生成開始", type="primary", use_container_width=True):
+            st.session_state.page = "help"
             st.rerun()
-    if st.button("ホームへ"):
-        st.session_state.page = "home"; st.rerun()
+    show_ad()
     st.stop()
 
 show_header()
 done = sum(1 for x in st.session_state.panel_images if x)
 need = LAYOUTS[st.session_state.layout]["count"]
 with st.sidebar:
-    st.write(st.session_state.get("username", ""))
+    if st.session_state.logged_in:
+        st.write(st.session_state.get("icon", "🐱"), st.session_state.get("username", ""))
+    if st.button("登録", use_container_width=True):
+        st.session_state.page = "register"; st.rerun()
     st.write(f"ポイント {st.session_state.points}")
-    st.caption("月額会員" if is_premium() else "無料")
-    if st.button("4コマ", use_container_width=True):
-        st.session_state.page = "make"; st.rerun()
-    if st.button("画像生成", use_container_width=True):
+    st.write(f"会員 {member_label() if st.session_state.logged_in else '未登録'}")
+    if st.button("画像生成モード", use_container_width=True):
         st.session_state.page = "simple"; st.rerun()
     if st.button("セット", use_container_width=True):
         st.session_state.page = "chars"; st.rerun()
-    if st.button("月額", use_container_width=True):
-        st.session_state.page = "plan"; st.rerun()
+    if st.button("4コマ", use_container_width=True):
+        st.session_state.page = "make"; st.rerun()
     if st.button("説明書", use_container_width=True):
         st.session_state.page = "help"; st.rerun()
+    if st.button("月額登録", use_container_width=True):
+        st.session_state.page = "plan"; st.rerun()
+    if st.button("お問い合わせ", use_container_width=True):
+        st.session_state.page = "contact"; st.rerun()
     st.caption(f"{done}/{need}")
-    if st.button("ログアウト"):
+    if st.session_state.logged_in and st.button("ログアウト"):
         st.session_state.logged_in = False
         st.session_state.page = "home"
         st.rerun()
@@ -555,23 +548,98 @@ if st.session_state.page == "help":
     st.markdown(
         """
         <div style="color:#111;background:#fff;padding:16px;border-radius:12px;">
-        <h3>説明書</h3>
-        <p>4コマは V4.5 Full。セットなし普通サイズは無料。セットと大サイズ・壁紙は月額。</p>
-        <p>画像生成は V5 Full。普通サイズ3種だけ。1回20ポイント。ステップは20固定。</p>
+        <h3>ーーー画像生成モードーーー</h3>
+        <p>会員登録して画像を作ろう！4コマにも反映できるよ！</p>
+        <h3>ーーーセットーーー</h3>
+        <p>絵柄の登録<br>キャラの登録<br>登録したら4コマ画像生成の時に絵柄、キャラが反映される</p>
+        <h3>ーーー4コマーーー</h3>
+        <p>セットした絵柄、キャラを使って画像生成して文字や吹き出しをつけよう！<br>1コマずつ作れるので、最後に合体させて4コマ完成！</p>
+        <h3>ーーー月額登録ーーー</h3>
+        <p>細かい設定の画像生成<br>セット機能<br>サイズの変更機能<br>ポイント付与</p>
         </div>
         """,
         unsafe_allow_html=True,
     )
+    show_ad()
+
+elif st.session_state.page == "register":
+    st.markdown("<div style='color:#111;background:#fff;padding:16px;'>", unsafe_allow_html=True)
+    st.subheader("登録")
+    name = st.text_input("ユーザーネーム")
+    mail = st.text_input("メールアドレス")
+    pw = st.text_input("パスワード", type="password")
+    icon_up = st.file_uploader("アイコン（任意）", type=["png", "jpg", "jpeg"])
+    if icon_up:
+        st.image(icon_up, width=80)
+    if st.button("登録する", type="primary"):
+        users = load_json(USERS_FILE, {})
+        if not name or not mail or not pw:
+            st.warning("全部入れてください")
+        elif name in users or any(u.get("email") == mail for u in users.values() if isinstance(u, dict)):
+            st.error("その名前かメールは使われています")
+        else:
+            icon = uploaded_to_uri(icon_up) if icon_up else random.choice(ANIMALS)
+            users[name] = {
+                "password": hash_password(pw),
+                "email": mail,
+                "icon": icon,
+                "characters": [],
+                "points": 0,
+                "premium_until": "",
+                "rank": "ブロンズ",
+            }
+            save_json(USERS_FILE, users)
+            st.session_state.logged_in = True
+            st.session_state.username = name
+            st.session_state.email = mail
+            st.session_state.icon = icon
+            st.session_state.points = 0
+            st.session_state.page = "simple"
+            st.rerun()
+    st.write("ログイン")
+    lu = st.text_input("メールまたはユーザーネーム", key="lu")
+    lp = st.text_input("パスワード", type="password", key="lp")
+    if st.button("ログインする"):
+        users = load_json(USERS_FILE, {})
+        found = None
+        if lu in users:
+            found = lu
+        else:
+            for k, v in users.items():
+                if isinstance(v, dict) and v.get("email") == lu:
+                    found = k
+                    break
+        if found and users[found]["password"] == hash_password(lp):
+            st.session_state.logged_in = True
+            st.session_state.username = found
+            st.session_state.email = users[found].get("email", "")
+            st.session_state.icon = users[found].get("icon", random.choice(ANIMALS))
+            st.session_state.characters = users[found].get("characters", [])
+            st.session_state.points = int(users[found].get("points", 0))
+            st.session_state.premium_until = users[found].get("premium_until", "")
+            st.session_state.page = "simple"
+            st.rerun()
+        else:
+            st.error("ログインできません")
+    st.markdown("</div>", unsafe_allow_html=True)
+    show_ad()
+
+elif st.session_state.page == "contact":
+    st.subheader("お問い合わせ")
+    st.write("広告や不具合は、あとから載せる連絡先へどうぞ。")
+    st.text_area("内容")
+    st.button("送信（準備中）")
+    show_ad()
 
 elif st.session_state.page == "plan":
-    st.subheader("月額")
+    st.subheader("月額登録")
     st.write(f"**{MONTHLY_PRICE}円 / 30日**")
     st.write(f"- {MONTHLY_POINTS}ポイント付与")
+    st.write("- 会員状態 VIP")
     st.write("- セット機能")
-    st.write("- 大サイズ・壁紙")
-    st.write("- 画像生成ページ（V5）")
+    st.write("- サイズの変更機能")
     if is_premium():
-        st.success(f"月額会員です。期限 {str(st.session_state.premium_until)[:10]}")
+        st.success(f"VIPです。期限 {str(st.session_state.premium_until)[:10]}")
     elif stripe is None or not STRIPE_SECRET_KEY or not STRIPE_PRICE_ID:
         st.error("決済設定がまだです。")
     elif st.button(f"{MONTHLY_PRICE}円で登録する", type="primary"):
@@ -581,16 +649,18 @@ elif st.session_state.page == "plan":
                 line_items=[{"price": STRIPE_PRICE_ID, "quantity": 1}],
                 success_url=f"{SITE_URL}/?checkout=success",
                 cancel_url=f"{SITE_URL}/?checkout=cancel",
-                client_reference_id=st.session_state.username,
+                client_reference_id=st.session_state.get("username", ""),
             )
             st.markdown(f"[決済ページへ進む]({session.url})")
         except Exception as e:
             st.error(str(e))
+    show_ad()
 
 elif st.session_state.page == "chars":
     st.subheader("セット")
     if not is_premium():
-        st.warning("セットは月額会員だけです。")
+        st.warning("セットはVIPだけです。")
+        show_ad()
         st.stop()
     save_name = st.text_input("保存名", placeholder="任意")
     use_type = st.radio("種類", ["キャラだけ", "絵柄だけ", "キャラ＋絵柄"], horizontal=True)
@@ -628,10 +698,10 @@ elif st.session_state.page == "chars":
                 st.session_state.characters.pop(i)
                 save_user_state()
                 st.rerun()
+    show_ad()
 
 elif st.session_state.page == "simple":
-    st.subheader("画像生成（V5 Full）")
-    st.caption(f"1回 {V5_COST}ポイント　ステップは20固定　セットなし")
+    st.subheader("画像生成モード")
     quality = st.text_area("画質プロンプト")
     background = st.text_area("背景プロンプト")
     character = st.text_area("キャラクタープロンプト")
@@ -646,8 +716,6 @@ elif st.session_state.page == "simple":
         parts = [x.strip() for x in [quality, background, character, other] if x.strip()]
         if not parts:
             st.session_state.error = "プロンプトを入れてください"
-        elif st.session_state.points < V5_COST:
-            st.session_state.error = f"ポイントが足りません。必要 {V5_COST}"
         else:
             try:
                 w, h = SIMPLE_SIZES[size_name]
@@ -656,8 +724,9 @@ elif st.session_state.page == "simple":
                     st.session_state.simple_image = nai_request(
                         prompt, w, h, "nai-diffusion-5-full", steps=20, scale=scale
                     )
-                st.session_state.points -= V5_COST
-                save_user_state()
+                if V5_COST > 0:
+                    st.session_state.points -= V5_COST
+                    save_user_state()
                 st.session_state.error = ""
             except Exception as e:
                 st.session_state.error = str(e)
@@ -666,6 +735,7 @@ elif st.session_state.page == "simple":
         st.image(st.session_state.simple_image, use_container_width=True)
         raw = uri_to_image(st.session_state.simple_image)
         st.download_button("PNG保存", data=image_to_bytes(raw), file_name="simple.png", mime="image/png")
+    show_ad()
 
 else:
     st.subheader("4コマ")
@@ -688,10 +758,10 @@ else:
         shape = st.session_state.panel_shape[i]
         spec = SIZES.get(shape, SIZES["横長"])
         if spec["paid"] and not is_premium():
-            raise Exception("このサイズは月額会員だけです")
+            raise Exception("このサイズはVIPだけです")
         chosen = st.session_state.scene_chars[i]
         if chosen != "セットなし" and not is_premium():
-            raise Exception("セットは月額会員だけです")
+            raise Exception("セットはVIPだけです")
         pack = {} if chosen == "セットなし" else (set_by_name(chosen) or {})
         chars = normalize_refs(pack.get("chars"))
         styles = normalize_refs(pack.get("styles"))
@@ -802,3 +872,4 @@ else:
     if st.session_state.combined is not None:
         st.image(st.session_state.combined, use_container_width=True)
         st.download_button("PNG保存", data=image_to_bytes(st.session_state.combined), file_name="yonkoma.png", mime="image/png")
+    show_ad()
