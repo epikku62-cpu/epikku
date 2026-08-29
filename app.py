@@ -35,7 +35,6 @@ DATA_FILE = "studio_data.json"
 USERS_FILE = "users_data.json"
 HOME_IMG = "IMG_1106.jpeg"
 HEADER_IMG = "IMG_1107.jpeg"
-LOAD_GIF = "loading.gif"
 PHONE_W, PHONE_H = 1080, 1920
 MONTHLY_PRICE = 980
 MONTHLY_POINTS = 2000
@@ -220,11 +219,6 @@ def save_user_state():
         users[name]["history"] = st.session_state.get("simple_history", [])[-30:]
         save_json(USERS_FILE, users)
         save_json(DATA_FILE, {"characters": st.session_state.characters})
-
-def show_loading():
-    if os.path.exists(LOAD_GIF):
-        st.image(LOAD_GIF, width=180)
-    st.write("生成中...")
 
 def nai_wh(w, h):
     w = max(64, min(1920, int(round(w / 64) * 64)))
@@ -761,7 +755,6 @@ elif st.session_state.page == "simple":
             st.session_state.error = f"ポイントが足りません。必要 {cost}"
         else:
             try:
-                show_loading()
                 w, h = spec["gen"]
                 img = nai_request(", ".join(parts), w, h, "nai-diffusion-5-full", steps=20, scale=scale, negative=st.session_state.sn.strip(), char_texts=chars)
                 st.session_state.simple_image = img
@@ -878,7 +871,6 @@ else:
         i = int(st.session_state.busy_index)
         st.session_state.busy_index = None
         try:
-            show_loading()
             make_one(i)
             st.session_state.error = ""
         except Exception as e:
