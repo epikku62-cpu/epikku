@@ -9,11 +9,23 @@ import io
 import zipfile
 import requests
 from io import BytesIO
+from datetime import datetime, timedelta
 from PIL import Image, ImageDraw, ImageFont
+
+try:
+    import stripe
+except ImportError:
+    stripe = None
 
 st.set_page_config(page_title="panel AI.", page_icon="🎨", layout="wide")
 
 NAI_KEY = os.environ.get("NOVELAI_API_KEY", "")
+STRIPE_SECRET_KEY = os.environ.get("STRIPE_SECRET_KEY", "")
+STRIPE_PRICE_ID = os.environ.get("STRIPE_PRICE_ID", "")
+SITE_URL = os.environ.get("SITE_URL", "https://aistation.onrender.com")
+if stripe is not None and STRIPE_SECRET_KEY:
+    stripe.api_key = STRIPE_SECRET_KEY
+
 NAI_URLS = [
     "https://image.novelai.net/ai/generate-image",
     "https://api.novelai.net/ai/generate-image",
@@ -22,6 +34,11 @@ DATA_FILE = "studio_data.json"
 USERS_FILE = "users_data.json"
 HOME_IMG = "IMG_1106.jpeg"
 HEADER_IMG = "IMG_1107.jpeg"
+PHONE_W, PHONE_H = 1080, 1920
+MONTHLY_PRICE = 980
+MONTHLY_POINTS = 500
+COST_TEXT = 2
+COST_REF = 8
 
 LAYOUTS = {
     "縦4": {"cols": 1, "count": 4},
@@ -33,9 +50,9 @@ LAYOUTS = {
     "2×2": {"cols": 2, "count": 4},
 }
 SIZES = {
-    "横長": (1216, 832),
-    "縦長": (832, 1216),
-    "正方形": (1024, 1024),
+    "横長": (PHONE_W, PHONE_H // 4),
+    "縦長": (PHONE_H // 4, PHONE_W),
+    "正方形": (512, 512),
 }
 BUBBLE_TYPES = ["ふきだし", "叫び", "考え", "文字だけ"]
 TAILS = ["下", "下左", "下右", "左", "右"]
@@ -145,21 +162,39 @@ def pad_ref(uri):
     canvas.save(buf, format="PNG")
     return base64.b64encode(buf.getvalue()).decode()
 
+def save_user_state():
+    users = load_json(USERS_FILE, {})
+    name = st.session_state.get("username")
+    if name in users:
+        users[name]["characters"] = st.session_state.characters
+        users[name]["points"] = st.session_state.points
+        users[name]["premium_until"] = st.session_state.premium_until
+        save_json(USERS_FILE, users)
+
+def is_premium():
+    until = st.session_state.get("premium_until") or ""
+    if not until:
+        return False
+    try:
+        return datetime.fromisoformat(until) > datetime.now()
+    except Exception:
+        return False
+
 def nai_generate(prompt, width, height, char_refs=None, style_refs=None):
     if not NAI_KEY:
         raise Exception("NOVELAI_API_KEY がありません")
     if width >= height:
-        width, height = 1216, 832
+        gw, gh = 1216, 832
     elif height > width * 1.2:
-        width, height = 832, 1216
+        gw, gh = 832, 1216
     else:
-        width, height = 1024, 1024
+        gw, gh = 1024, 1024
     char_refs = [x for x in (char_refs or []) if x.get("uri")][:1]
     style_refs = [x for x in (style_refs or []) if x.get("uri")][:1]
     parameters = {
         "params_version": 3,
-        "width": width,
-        "height": height,
+        "width": gw,
+        "height": gh,
         "scale": 5.0,
         "sampler": "k_euler_ancestral",
         "steps": 23,
@@ -179,14 +214,11 @@ def nai_generate(prompt, width, height, char_refs=None, style_refs=None):
     }
     refs, kinds = [], []
     if char_refs and style_refs:
-        refs.append(pad_ref(char_refs[0]["uri"]))
-        kinds.append("character&style")
+        refs.append(pad_ref(char_refs[0]["uri"])); kinds.append("character&style")
     elif char_refs:
-        refs.append(pad_ref(char_refs[0]["uri"]))
-        kinds.append("character")
+        refs.append(pad_ref(char_refs[0]["uri"])); kinds.append("character")
     elif style_refs:
-        refs.append(pad_ref(style_refs[0]["uri"]))
-        kinds.append("style")
+        refs.append(pad_ref(style_refs[0]["uri"])); kinds.append("style")
     if refs:
         parameters["director_reference_images"] = refs
         parameters["director_reference_descriptions"] = [
@@ -195,12 +227,7 @@ def nai_generate(prompt, width, height, char_refs=None, style_refs=None):
         parameters["director_reference_information_extracted"] = [1]
         parameters["director_reference_strength_values"] = [1]
         parameters["director_reference_secondary_strength_values"] = [0.75]
-    payload = {
-        "input": prompt,
-        "model": "nai-diffusion-4-5-full",
-        "action": "generate",
-        "parameters": parameters,
-    }
+    payload = {"input": prompt, "model": "nai-diffusion-4-5-full", "action": "generate", "parameters": parameters}
     last_err = None
     for url in NAI_URLS:
         res = requests.post(
@@ -252,6 +279,7 @@ def draw_one_bubble(img, bub):
     img = img.convert("RGBA")
     size = int(bub.get("size", 28))
     bold = int(bub.get("bold", 0))
+    tail_size = int(bub.get("tail_size", 28))
     font = load_font(size, bub.get("font", "ゴシック"))
     w, h = img.size
     kind = bub.get("kind", "ふきだし")
@@ -263,33 +291,33 @@ def draw_one_bubble(img, bub):
     max_w = int(w * 0.62)
     if direction == "縦書き":
         lines = list(text.replace("\n", ""))
-        line_h = int(size * 1.15)
         box_w = size + pad * 2 + bold * 2
-        box_h = pad * 2 + line_h * len(lines) + bold * 2
+        box_h = pad * 2 + int(size * 1.15) * len(lines) + bold * 2
     else:
         lines = wrap_text(text, font, max_w)
-        line_h = int(size * 1.3)
         try:
             text_w = max(font.getlength(x) for x in lines)
         except Exception:
             text_w = max(len(x) * size for x in lines)
         box_w = int(text_w + pad * 2 + bold * 2)
-        box_h = int(pad * 2 + line_h * len(lines) + bold * 2)
-    layer = Image.new("RGBA", (box_w + 80, box_h + 80), (0, 0, 0, 0))
+        box_h = int(pad * 2 + int(size * 1.3) * len(lines) + bold * 2)
+    extra = tail_size + 40
+    layer = Image.new("RGBA", (box_w + extra * 2, box_h + extra * 2), (0, 0, 0, 0))
     draw = ImageDraw.Draw(layer)
-    x0, y0 = 40, 28
+    x0, y0 = extra, extra
     if kind == "ふきだし":
         draw.rounded_rectangle([x0, y0, x0 + box_w, y0 + box_h], radius=22, fill=fill, outline="#222222", width=3)
+        ts = tail_size
         if tail == "下":
-            draw.polygon([(x0 + box_w * 0.38, y0 + box_h - 2), (x0 + box_w * 0.52, y0 + box_h - 2), (x0 + box_w * 0.34, y0 + box_h + 28)], fill=fill)
+            draw.polygon([(x0 + box_w * 0.38, y0 + box_h - 2), (x0 + box_w * 0.52, y0 + box_h - 2), (x0 + box_w * 0.34, y0 + box_h + ts)], fill=fill)
         elif tail == "下左":
-            draw.polygon([(x0 + 18, y0 + box_h - 2), (x0 + 48, y0 + box_h - 2), (x0 + 8, y0 + box_h + 28)], fill=fill)
+            draw.polygon([(x0 + 18, y0 + box_h - 2), (x0 + 18 + ts * 0.7, y0 + box_h - 2), (x0 + 8, y0 + box_h + ts)], fill=fill)
         elif tail == "下右":
-            draw.polygon([(x0 + box_w - 48, y0 + box_h - 2), (x0 + box_w - 18, y0 + box_h - 2), (x0 + box_w - 8, y0 + box_h + 28)], fill=fill)
+            draw.polygon([(x0 + box_w - 18 - ts * 0.7, y0 + box_h - 2), (x0 + box_w - 18, y0 + box_h - 2), (x0 + box_w - 8, y0 + box_h + ts)], fill=fill)
         elif tail == "左":
-            draw.polygon([(x0 + 2, y0 + box_h * 0.45), (x0 + 2, y0 + box_h * 0.62), (x0 - 26, y0 + box_h * 0.58)], fill=fill)
+            draw.polygon([(x0 + 2, y0 + box_h * 0.45), (x0 + 2, y0 + box_h * 0.62), (x0 - ts, y0 + box_h * 0.58)], fill=fill)
         else:
-            draw.polygon([(x0 + box_w - 2, y0 + box_h * 0.45), (x0 + box_w - 2, y0 + box_h * 0.62), (x0 + box_w + 26, y0 + box_h * 0.58)], fill=fill)
+            draw.polygon([(x0 + box_w - 2, y0 + box_h * 0.45), (x0 + box_w - 2, y0 + box_h * 0.62), (x0 + box_w + ts, y0 + box_h * 0.58)], fill=fill)
     elif kind == "叫び":
         pts = []
         for i in range(28):
@@ -300,7 +328,7 @@ def draw_one_bubble(img, bub):
         draw.polygon(pts, fill=fill, outline="#222222")
     elif kind == "考え":
         draw.rounded_rectangle([x0, y0, x0 + box_w, y0 + box_h], radius=28, fill=fill, outline="#222222", width=3)
-        draw.ellipse([x0 + 16, y0 + box_h + 6, x0 + 34, y0 + box_h + 24], fill=fill, outline="#222222")
+        draw.ellipse([x0 + 16, y0 + box_h + 6, x0 + 16 + tail_size * 0.5, y0 + box_h + 6 + tail_size * 0.5], fill=fill, outline="#222222")
     if direction == "縦書き":
         cy = y0 + pad
         for ch in lines:
@@ -368,7 +396,7 @@ def show_header():
 def empty_bubble():
     return {
         "text": "", "x": 8, "y": 8, "angle": 0, "fill": "#ffffff", "color": "#111111",
-        "size": 28, "bold": 0, "kind": "ふきだし", "font": "ゴシック", "dir": "横書き", "tail": "下",
+        "size": 28, "bold": 0, "tail_size": 28, "kind": "ふきだし", "font": "ゴシック", "dir": "横書き", "tail": "下",
     }
 
 font_ready = prepare_fonts()
@@ -385,7 +413,7 @@ if "layout" not in st.session_state:
 if "scenes" not in st.session_state:
     st.session_state.scenes = ["", "", "", ""]
 if "scene_chars" not in st.session_state:
-    st.session_state.scene_chars = ["セットなし", "セットなし", "セットなし", "セットなし"]
+    st.session_state.scene_chars = ["セットなし"] * 4
 if "panel_images" not in st.session_state:
     st.session_state.panel_images = [None, None, None, None]
 if "panel_sizes" not in st.session_state:
@@ -400,6 +428,17 @@ if "busy_index" not in st.session_state:
     st.session_state.busy_index = None
 if "combined" not in st.session_state:
     st.session_state.combined = None
+if "points" not in st.session_state:
+    st.session_state.points = 0
+if "premium_until" not in st.session_state:
+    st.session_state.premium_until = ""
+
+qs = st.query_params
+if st.session_state.logged_in and qs.get("checkout") == "success":
+    st.session_state.premium_until = (datetime.now() + timedelta(days=30)).isoformat()
+    st.session_state.points = int(st.session_state.points) + MONTHLY_POINTS
+    save_user_state()
+    st.query_params.clear()
 
 if not st.session_state.logged_in:
     if st.session_state.page == "home":
@@ -427,7 +466,6 @@ if not st.session_state.logged_in:
             if st.button("会員登録してはじめる", type="primary", use_container_width=True):
                 st.session_state.page = "register"; st.rerun()
         st.stop()
-
     show_header()
     if st.session_state.page == "login":
         st.subheader("ログイン")
@@ -438,7 +476,9 @@ if not st.session_state.logged_in:
             if u in users and users[u]["password"] == hash_password(p):
                 st.session_state.logged_in = True
                 st.session_state.username = u
-                st.session_state.characters = users[u].get("characters", st.session_state.characters)
+                st.session_state.characters = users[u].get("characters", [])
+                st.session_state.points = int(users[u].get("points", 0))
+                st.session_state.premium_until = users[u].get("premium_until", "")
                 st.session_state.page = "make"
                 st.rerun()
             else:
@@ -456,10 +496,11 @@ if not st.session_state.logged_in:
         elif u in users:
             st.error("その名前は使われています")
         else:
-            users[u] = {"password": hash_password(p), "characters": []}
+            users[u] = {"password": hash_password(p), "characters": [], "points": 0, "premium_until": ""}
             save_json(USERS_FILE, users)
             st.session_state.logged_in = True
             st.session_state.username = u
+            st.session_state.points = 0
             st.session_state.page = "make"
             st.rerun()
     if st.button("ホームへ"):
@@ -471,10 +512,15 @@ done = sum(1 for x in st.session_state.panel_images if x)
 need = LAYOUTS[st.session_state.layout]["count"]
 with st.sidebar:
     st.write(st.session_state.get("username", ""))
-    if st.button("セット", use_container_width=True):
-        st.session_state.page = "chars"; st.rerun()
+    st.write(f"ポイント {st.session_state.points}")
     if st.button("4コマ", use_container_width=True):
         st.session_state.page = "make"; st.rerun()
+    if st.button("セット", use_container_width=True):
+        st.session_state.page = "chars"; st.rerun()
+    if st.button("月額", use_container_width=True):
+        st.session_state.page = "plan"; st.rerun()
+    if st.button("説明書", use_container_width=True):
+        st.session_state.page = "help"; st.rerun()
     st.caption(f"{done}/{need}")
     if st.button("ログアウト"):
         st.session_state.logged_in = False
@@ -484,7 +530,45 @@ with st.sidebar:
 if st.session_state.error:
     st.error(st.session_state.error)
 
-if st.session_state.page == "chars":
+if st.session_state.page == "help":
+    st.markdown(
+        """
+        <div style="color:#111;background:#fff;padding:16px;border-radius:12px;">
+        <h3>説明書</h3>
+        <p>1. セットでキャラや絵柄を保存できます。使わないときは「セットなし」。</p>
+        <p>2. 4コマで各コマの内容を書いて生成します。書いた文だけが送られます。</p>
+        <p>3. できた絵に吹き出しを足して、最後に1枚にまとめます。</p>
+        <p>4. 横長は 1080×480、縦長は 480×1080、正方形は 512×512 です。</p>
+        <p>5. 生成はポイントを使います。文章だけ2、セットあり8。</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+elif st.session_state.page == "plan":
+    st.subheader("月額")
+    st.write(f"**{MONTHLY_PRICE}円 / 30日**")
+    st.write(f"- 登録時 {MONTHLY_POINTS}ポイント")
+    st.write(f"- 文章生成 {COST_TEXT}ポイント")
+    st.write(f"- セット参照 {COST_REF}ポイント")
+    if is_premium():
+        st.success(f"月額会員です。期限 {str(st.session_state.premium_until)[:10]}")
+    elif stripe is None or not STRIPE_SECRET_KEY or not STRIPE_PRICE_ID:
+        st.error("決済設定がまだです。")
+    elif st.button(f"{MONTHLY_PRICE}円で登録する", type="primary"):
+        try:
+            session = stripe.checkout.Session.create(
+                mode="subscription",
+                line_items=[{"price": STRIPE_PRICE_ID, "quantity": 1}],
+                success_url=f"{SITE_URL}/?checkout=success",
+                cancel_url=f"{SITE_URL}/?checkout=cancel",
+                client_reference_id=st.session_state.username,
+            )
+            st.markdown(f"[決済ページへ進む]({session.url})")
+        except Exception as e:
+            st.error(str(e))
+
+elif st.session_state.page == "chars":
     st.subheader("セット")
     save_name = st.text_input("保存名", placeholder="任意")
     use_type = st.radio("種類", ["キャラだけ", "絵柄だけ", "キャラ＋絵柄"], horizontal=True)
@@ -511,10 +595,7 @@ if st.session_state.page == "chars":
                 "kind": use_type, "chars": chars, "styles": styles,
             })
             save_json(DATA_FILE, {"characters": st.session_state.characters})
-            users = load_json(USERS_FILE, {})
-            if st.session_state.get("username") in users:
-                users[st.session_state.username]["characters"] = st.session_state.characters
-                save_json(USERS_FILE, users)
+            save_user_state()
             st.success("保存しました")
             st.rerun()
     for i, ch in enumerate(st.session_state.characters):
@@ -524,7 +605,7 @@ if st.session_state.page == "chars":
         with c2:
             if st.button("削除", key=f"delc_{i}"):
                 st.session_state.characters.pop(i)
-                save_json(DATA_FILE, {"characters": st.session_state.characters})
+                save_user_state()
                 st.rerun()
 
 else:
@@ -549,7 +630,12 @@ else:
         pack = {} if chosen == "セットなし" else (set_by_name(chosen) or {})
         chars = normalize_refs(pack.get("chars"))
         styles = normalize_refs(pack.get("styles"))
+        cost = COST_REF if (chars or styles) else COST_TEXT
+        if st.session_state.points < cost:
+            raise Exception(f"ポイントが足りません。必要 {cost}")
         st.session_state.panel_images[i] = nai_generate(scene, w, h, chars, styles)
+        st.session_state.points -= cost
+        save_user_state()
 
     for i in range(n):
         with st.expander(f"コマ {i+1}", expanded=True):
@@ -592,8 +678,9 @@ else:
                     draft["font"] = st.selectbox("フォント", usable_fonts, key=f"bfn_{i}")
                     draft["dir"] = st.selectbox("向き", TEXT_DIR, key=f"bd_{i}")
                 with d2:
-                    draft["size"] = st.slider("大きさ", 16, 64, int(draft.get("size", 28)), key=f"bs_{i}")
+                    draft["size"] = st.slider("文字の大きさ", 16, 64, int(draft.get("size", 28)), key=f"bs_{i}")
                     draft["bold"] = st.slider("太さ", 0, 4, int(draft.get("bold", 0)), key=f"bb_{i}")
+                    draft["tail_size"] = st.slider("しっぽの大きさ", 8, 80, int(draft.get("tail_size", 28)), key=f"bts_{i}")
                     draft["x"] = st.slider("左右", 0, 80, int(draft.get("x", 8)), key=f"bx_{i}")
                     draft["y"] = st.slider("上下", 0, 80, int(draft.get("y", 8)), key=f"by_{i}")
                     draft["angle"] = st.slider("傾き", -45, 45, int(draft.get("angle", 0)), key=f"ba_{i}")
