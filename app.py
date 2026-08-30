@@ -203,6 +203,13 @@ def uri_to_image(uri):
     res = requests.get(uri, timeout=90); res.raise_for_status()
     return Image.open(BytesIO(res.content)).convert("RGB")
 
+def shrink_for_video(image_uri):
+    img = uri_to_image(image_uri)
+    img.thumbnail((768, 768))
+    buf = BytesIO()
+    img.convert("RGB").save(buf, format="JPEG", quality=80)
+    return "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode()
+
 def pad_ref(uri):
     img = uri_to_image(uri).convert("RGB")
     tw, th = 1024, 1536
@@ -294,6 +301,7 @@ def nai_request(prompt, width, height, model, steps=23, scale=5.0, negative="", 
 def grok_start_video(image_uri, prompt, duration=6):
     if not XAI_KEY:
         raise Exception("XAI_API_KEY がありません")
+    image_uri = shrink_for_video(image_uri)
     headers = {"Authorization": f"Bearer {XAI_KEY}", "Content-Type": "application/json"}
     payload = {"model": "grok-imagine-video-1.5", "prompt": prompt or "subtle natural motion, keep the same character and style", "image": {"url": image_uri}, "duration": int(duration), "resolution": "720p"}
     res = requests.post("https://api.x.ai/v1/videos/generations", headers=headers, json=payload, timeout=30)
@@ -546,7 +554,8 @@ defaults = {
     "hist_pick": None, "sq": "", "sb": "", "so": "", "sn": "", "schars": [""],
     "icon": random.choice(ANIMALS), "email": "", "pending": None, "library": [],
     "video_src": None, "video_out": None, "v4_clips": [None] * 4, "v4_prompts": ["", "", "", ""],
-    "v4_durs": [5, 5, 5, 5], "v4_count": 4, "v4_layout": "2×2", "v4_play": "同時に動く", "v4_joined": None, "vjob": None,
+    "v4_durs": [5, 5, 5, 5], "v4_count": 4, "v4_layout": "2×2", "v4_play": "同時に動く",
+    "v4_joined": None, "vjob": None, "v4_joining": False,
 }
 for k, v in defaults.items():
     if k not in st.session_state:
@@ -590,9 +599,24 @@ if st.session_state.page == "home":
     panel AIは<br>4コマ画像・4コマ動画<br>画像生成・動画生成<br>作成AIサイト ♡
     </div>
     """, unsafe_allow_html=True)
+    st.markdown("""
+    <style>
+    div[data-testid="stButton"] > button {
+      background: linear-gradient(180deg,#ff9ec8,#ff4d88) !important;
+      color: #fff !important;
+      border: 4px solid #fff !important;
+      border-radius: 999px !important;
+      font-size: 34px !important;
+      font-weight: 900 !important;
+      letter-spacing: .08em !important;
+      padding: 18px 0 !important;
+      box-shadow: 0 10px 18px rgba(255,90,150,.35) !important;
+    }
+    </style>
+    """, unsafe_allow_html=True)
     mid = st.columns([1, 2, 1])
     with mid[1]:
-        if st.button("生成開始", type="primary", use_container_width=True):
+        if st.button("panel", use_container_width=True):
             st.session_state.page = "help"; st.rerun()
     show_ad(); st.stop()
 
@@ -656,14 +680,14 @@ elif st.session_state.page == "video":
         st.success("管理者のため、動画はポイントなしです")
     job = st.session_state.get("vjob")
     if job and job.get("kind") == "video":
-        st.info("生成中... 画面はそのままで待ってください")
-        state, val = grok_poll_video(job["id"])
-        if state == "done":
-            st.session_state.video_out = val; st.session_state.vjob = None; st.rerun()
-        elif state == "error":
-            st.session_state.error = val; st.session_state.vjob = None; st.rerun()
-        else:
-            time.sleep(2); st.rerun()
+        st.info("生成中... 20秒くらい待ってから確認してください")
+        if st.button("確認する"):
+            state, val = grok_poll_video(job["id"])
+            if state == "done":
+                st.session_state.video_out = val; st.session_state.vjob = None
+            elif state == "error":
+                st.session_state.error = val; st.session_state.vjob = None
+            st.rerun()
     up = st.file_uploader("画像をアップロード", type=["png", "jpg", "jpeg"])
     if up:
         st.session_state.video_src = uploaded_to_uri(up)
@@ -700,16 +724,31 @@ elif st.session_state.page == "v4":
     st.caption("管理者はポイントなし。ほかの人は1コマごとにポイント消費。まとめは無料")
     if is_owner():
         st.success("管理者のため、動画はポイントなしです")
+    if st.session_state.get("v4_joining"):
+        st.info("まとめて生成中...")
+        n = int(st.session_state.v4_count)
+        ready = [st.session_state.v4_clips[i] for i in range(n) if st.session_state.v4_clips[i] and os.path.exists(st.session_state.v4_clips[i])]
+        try:
+            out = os.path.join(VID_DIR, f"join_{uuid.uuid4().hex}.mp4")
+            if st.session_state.v4_play == "順番に動く":
+                st.session_state.v4_joined = concat_videos(ready, out)
+            else:
+                st.session_state.v4_joined = compose_yonkoma_video(ready, st.session_state.v4_layout, out)
+            st.session_state.error = ""
+        except Exception as e:
+            st.session_state.error = str(e)
+        st.session_state.v4_joining = False
+        st.rerun()
     job = st.session_state.get("vjob")
     if job and job.get("kind") == "v4":
-        st.info(f"コマ{job['i']+1} 生成中... 画面はそのままで待ってください")
-        state, val = grok_poll_video(job["id"])
-        if state == "done":
-            st.session_state.v4_clips[job["i"]] = val; st.session_state.vjob = None; st.rerun()
-        elif state == "error":
-            st.session_state.error = val; st.session_state.vjob = None; st.rerun()
-        else:
-            time.sleep(2); st.rerun()
+        st.info(f"コマ{job['i']+1} 生成中... 20秒くらい待ってから確認してください")
+        if st.button("確認する"):
+            state, val = grok_poll_video(job["id"])
+            if state == "done":
+                st.session_state.v4_clips[job["i"]] = val; st.session_state.vjob = None
+            elif state == "error":
+                st.session_state.error = val; st.session_state.vjob = None
+            st.rerun()
     st.session_state.v4_count = st.radio("コマ数", [2, 3, 4], index=[2, 3, 4].index(int(st.session_state.v4_count)), horizontal=True)
     n = int(st.session_state.v4_count)
     layout_opts = {2: ["縦2", "横2"], 3: ["縦3", "横3"], 4: ["縦4", "横4", "2×2"]}[n]
@@ -753,15 +792,8 @@ elif st.session_state.page == "v4":
         if len(ready) < n:
             st.session_state.error = f"{n}本そろえてください。今は {len(ready)} 本です"
         else:
-            try:
-                out = os.path.join(VID_DIR, f"join_{uuid.uuid4().hex}.mp4")
-                if st.session_state.v4_play == "順番に動く":
-                    st.session_state.v4_joined = concat_videos(ready, out)
-                else:
-                    st.session_state.v4_joined = compose_yonkoma_video(ready, st.session_state.v4_layout, out)
-                st.session_state.error = ""
-            except Exception as e:
-                st.session_state.error = str(e)
+            st.session_state.v4_joining = True
+            st.session_state.error = ""
         st.rerun()
     if st.session_state.v4_joined and os.path.exists(st.session_state.v4_joined):
         st.video(st.session_state.v4_joined)
