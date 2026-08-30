@@ -48,6 +48,7 @@ HEADER_IMG = "IMG_1107.jpeg"
 VID_DIR = "video_tmp"
 PHONE_W, PHONE_H = 1080, 1920
 MONTHLY_PRICE, MONTHLY_POINTS, REF_SITE, SIGNUP_POINTS = 980, 2000, 10, 20
+VIDEO_PT_PER_SEC = 30
 POINT_PACKS = [{"points": 300, "yen": 300}, {"points": 900, "yen": 900}, {"points": 1500, "yen": 1500}, {"points": 3000, "yen": 3000}]
 ANIMALS = ["🐱", "🐶", "🐰", "🐻", "🦊", "🐼", "🐸", "🦉", "🐧", "🐯"]
 LAYOUTS = {"縦4": {"cols": 1, "count": 4}, "縦3": {"cols": 1, "count": 3}, "縦2": {"cols": 1, "count": 2}, "横4": {"cols": 4, "count": 4}, "横3": {"cols": 3, "count": 3}, "横2": {"cols": 2, "count": 2}, "2×2": {"cols": 2, "count": 4}}
@@ -81,6 +82,9 @@ FONT_SPECS = {
     "手書き風": {"file": "font_te.ttf", "urls": ["https://cdn.jsdelivr.net/gh/google/fonts@main/ofl/yuseimagic/YuseiMagic-Regular.ttf"]},
 }
 os.makedirs(VID_DIR, exist_ok=True)
+
+def video_cost(sec):
+    return max(1, int(sec)) * VIDEO_PT_PER_SEC
 
 def file_b64(path):
     if not os.path.exists(path):
@@ -512,6 +516,12 @@ def apply_login(name, data):
     st.session_state.simple_history = data.get("history", [])
     st.session_state.library = data.get("library", [])
 
+def take_video_points(cost):
+    if st.session_state.points < cost:
+        raise Exception(f"ポイントが足りません。必要 {cost}")
+    st.session_state.points -= cost
+    save_user_state()
+
 prepare_fonts()
 usable_fonts = [k for k, ok in prepare_fonts().items() if ok] or ["ゴシック"]
 defaults = {
@@ -560,8 +570,14 @@ if st.session_state.page == "home":
     b64 = file_b64(HOME_IMG)
     if b64:
         st.markdown(f'<style>.stApp{{background-image:linear-gradient(rgba(255,255,255,.18),rgba(255,255,255,.18)),url("data:image/jpeg;base64,{b64}");background-size:cover;background-position:center;}}</style>', unsafe_allow_html=True)
-    st.markdown("<div style='height:46vh'></div>", unsafe_allow_html=True)
-    st.markdown("<div style='text-align:center;color:#111;font-size:22px;font-weight:700;background:rgba(255,255,255,.72);padding:10px 12px;border-radius:12px;'>panel AIは漫画、画像生成、作成サイト</div>", unsafe_allow_html=True)
+    st.markdown("<div style='height:42vh'></div>", unsafe_allow_html=True)
+    st.markdown("""
+    <div style="text-align:center;color:#ff4d88;font-size:20px;font-weight:800;line-height:1.7;
+    background:rgba(255,255,255,.82);padding:16px 14px;border-radius:22px;border:3px solid #ffb6d5;
+    box-shadow:0 8px 18px rgba(255,120,170,.25);">
+    panel AIは<br>4コマ画像・4コマ動画<br>画像生成・動画生成<br>作成AIサイト ♡
+    </div>
+    """, unsafe_allow_html=True)
     mid = st.columns([1, 2, 1])
     with mid[1]:
         if st.button("生成開始", type="primary", use_container_width=True):
@@ -602,7 +618,7 @@ if st.session_state.page == "help":
     <h2>画像生成モード</h2><p>ポイントを消費して画像生成<br>日本語で作成可能<br>おすすめ</p>
     <h2>セット</h2><p>絵柄の登録<br>キャラの登録<br>登録したら4コマ画像生成の時、絵柄、キャラが反映される</p>
     <h2>4コマ</h2><p>セット絵柄、キャラを使えて画像生成して、会話、吹き出しをつけれるよ！<br>最後に合体させて4コマ完成！</p>
-    <h2>動画</h2><p>保存庫の画像かアップロードした画像を動画にできます。2〜4コマを同時再生か順番再生でまとめられます。</p>
+    <h2>動画生成モード</h2><p>ポイントで動画生成<br>秒数が長いほどポイントが増える<br>4コマ動画も1コマずつポイント消費</p>
     <h2>月額登録</h2><p>セット機能開放<br>サイズの変更開放<br>ポイント付与</p></div>""", unsafe_allow_html=True)
     show_ad()
 
@@ -624,7 +640,6 @@ elif st.session_state.page == "lib":
 
 elif st.session_state.page == "video":
     st.subheader("動画生成")
-    st.caption("テスト中のためポイント消費なし")
     job = st.session_state.get("vjob")
     if job and job.get("kind") == "video":
         st.info("生成中... 画面はそのままで待ってください")
@@ -647,13 +662,16 @@ elif st.session_state.page == "video":
         st.image(st.session_state.video_src, width=240)
     motion = st.text_area("動きの内容", placeholder="ゆっくり瞬きする")
     dur = st.slider("秒数", 3, 10, 6)
+    st.caption(f"消費ポイント {video_cost(dur)}　（1秒 {VIDEO_PT_PER_SEC}ポイント）")
     if st.button("動画にする", type="primary"):
         if not st.session_state.video_src:
             st.session_state.error = "画像を選んでください"
         else:
             try:
+                cost = video_cost(dur)
+                take_video_points(cost)
                 jid = grok_start_video(st.session_state.video_src, motion, dur)
-                st.session_state.vjob = {"kind": "video", "id": jid}
+                st.session_state.vjob = {"kind": "video", "id": jid, "cost": cost}
                 st.session_state.error = ""
             except Exception as e:
                 st.session_state.error = str(e)
@@ -666,7 +684,7 @@ elif st.session_state.page == "video":
 
 elif st.session_state.page == "v4":
     st.subheader("4コマ動画")
-    st.caption("アップロードした画像から動画を作り、縦・横・2×2でまとめます")
+    st.caption("1コマごとにポイント消費。まとめは無料です")
     job = st.session_state.get("vjob")
     if job and job.get("kind") == "v4":
         st.info(f"コマ{job['i']+1} 生成中... 画面はそのままで待ってください")
@@ -699,13 +717,16 @@ elif st.session_state.page == "v4":
                 st.image(src, width=180)
             st.session_state.v4_prompts[i] = st.text_input("動き", value=st.session_state.v4_prompts[i], key=f"v4p_{i}")
             st.session_state.v4_durs[i] = st.slider("秒数", 3, 10, int(st.session_state.v4_durs[i]), key=f"v4d_{i}")
+            st.caption(f"消費 {video_cost(st.session_state.v4_durs[i])}ポイント")
             if st.button("このコマを動画にする", key=f"v4g_{i}"):
                 if not src:
                     st.session_state.error = "画像がありません"
                 else:
                     try:
+                        cost = video_cost(st.session_state.v4_durs[i])
+                        take_video_points(cost)
                         jid = grok_start_video(src, st.session_state.v4_prompts[i], st.session_state.v4_durs[i])
-                        st.session_state.vjob = {"kind": "v4", "i": i, "id": jid}
+                        st.session_state.vjob = {"kind": "v4", "i": i, "id": jid, "cost": cost}
                         st.session_state.error = ""
                     except Exception as e:
                         st.session_state.error = str(e)
