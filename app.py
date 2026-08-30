@@ -277,38 +277,38 @@ def nai_request(prompt, width, height, model, steps=23, scale=5.0, negative="", 
             last_err = f"{res.status_code}: {res.text[:400]}"
     raise Exception(last_err or "NovelAIの生成に失敗しました")
 
-def grok_image_to_video(image_uri, prompt, duration=6):
+def grok_start_video(image_uri, prompt, duration=6):
     if not XAI_KEY:
         raise Exception("XAI_API_KEY がありません")
     headers = {"Authorization": f"Bearer {XAI_KEY}", "Content-Type": "application/json"}
     payload = {"model": "grok-imagine-video-1.5", "prompt": prompt or "subtle natural motion, keep the same character and style", "image": {"url": image_uri}, "duration": int(duration), "resolution": "720p"}
-    res = requests.post("https://api.x.ai/v1/videos/generations", headers=headers, json=payload, timeout=60)
+    res = requests.post("https://api.x.ai/v1/videos/generations", headers=headers, json=payload, timeout=30)
     if res.status_code not in (200, 201, 202):
         raise Exception(f"{res.status_code}: {res.text[:500]}")
     data = res.json()
     request_id = data.get("request_id") or data.get("id")
     if not request_id:
         raise Exception(f"request_idがありません: {str(data)[:400]}")
-    video_url, last = None, ""
-    for _ in range(60):
-        chk = requests.get(f"https://api.x.ai/v1/videos/{request_id}", headers={"Authorization": headers["Authorization"]}, timeout=30)
-        last = chk.text[:400]
-        if chk.status_code != 200:
-            time.sleep(3); continue
-        d = chk.json()
-        status = d.get("status")
-        if status == "done":
-            video_url = (d.get("video") or {}).get("url") or d.get("url"); break
-        if status in ("failed", "expired"):
-            raise Exception(f"生成失敗: {last}")
-        time.sleep(3)
-    if not video_url:
-        raise Exception(f"時間切れです: {last}")
-    raw = requests.get(video_url, timeout=180); raw.raise_for_status()
-    path = os.path.join(VID_DIR, f"{uuid.uuid4().hex}.mp4")
-    with open(path, "wb") as f:
-        f.write(raw.content)
-    return path
+    return request_id
+
+def grok_poll_video(request_id):
+    headers = {"Authorization": f"Bearer {XAI_KEY}"}
+    chk = requests.get(f"https://api.x.ai/v1/videos/{request_id}", headers=headers, timeout=20)
+    if chk.status_code != 200:
+        return "wait", chk.text[:200]
+    d = chk.json()
+    status = d.get("status")
+    if status == "done":
+        video_url = (d.get("video") or {}).get("url") or d.get("url")
+        raw = requests.get(video_url, timeout=60)
+        raw.raise_for_status()
+        path = os.path.join(VID_DIR, f"{uuid.uuid4().hex}.mp4")
+        with open(path, "wb") as f:
+            f.write(raw.content)
+        return "done", path
+    if status in ("failed", "expired"):
+        return "error", str(d)[:400]
+    return "wait", status or "pending"
 
 def concat_videos(paths, out_path):
     lst = os.path.join(VID_DIR, f"{uuid.uuid4().hex}.txt")
@@ -337,10 +337,7 @@ def compose_yonkoma_video(paths, layout_key="2×2", out_path="out.mp4"):
         ins += ["-i", p]
     parts, labels = [], []
     for i in range(n):
-        parts.append(
-            f"[{i}:v]fps=24,scale={cw}:{ch}:force_original_aspect_ratio=decrease:force_divisible_by=2,"
-            f"pad={cw}:{ch}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,format=yuv420p[v{i}]"
-        )
+        parts.append(f"[{i}:v]fps=24,scale={cw}:{ch}:force_original_aspect_ratio=decrease:force_divisible_by=2,pad={cw}:{ch}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,format=yuv420p[v{i}]")
         labels.append(f"[v{i}]")
     if cols == 1:
         filt = ";".join(parts) + ";" + "".join(labels) + f"vstack=inputs={n}[out]"
@@ -527,7 +524,7 @@ defaults = {
     "hist_pick": None, "sq": "", "sb": "", "so": "", "sn": "", "schars": [""],
     "icon": random.choice(ANIMALS), "email": "", "pending": None, "library": [],
     "video_src": None, "video_out": None, "v4_clips": [None] * 4, "v4_prompts": ["", "", "", ""],
-    "v4_durs": [5, 5, 5, 5], "v4_count": 4, "v4_layout": "2×2", "v4_play": "同時に動く", "v4_joined": None,
+    "v4_durs": [5, 5, 5, 5], "v4_count": 4, "v4_layout": "2×2", "v4_play": "同時に動く", "v4_joined": None, "vjob": None,
 }
 for k, v in defaults.items():
     if k not in st.session_state:
@@ -628,6 +625,16 @@ elif st.session_state.page == "lib":
 elif st.session_state.page == "video":
     st.subheader("動画生成")
     st.caption("テスト中のためポイント消費なし")
+    job = st.session_state.get("vjob")
+    if job and job.get("kind") == "video":
+        st.info("生成中... 画面はそのままで待ってください")
+        state, val = grok_poll_video(job["id"])
+        if state == "done":
+            st.session_state.video_out = val; st.session_state.vjob = None; st.rerun()
+        elif state == "error":
+            st.session_state.error = val; st.session_state.vjob = None; st.rerun()
+        else:
+            time.sleep(2); st.rerun()
     up = st.file_uploader("画像をアップロード", type=["png", "jpg", "jpeg"])
     if up:
         st.session_state.video_src = uploaded_to_uri(up)
@@ -645,12 +652,12 @@ elif st.session_state.page == "video":
             st.session_state.error = "画像を選んでください"
         else:
             try:
-                st.info("生成中... 20〜60秒かかることがあります")
-                st.session_state.video_out = grok_image_to_video(st.session_state.video_src, motion, dur)
+                jid = grok_start_video(st.session_state.video_src, motion, dur)
+                st.session_state.vjob = {"kind": "video", "id": jid}
                 st.session_state.error = ""
             except Exception as e:
                 st.session_state.error = str(e)
-            st.rerun()
+        st.rerun()
     if st.session_state.video_out and os.path.exists(st.session_state.video_out):
         st.video(st.session_state.video_out)
         with open(st.session_state.video_out, "rb") as f:
@@ -660,6 +667,16 @@ elif st.session_state.page == "video":
 elif st.session_state.page == "v4":
     st.subheader("4コマ動画")
     st.caption("アップロードした画像から動画を作り、縦・横・2×2でまとめます")
+    job = st.session_state.get("vjob")
+    if job and job.get("kind") == "v4":
+        st.info(f"コマ{job['i']+1} 生成中... 画面はそのままで待ってください")
+        state, val = grok_poll_video(job["id"])
+        if state == "done":
+            st.session_state.v4_clips[job["i"]] = val; st.session_state.vjob = None; st.rerun()
+        elif state == "error":
+            st.session_state.error = val; st.session_state.vjob = None; st.rerun()
+        else:
+            time.sleep(2); st.rerun()
     st.session_state.v4_count = st.radio("コマ数", [2, 3, 4], index=[2, 3, 4].index(int(st.session_state.v4_count)), horizontal=True)
     n = int(st.session_state.v4_count)
     layout_opts = {2: ["縦2", "横2"], 3: ["縦3", "横3"], 4: ["縦4", "横4", "2×2"]}[n]
@@ -687,12 +704,12 @@ elif st.session_state.page == "v4":
                     st.session_state.error = "画像がありません"
                 else:
                     try:
-                        st.info(f"コマ{i+1} 生成中...")
-                        st.session_state.v4_clips[i] = grok_image_to_video(src, st.session_state.v4_prompts[i], st.session_state.v4_durs[i])
+                        jid = grok_start_video(src, st.session_state.v4_prompts[i], st.session_state.v4_durs[i])
+                        st.session_state.vjob = {"kind": "v4", "i": i, "id": jid}
                         st.session_state.error = ""
                     except Exception as e:
                         st.session_state.error = str(e)
-                    st.rerun()
+                st.rerun()
             if st.session_state.v4_clips[i] and os.path.exists(st.session_state.v4_clips[i]):
                 st.video(st.session_state.v4_clips[i])
     ready = [st.session_state.v4_clips[i] for i in range(n) if st.session_state.v4_clips[i] and os.path.exists(st.session_state.v4_clips[i])]
