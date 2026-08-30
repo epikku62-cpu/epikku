@@ -26,6 +26,10 @@ except ImportError:
 
 st.set_page_config(page_title="panel AI.", page_icon="🎨", layout="wide")
 
+GSC = os.environ.get("GOOGLE_SITE_VERIFICATION", "")
+if GSC:
+    st.markdown(f'<meta name="google-site-verification" content="{GSC}">', unsafe_allow_html=True)
+
 NAI_KEY = os.environ.get("NOVELAI_API_KEY", "")
 XAI_KEY = os.environ.get("XAI_API_KEY", "")
 STRIPE_SECRET_KEY = os.environ.get("STRIPE_SECRET_KEY", "")
@@ -37,6 +41,7 @@ SMTP_HOST = os.environ.get("SMTP_HOST", "")
 SMTP_PORT = int(os.environ.get("SMTP_PORT", "587"))
 SMTP_USER = os.environ.get("SMTP_USER", "")
 SMTP_PASS = os.environ.get("SMTP_PASS", "")
+OWNER_ACCOUNTS = [x.strip().lower() for x in os.environ.get("OWNER_ACCOUNTS", "").split(",") if x.strip()]
 if stripe is not None and STRIPE_SECRET_KEY:
     stripe.api_key = STRIPE_SECRET_KEY
 
@@ -85,6 +90,11 @@ os.makedirs(VID_DIR, exist_ok=True)
 
 def video_cost(sec):
     return max(1, int(sec)) * VIDEO_PT_PER_SEC
+
+def is_owner():
+    u = str(st.session_state.get("username") or "").strip().lower()
+    e = norm_mail(st.session_state.get("email"))
+    return bool(OWNER_ACCOUNTS) and (u in OWNER_ACCOUNTS or e in OWNER_ACCOUNTS)
 
 def file_b64(path):
     if not os.path.exists(path):
@@ -517,6 +527,8 @@ def apply_login(name, data):
     st.session_state.library = data.get("library", [])
 
 def take_video_points(cost):
+    if is_owner():
+        return
     if st.session_state.points < cost:
         raise Exception(f"ポイントが足りません。必要 {cost}")
     st.session_state.points -= cost
@@ -640,6 +652,8 @@ elif st.session_state.page == "lib":
 
 elif st.session_state.page == "video":
     st.subheader("動画生成")
+    if is_owner():
+        st.success("管理者のため、動画はポイントなしです")
     job = st.session_state.get("vjob")
     if job and job.get("kind") == "video":
         st.info("生成中... 画面はそのままで待ってください")
@@ -662,16 +676,15 @@ elif st.session_state.page == "video":
         st.image(st.session_state.video_src, width=240)
     motion = st.text_area("動きの内容", placeholder="ゆっくり瞬きする")
     dur = st.slider("秒数", 3, 10, 6)
-    st.caption(f"消費ポイント {video_cost(dur)}　（1秒 {VIDEO_PT_PER_SEC}ポイント）")
+    st.caption("ポイントなし" if is_owner() else f"消費ポイント {video_cost(dur)}　（1秒 {VIDEO_PT_PER_SEC}ポイント）")
     if st.button("動画にする", type="primary"):
         if not st.session_state.video_src:
             st.session_state.error = "画像を選んでください"
         else:
             try:
-                cost = video_cost(dur)
-                take_video_points(cost)
+                take_video_points(video_cost(dur))
                 jid = grok_start_video(st.session_state.video_src, motion, dur)
-                st.session_state.vjob = {"kind": "video", "id": jid, "cost": cost}
+                st.session_state.vjob = {"kind": "video", "id": jid}
                 st.session_state.error = ""
             except Exception as e:
                 st.session_state.error = str(e)
@@ -684,7 +697,9 @@ elif st.session_state.page == "video":
 
 elif st.session_state.page == "v4":
     st.subheader("4コマ動画")
-    st.caption("1コマごとにポイント消費。まとめは無料です")
+    st.caption("管理者はポイントなし。ほかの人は1コマごとにポイント消費。まとめは無料")
+    if is_owner():
+        st.success("管理者のため、動画はポイントなしです")
     job = st.session_state.get("vjob")
     if job and job.get("kind") == "v4":
         st.info(f"コマ{job['i']+1} 生成中... 画面はそのままで待ってください")
@@ -717,16 +732,15 @@ elif st.session_state.page == "v4":
                 st.image(src, width=180)
             st.session_state.v4_prompts[i] = st.text_input("動き", value=st.session_state.v4_prompts[i], key=f"v4p_{i}")
             st.session_state.v4_durs[i] = st.slider("秒数", 3, 10, int(st.session_state.v4_durs[i]), key=f"v4d_{i}")
-            st.caption(f"消費 {video_cost(st.session_state.v4_durs[i])}ポイント")
+            st.caption("ポイントなし" if is_owner() else f"消費 {video_cost(st.session_state.v4_durs[i])}ポイント")
             if st.button("このコマを動画にする", key=f"v4g_{i}"):
                 if not src:
                     st.session_state.error = "画像がありません"
                 else:
                     try:
-                        cost = video_cost(st.session_state.v4_durs[i])
-                        take_video_points(cost)
+                        take_video_points(video_cost(st.session_state.v4_durs[i]))
                         jid = grok_start_video(src, st.session_state.v4_prompts[i], st.session_state.v4_durs[i])
-                        st.session_state.vjob = {"kind": "v4", "i": i, "id": jid, "cost": cost}
+                        st.session_state.vjob = {"kind": "v4", "i": i, "id": jid}
                         st.session_state.error = ""
                     except Exception as e:
                         st.session_state.error = str(e)
