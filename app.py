@@ -112,9 +112,7 @@ def send_code_mail(to_addr, code):
     if SMTP_HOST and SMTP_USER and SMTP_PASS and MAIL_FROM:
         try:
             msg = MIMEText(body, "plain", "utf-8")
-            msg["Subject"] = "panel AI. 登録確認"
-            msg["From"] = MAIL_FROM
-            msg["To"] = to_addr
+            msg["Subject"] = "panel AI. 登録確認"; msg["From"] = MAIL_FROM; msg["To"] = to_addr
             with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=20) as s:
                 s.starttls(); s.login(SMTP_USER, SMTP_PASS); s.sendmail(MAIL_FROM, [to_addr], msg.as_string())
             return True, ""
@@ -297,26 +295,22 @@ def grok_image_to_video(image_uri, prompt, duration=6):
     request_id = data.get("request_id") or data.get("id")
     if not request_id:
         raise Exception(f"request_idがありません: {str(data)[:400]}")
-    video_url = None
-    last = ""
+    video_url, last = None, ""
     for _ in range(60):
         chk = requests.get(f"https://api.x.ai/v1/videos/{request_id}", headers={"Authorization": headers["Authorization"]}, timeout=30)
         last = chk.text[:400]
         if chk.status_code != 200:
-            time.sleep(3)
-            continue
+            time.sleep(3); continue
         d = chk.json()
         status = d.get("status")
         if status == "done":
-            video_url = (d.get("video") or {}).get("url") or d.get("url")
-            break
+            video_url = (d.get("video") or {}).get("url") or d.get("url"); break
         if status in ("failed", "expired"):
             raise Exception(f"生成失敗: {last}")
         time.sleep(3)
     if not video_url:
         raise Exception(f"時間切れです: {last}")
-    raw = requests.get(video_url, timeout=180)
-    raw.raise_for_status()
+    raw = requests.get(video_url, timeout=180); raw.raise_for_status()
     path = os.path.join(VID_DIR, f"{uuid.uuid4().hex}.mp4")
     with open(path, "wb") as f:
         f.write(raw.content)
@@ -327,13 +321,39 @@ def concat_videos(paths, out_path):
     with open(lst, "w", encoding="utf-8") as f:
         for p in paths:
             f.write(f"file '{os.path.abspath(p)}'\n")
-    cmd = ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", lst, "-c", "copy", out_path]
-    r = subprocess.run(cmd, capture_output=True, text=True)
+    r = subprocess.run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", lst, "-c", "copy", out_path], capture_output=True, text=True)
     if r.returncode != 0 or not os.path.exists(out_path):
-        cmd = ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", lst, "-c:v", "libx264", "-pix_fmt", "yuv420p", out_path]
-        r = subprocess.run(cmd, capture_output=True, text=True)
+        r = subprocess.run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", lst, "-c:v", "libx264", "-pix_fmt", "yuv420p", out_path], capture_output=True, text=True)
         if r.returncode != 0:
             raise Exception(r.stderr[-400:] if r.stderr else "結合に失敗しました")
+    return out_path
+
+def compose_yonkoma_video(paths, layout_key="2×2", out_path="out.mp4"):
+    n = len(paths)
+    if n < 2:
+        raise Exception("2本以上必要です")
+    if layout_key.startswith("横"):
+        cols, rows, cw, ch = n, 1, 480, 480
+    elif layout_key == "2×2":
+        cols, rows, cw, ch = 2, 2, 640, 640
+    else:
+        cols, rows, cw, ch = 1, n, 720, 405
+    ins = []
+    for p in paths:
+        ins += ["-i", p]
+    parts, labels = [], []
+    for i in range(n):
+        parts.append(f"[{i}:v]scale={cw}:{ch}:force_original_aspect_ratio=decrease,pad={cw}:{ch}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=24[v{i}]")
+        labels.append(f"[v{i}]")
+    if cols == 1:
+        filt = ";".join(parts) + ";" + "".join(labels) + f"vstack=inputs={n}[out]"
+    elif rows == 1:
+        filt = ";".join(parts) + ";" + "".join(labels) + f"hstack=inputs={n}[out]"
+    else:
+        filt = ";".join(parts) + ";" + "".join(labels) + f"xstack=inputs={n}:layout=0_0|w0_0|0_h0|w0_h0[out]"
+    r = subprocess.run(["ffmpeg", "-y"] + ins + ["-filter_complex", filt, "-map", "[out]", "-an", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-shortest", out_path], capture_output=True, text=True)
+    if r.returncode != 0 or not os.path.exists(out_path):
+        raise Exception((r.stderr or "結合失敗")[-500:])
     return out_path
 
 def wrap_text(text, font, max_width):
@@ -509,7 +529,8 @@ defaults = {
     "simple_image": None, "simple_busy": False, "simple_history": [], "show_history": False,
     "hist_pick": None, "sq": "", "sb": "", "so": "", "sn": "", "schars": [""],
     "icon": random.choice(ANIMALS), "email": "", "pending": None, "library": [],
-    "video_src": None, "video_out": None, "v4_clips": [None] * 4, "v4_prompts": ["", "", "", ""], "v4_joined": None,
+    "video_src": None, "video_out": None, "v4_clips": [None] * 4, "v4_prompts": ["", "", "", ""],
+    "v4_durs": [5, 5, 5, 5], "v4_count": 4, "v4_layout": "2×2", "v4_play": "同時に動く", "v4_joined": None,
 }
 for k, v in defaults.items():
     if k not in st.session_state:
@@ -587,7 +608,7 @@ if st.session_state.page == "help":
     <h2>画像生成モード</h2><p>ポイントを消費して画像生成<br>日本語で作成可能<br>おすすめ</p>
     <h2>セット</h2><p>絵柄の登録<br>キャラの登録<br>登録したら4コマ画像生成の時、絵柄、キャラが反映される</p>
     <h2>4コマ</h2><p>セット絵柄、キャラを使えて画像生成して、会話、吹き出しをつけれるよ！<br>最後に合体させて4コマ完成！</p>
-    <h2>動画</h2><p>保存庫の画像かアップロードした画像を動画にできます。4コマ動画は1コマずつ作って最後にまとめます。今はテストのためポイント消費なし。</p>
+    <h2>動画</h2><p>保存庫の画像かアップロードした画像を動画にできます。2〜4コマを同時再生か順番再生でまとめられます。今はテストのためポイント消費なし。</p>
     <h2>月額登録</h2><p>セット機能開放<br>サイズの変更開放<br>ポイント付与</p></div>""", unsafe_allow_html=True)
     show_ad()
 
@@ -604,8 +625,7 @@ elif st.session_state.page == "lib":
                 st.session_state.video_src = item["url"]; st.session_state.page = "video"; st.rerun()
         with b:
             if st.button("消す", key=f"libd_{i}"):
-                real = len(st.session_state.library) - 1 - i
-                st.session_state.library.pop(real); save_user_state(); st.rerun()
+                st.session_state.library.pop(len(st.session_state.library) - 1 - i); save_user_state(); st.rerun()
     show_ad()
 
 elif st.session_state.page == "video":
@@ -629,8 +649,7 @@ elif st.session_state.page == "video":
         else:
             try:
                 st.info("生成中... 20〜60秒かかることがあります")
-                path = grok_image_to_video(st.session_state.video_src, motion, dur)
-                st.session_state.video_out = path
+                st.session_state.video_out = grok_image_to_video(st.session_state.video_src, motion, dur)
                 st.session_state.error = ""
             except Exception as e:
                 st.session_state.error = str(e)
@@ -643,8 +662,15 @@ elif st.session_state.page == "video":
 
 elif st.session_state.page == "v4":
     st.subheader("4コマ動画")
-    st.caption("1コマずつ動画にして、最後にまとめます。テスト中はポイントなし")
-    for i in range(4):
+    st.caption("2・3・4コマを選んで、同時再生か順番再生でまとめます。テスト中はポイントなし")
+    st.session_state.v4_count = st.radio("コマ数", [2, 3, 4], index=[2, 3, 4].index(int(st.session_state.v4_count)), horizontal=True)
+    n = int(st.session_state.v4_count)
+    layout_opts = {2: ["縦2", "横2"], 3: ["縦3", "横3"], 4: ["縦4", "横4", "2×2"]}[n]
+    if st.session_state.v4_layout not in layout_opts:
+        st.session_state.v4_layout = layout_opts[0]
+    st.session_state.v4_layout = st.radio("並び", layout_opts, horizontal=True, index=layout_opts.index(st.session_state.v4_layout))
+    st.session_state.v4_play = st.radio("再生", ["同時に動く", "順番に動く"], horizontal=True, index=0 if st.session_state.v4_play == "同時に動く" else 1)
+    for i in range(n):
         with st.expander(f"コマ {i+1}", expanded=True):
             src = st.session_state.panel_images[i]
             if st.session_state.library:
@@ -658,27 +684,31 @@ elif st.session_state.page == "v4":
             if src:
                 st.image(src, width=180)
             st.session_state.v4_prompts[i] = st.text_input("動き", value=st.session_state.v4_prompts[i], key=f"v4p_{i}")
+            st.session_state.v4_durs[i] = st.slider("秒数", 3, 10, int(st.session_state.v4_durs[i]), key=f"v4d_{i}")
             if st.button("このコマを動画にする", key=f"v4g_{i}"):
                 if not src:
                     st.session_state.error = "画像がありません"
                 else:
                     try:
                         st.info(f"コマ{i+1} 生成中... 20〜60秒かかることがあります")
-                        st.session_state.v4_clips[i] = grok_image_to_video(src, st.session_state.v4_prompts[i], 5)
+                        st.session_state.v4_clips[i] = grok_image_to_video(src, st.session_state.v4_prompts[i], st.session_state.v4_durs[i])
                         st.session_state.error = ""
                     except Exception as e:
                         st.session_state.error = str(e)
                     st.rerun()
             if st.session_state.v4_clips[i] and os.path.exists(st.session_state.v4_clips[i]):
                 st.video(st.session_state.v4_clips[i])
-    if st.button("4本を1本にまとめる", type="primary"):
-        clips = [p for p in st.session_state.v4_clips if p and os.path.exists(p)]
-        if len(clips) < 2:
-            st.session_state.error = "2本以上必要です"
+    if st.button("漫画動画としてまとめる", type="primary"):
+        clips = [st.session_state.v4_clips[i] for i in range(n) if st.session_state.v4_clips[i] and os.path.exists(st.session_state.v4_clips[i])]
+        if len(clips) < n:
+            st.session_state.error = f"{n}本そろえてください"
         else:
             try:
                 out = os.path.join(VID_DIR, f"join_{uuid.uuid4().hex}.mp4")
-                st.session_state.v4_joined = concat_videos(clips, out)
+                if st.session_state.v4_play == "順番に動く":
+                    st.session_state.v4_joined = concat_videos(clips, out)
+                else:
+                    st.session_state.v4_joined = compose_yonkoma_video(clips, st.session_state.v4_layout, out)
                 st.session_state.error = ""
             except Exception as e:
                 st.session_state.error = str(e)
@@ -686,7 +716,7 @@ elif st.session_state.page == "v4":
     if st.session_state.v4_joined and os.path.exists(st.session_state.v4_joined):
         st.video(st.session_state.v4_joined)
         with open(st.session_state.v4_joined, "rb") as f:
-            st.download_button("まとめた動画を保存", data=f.read(), file_name="yonkoma.mp4", mime="video/mp4")
+            st.download_button("漫画動画を保存", data=f.read(), file_name="manga.mp4", mime="video/mp4")
     show_ad()
 
 elif st.session_state.page == "icon":
