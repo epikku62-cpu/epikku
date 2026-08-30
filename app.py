@@ -57,14 +57,9 @@ POINT_PACKS = [
     {"points": 3000, "yen": 3000},
 ]
 ANIMALS = ["🐱", "🐶", "🐰", "🐻", "🦊", "🐼", "🐸", "🦉", "🐧", "🐯"]
-
 LAYOUTS = {
-    "縦4": {"cols": 1, "count": 4},
-    "縦3": {"cols": 1, "count": 3},
-    "縦2": {"cols": 1, "count": 2},
-    "横4": {"cols": 4, "count": 4},
-    "横3": {"cols": 3, "count": 3},
-    "横2": {"cols": 2, "count": 2},
+    "縦4": {"cols": 1, "count": 4}, "縦3": {"cols": 1, "count": 3}, "縦2": {"cols": 1, "count": 2},
+    "横4": {"cols": 4, "count": 4}, "横3": {"cols": 3, "count": 3}, "横2": {"cols": 2, "count": 2},
     "2×2": {"cols": 2, "count": 4},
 }
 SIZES = {
@@ -91,13 +86,10 @@ BUBBLE_TYPES = ["ふきだし", "叫び", "考え", "文字だけ"]
 TAILS = ["下", "下左", "下右", "左", "右"]
 TEXT_DIR = ["横書き", "縦書き"]
 FONT_SPECS = {
-    "ゴシック": {
-        "file": "font_gothic.otf",
-        "urls": [
-            "https://github.com/googlefonts/noto-cjk/raw/main/Sans/OTF/Japanese/NotoSansCJKjp-Regular.otf",
-            "https://cdn.jsdelivr.net/gh/notofonts/noto-cjk@main/Sans/OTF/Japanese/NotoSansCJKjp-Regular.otf",
-        ],
-    },
+    "ゴシック": {"file": "font_gothic.otf", "urls": [
+        "https://github.com/googlefonts/noto-cjk/raw/main/Sans/OTF/Japanese/NotoSansCJKjp-Regular.otf",
+        "https://cdn.jsdelivr.net/gh/notofonts/noto-cjk@main/Sans/OTF/Japanese/NotoSansCJKjp-Regular.otf",
+    ]},
     "丸文字": {"file": "font_maru.ttf", "urls": ["https://cdn.jsdelivr.net/gh/google/fonts@main/ofl/kosugimaru/KosugiMaru-Regular.ttf"]},
     "かわいい": {"file": "font_kawaii.ttf", "urls": ["https://cdn.jsdelivr.net/gh/google/fonts@main/ofl/hachimarupop/HachiMaruPop-Regular.ttf"]},
     "手書き風": {"file": "font_te.ttf", "urls": ["https://cdn.jsdelivr.net/gh/google/fonts@main/ofl/yuseimagic/YuseiMagic-Regular.ttf"]},
@@ -120,8 +112,7 @@ def valid_mail_format(m):
 
 def mail_domain_ok(m):
     try:
-        domain = norm_mail(m).split("@", 1)[1]
-        socket.getaddrinfo(domain, 80)
+        socket.getaddrinfo(norm_mail(m).split("@", 1)[1], 80)
         return True
     except Exception:
         return False
@@ -135,9 +126,7 @@ def send_code_mail(to_addr, code):
             json={"from": MAIL_FROM, "to": [to_addr], "subject": "panel AI. 登録確認", "text": body},
             timeout=20,
         )
-        if res.status_code in (200, 201):
-            return True, ""
-        return False, res.text[:200]
+        return (res.status_code in (200, 201), res.text[:200])
     if SMTP_HOST and SMTP_USER and SMTP_PASS and MAIL_FROM:
         try:
             msg = MIMEText(body, "plain", "utf-8")
@@ -168,10 +157,7 @@ def save_json(path, data):
 
 def email_taken(users, mail):
     mail = norm_mail(mail)
-    for v in users.values():
-        if isinstance(v, dict) and norm_mail(v.get("email")) == mail:
-            return True
-    return False
+    return any(isinstance(v, dict) and norm_mail(v.get("email")) == mail for v in users.values())
 
 def find_user(users, key):
     if key in users:
@@ -207,22 +193,16 @@ def prepare_fonts():
 def load_font(size=28, kind="ゴシック"):
     size = max(12, int(size))
     spec = FONT_SPECS.get(kind) or FONT_SPECS["ゴシック"]
-    if os.path.exists(spec["file"]):
-        try:
-            return ImageFont.truetype(spec["file"], size)
-        except Exception:
-            pass
-    if os.path.exists(FONT_SPECS["ゴシック"]["file"]):
-        try:
-            return ImageFont.truetype(FONT_SPECS["ゴシック"]["file"], size)
-        except Exception:
-            pass
+    for path in [spec["file"], FONT_SPECS["ゴシック"]["file"]]:
+        if os.path.exists(path):
+            try:
+                return ImageFont.truetype(path, size)
+            except Exception:
+                pass
     return ImageFont.load_default()
 
 def uploaded_to_uri(uploaded):
-    raw = uploaded.getvalue()
-    mime = uploaded.type or "image/png"
-    return f"data:{mime};base64,{base64.b64encode(raw).decode()}"
+    return f"data:{uploaded.type or 'image/png'};base64,{base64.b64encode(uploaded.getvalue()).decode()}"
 
 def uri_to_image(uri):
     if not uri:
@@ -245,10 +225,8 @@ def pad_ref(uri):
 
 def is_premium():
     until = st.session_state.get("premium_until") or ""
-    if not until:
-        return False
     try:
-        return datetime.fromisoformat(until) > datetime.now()
+        return bool(until) and datetime.fromisoformat(until) > datetime.now()
     except Exception:
         return False
 
@@ -269,9 +247,7 @@ def save_user_state():
         save_json(DATA_FILE, {"characters": st.session_state.characters})
 
 def nai_wh(w, h):
-    w = max(64, min(1920, int(round(w / 64) * 64)))
-    h = max(64, min(1920, int(round(h / 64) * 64)))
-    return w, h
+    return max(64, min(1920, int(round(w / 64) * 64))), max(64, min(1920, int(round(h / 64) * 64)))
 
 def nai_request(prompt, width, height, model, steps=23, scale=5.0, negative="", char_texts=None, char_refs=None, style_refs=None):
     if not NAI_KEY:
@@ -286,12 +262,10 @@ def nai_request(prompt, width, height, model, steps=23, scale=5.0, negative="", 
         char_captions.append({"char_caption": txt, "centers": [{"x": xs[i], "y": ys[i]}]})
         character_prompts.append({"prompt": txt, "uc": "", "center": {"x": xs[i], "y": ys[i]}, "enabled": True})
     parameters = {
-        "params_version": 3,
-        "width": gw, "height": gh, "scale": float(scale),
+        "params_version": 3, "width": gw, "height": gh, "scale": float(scale),
         "sampler": "k_euler_ancestral", "steps": int(steps), "n_samples": 1,
-        "qualityToggle": False, "ucPreset": 0,
-        "negative_prompt": negative or "", "noise_schedule": "karras",
-        "use_coords": True, "characterPrompts": character_prompts,
+        "qualityToggle": False, "ucPreset": 0, "negative_prompt": negative or "",
+        "noise_schedule": "karras", "use_coords": True, "characterPrompts": character_prompts,
         "v4_prompt": {"caption": {"base_caption": prompt or "", "char_captions": char_captions}, "use_coords": True, "use_order": True},
         "v4_negative_prompt": {"caption": {"base_caption": negative or "", "char_captions": []}, "legacy_uc": False},
     }
@@ -317,8 +291,7 @@ def nai_request(prompt, width, height, model, steps=23, scale=5.0, negative="", 
             res = requests.post(url, headers={"Authorization": f"Bearer {NAI_KEY}", "Content-Type": "application/json"}, json=payload, timeout=180)
             if res.status_code == 200:
                 with zipfile.ZipFile(io.BytesIO(res.content)) as zf:
-                    png = zf.read(zf.namelist()[0])
-                return "data:image/png;base64," + base64.b64encode(png).decode()
+                    return "data:image/png;base64," + base64.b64encode(zf.read(zf.namelist()[0])).decode()
             last_err = f"{res.status_code}: {res.text[:400]}"
     raise Exception(last_err or "NovelAIの生成に失敗しました")
 
@@ -361,7 +334,8 @@ def draw_one_bubble(img, bub):
     w, h = img.size
     kind, direction = bub.get("kind", "ふきだし"), bub.get("dir", "横書き")
     fill, color, tail = bub.get("fill", "#ffffff"), bub.get("color", "#111111"), bub.get("tail", "下")
-    pad, max_w = 16, int(w * 0.62)
+    pad = 22 if kind == "叫び" else 16
+    max_w = int(w * (0.72 if kind == "叫び" else 0.62))
     if direction == "縦書き":
         lines = list(text.replace("\n", ""))
         box_w = size + pad * 2 + bold * 2
@@ -374,7 +348,10 @@ def draw_one_bubble(img, bub):
             text_w = max(len(x) * size for x in lines)
         box_w = int(text_w + pad * 2 + bold * 2)
         box_h = int(pad * 2 + int(size * 1.3) * len(lines) + bold * 2)
-    extra = tail_size + 40
+    if kind == "叫び":
+        box_w = int(box_w * 1.25)
+        box_h = int(box_h * 1.28)
+    extra = tail_size + 48
     layer = Image.new("RGBA", (box_w + extra * 2, box_h + extra * 2), (0, 0, 0, 0))
     draw = ImageDraw.Draw(layer)
     x0, y0 = extra, extra
@@ -393,10 +370,10 @@ def draw_one_bubble(img, bub):
             draw.polygon([(x0 + box_w - 2, y0 + box_h * 0.45), (x0 + box_w - 2, y0 + box_h * 0.62), (x0 + box_w + ts, y0 + box_h * 0.58)], fill=fill)
     elif kind == "叫び":
         pts = []
-        for i in range(28):
-            ang = math.pi * 2 * i / 28
-            rx = box_w / 2 * (1.12 if i % 2 == 0 else 0.86)
-            ry = box_h / 2 * (1.12 if i % 2 == 0 else 0.86)
+        for i in range(32):
+            ang = math.pi * 2 * i / 32
+            rx = box_w / 2 * (1.38 if i % 2 == 0 else 0.98)
+            ry = box_h / 2 * (1.38 if i % 2 == 0 else 0.98)
             pts.append((x0 + box_w / 2 + math.cos(ang) * rx, y0 + box_h / 2 + math.sin(ang) * ry))
         draw.polygon(pts, fill=fill, outline="#222222")
     elif kind == "考え":
@@ -414,13 +391,13 @@ def draw_one_bubble(img, bub):
     else:
         ty = y0 + pad - 2
         for line in lines:
-            draw_text(draw, (x0 + pad, ty), line, font, color, bold)
+            draw_text(draw, (x0 + (box_w - (font.getlength(line) if hasattr(font, "getlength") else len(line) * size)) / 2 if kind == "叫び" else x0 + pad, ty), line, font, color, bold)
             ty += int(size * 1.3)
     angle = int(bub.get("angle", 0))
     if angle:
         layer = layer.rotate(-angle, expand=True, resample=Image.BICUBIC)
-    px = int(w * float(bub.get("x", 8)) / 100)
-    py = int(h * float(bub.get("y", 8)) / 100)
+    px = int((w - layer.width) * float(bub.get("x", 8)) / 100)
+    py = int((h - layer.height) * float(bub.get("y", 8)) / 100)
     img.alpha_composite(layer, (max(0, min(w - layer.width, px)), max(0, min(h - layer.height, py))))
     return img.convert("RGB")
 
@@ -526,7 +503,8 @@ if st.session_state.page == "home":
     b64 = file_b64(HOME_IMG)
     if b64:
         st.markdown(f'<style>.stApp{{background-image:linear-gradient(rgba(255,255,255,.18),rgba(255,255,255,.18)),url("data:image/jpeg;base64,{b64}");background-size:cover;background-position:center;}}</style>', unsafe_allow_html=True)
-    st.markdown("<div style='height:58vh'></div>", unsafe_allow_html=True)
+    st.markdown("<div style='height:46vh'></div>", unsafe_allow_html=True)
+    st.markdown("<div style='text-align:center;color:#111;font-size:22px;font-weight:700;background:rgba(255,255,255,.72);padding:10px 12px;border-radius:12px;'>panel AIは漫画、画像生成、作成サイト</div>", unsafe_allow_html=True)
     mid = st.columns([1, 2, 1])
     with mid[1]:
         if st.button("生成開始", type="primary", use_container_width=True):
@@ -554,32 +532,21 @@ with st.sidebar:
             st.session_state.page = "register"; st.rerun()
     st.write(f"ポイント {st.session_state.points}")
     st.write(f"会員 {member_label() if st.session_state.logged_in else '未登録'}")
-    for label, page in [
-        ("画像生成モード", "simple"), ("セット", "chars"), ("4コマ", "make"),
-        ("ポイント購入", "shop"), ("説明書", "help"), ("月額登録", "plan"), ("お問い合わせ", "contact"),
-    ]:
+    for label, page in [("画像生成モード", "simple"), ("セット", "chars"), ("4コマ", "make"), ("ポイント購入", "shop"), ("説明書", "help"), ("月額登録", "plan"), ("お問い合わせ", "contact")]:
         if st.button(label, use_container_width=True):
             st.session_state.page = page; st.rerun()
 
 if st.session_state.error:
     st.error(st.session_state.error)
     if st.button("閉じる"):
-        st.session_state.error = ""
-        st.rerun()
+        st.session_state.error = ""; st.rerun()
 
 if st.session_state.page == "help":
-    st.markdown("""
-    <div style="color:#111;background:#fff;padding:16px;border-radius:12px;">
-    <h2>画像生成モード</h2>
-    <p>ポイントを消費して画像生成<br>日本語で作成可能<br>おすすめ</p>
-    <h2>セット</h2>
-    <p>絵柄の登録<br>キャラの登録<br>登録したら4コマ画像生成の時、絵柄、キャラが反映される</p>
-    <h2>4コマ</h2>
-    <p>セット絵柄、キャラを使えて画像生成して、会話、吹き出しをつけれるよ！<br>最後に合体させて4コマ完成！</p>
-    <h2>月額登録</h2>
-    <p>セット機能開放<br>サイズの変更開放<br>ポイント付与</p>
-    </div>
-    """, unsafe_allow_html=True)
+    st.markdown("""<div style="color:#111;background:#fff;padding:16px;border-radius:12px;">
+    <h2>画像生成モード</h2><p>ポイントを消費して画像生成<br>日本語で作成可能<br>おすすめ</p>
+    <h2>セット</h2><p>絵柄の登録<br>キャラの登録<br>登録したら4コマ画像生成の時、絵柄、キャラが反映される</p>
+    <h2>4コマ</h2><p>セット絵柄、キャラを使えて画像生成して、会話、吹き出しをつけれるよ！<br>最後に合体させて4コマ完成！</p>
+    <h2>月額登録</h2><p>セット機能開放<br>サイズの変更開放<br>ポイント付与</p></div>""", unsafe_allow_html=True)
     show_ad()
 
 elif st.session_state.page == "icon":
@@ -590,11 +557,9 @@ elif st.session_state.page == "icon":
     if up:
         st.image(up, width=80)
     if st.button("この画像にする", type="primary") and up:
-        st.session_state.icon = uploaded_to_uri(up)
-        save_user_state(); st.success("変更しました"); st.rerun()
+        st.session_state.icon = uploaded_to_uri(up); save_user_state(); st.rerun()
     if st.button("動物アイコンに戻す"):
-        st.session_state.icon = random.choice(ANIMALS)
-        save_user_state(); st.rerun()
+        st.session_state.icon = random.choice(ANIMALS); save_user_state(); st.rerun()
     show_ad()
 
 elif st.session_state.page == "shop":
@@ -609,21 +574,13 @@ elif st.session_state.page == "shop":
         for pack in POINT_PACKS:
             c1, c2 = st.columns([3, 2])
             with c1:
-                st.write(f"**{pack['points']}ポイント**")
-                st.caption(f"{pack['yen']}円")
+                st.write(f"**{pack['points']}ポイント**"); st.caption(f"{pack['yen']}円")
             with c2:
                 if st.button(f"{pack['yen']}円で買う", key=f"buy_{pack['points']}"):
                     try:
                         session = stripe.checkout.Session.create(
                             mode="payment",
-                            line_items=[{
-                                "price_data": {
-                                    "currency": "jpy",
-                                    "unit_amount": pack["yen"],
-                                    "product_data": {"name": f"{pack['points']}ポイント"},
-                                },
-                                "quantity": 1,
-                            }],
+                            line_items=[{"price_data": {"currency": "jpy", "unit_amount": pack["yen"], "product_data": {"name": f"{pack['points']}ポイント"}}, "quantity": 1}],
                             success_url=f"{SITE_URL}/?buypoints={pack['points']}",
                             cancel_url=f"{SITE_URL}/?buypoints=cancel",
                             client_reference_id=st.session_state.get("username", ""),
@@ -659,13 +616,7 @@ elif st.session_state.page == "register":
             if not ok:
                 st.error(f"メールを送れませんでした: {err}")
             else:
-                st.session_state.pending = {
-                    "name": name,
-                    "email": norm_mail(mail),
-                    "password": hash_password(pw),
-                    "icon": uploaded_to_uri(icon_up) if icon_up else random.choice(ANIMALS),
-                    "code": code,
-                }
+                st.session_state.pending = {"name": name, "email": norm_mail(mail), "password": hash_password(pw), "icon": uploaded_to_uri(icon_up) if icon_up else random.choice(ANIMALS), "code": code}
                 st.success("確認コードを送りました。メールを見てください。")
     if st.session_state.pending:
         code_in = st.text_input("確認コード")
@@ -677,16 +628,11 @@ elif st.session_state.page == "register":
             elif email_taken(users, p["email"]) or p["name"] in users:
                 st.error("すでに登録されています")
             else:
-                users[p["name"]] = {
-                    "password": p["password"], "email": p["email"], "icon": p["icon"],
-                    "characters": [], "points": SIGNUP_POINTS, "premium_until": "",
-                    "rank": "ブロンズ", "history": [],
-                }
+                users[p["name"]] = {"password": p["password"], "email": p["email"], "icon": p["icon"], "characters": [], "points": SIGNUP_POINTS, "premium_until": "", "rank": "ブロンズ", "history": []}
                 save_json(USERS_FILE, users)
                 apply_login(p["name"], users[p["name"]])
                 st.session_state.pending = None
-                st.session_state.page = "simple"
-                st.rerun()
+                st.session_state.page = "simple"; st.rerun()
     st.write("ログイン")
     lu = st.text_input("メールまたはユーザーネーム", key="lu")
     lp = st.text_input("ログイン用パスワード", type="password", key="lp")
@@ -694,8 +640,7 @@ elif st.session_state.page == "register":
         users = load_json(USERS_FILE, {})
         found = find_user(users, lu)
         if found and users[found]["password"] == hash_password(lp):
-            apply_login(found, users[found])
-            st.session_state.page = "simple"; st.rerun()
+            apply_login(found, users[found]); st.session_state.page = "simple"; st.rerun()
         else:
             st.error("ログインできません")
     show_ad()
@@ -768,8 +713,7 @@ elif st.session_state.page == "simple":
         st.session_state.show_history = True; st.rerun()
     if st.session_state.show_history:
         if st.button("戻る"):
-            st.session_state.show_history = False
-            st.session_state.hist_pick = None; st.rerun()
+            st.session_state.show_history = False; st.session_state.hist_pick = None; st.rerun()
         if not st.session_state.simple_history:
             st.write("まだありません")
         for hi, item in enumerate(reversed(st.session_state.simple_history)):
@@ -794,7 +738,6 @@ elif st.session_state.page == "simple":
                 if st.button("いいえ"):
                     st.session_state.hist_pick = None; st.rerun()
         show_ad(); st.stop()
-
     st.session_state.sq = st.text_area("画質プロンプト", value=st.session_state.sq)
     st.session_state.sb = st.text_area("背景プロンプト", value=st.session_state.sb)
     if st.button("➕ キャラ追加") and len(st.session_state.schars) < 3:
@@ -814,8 +757,7 @@ elif st.session_state.page == "simple":
     st.caption(f"{spec['gen'][0]} × {spec['gen'][1]}　{spec['cost']}ポイント")
     scale = st.slider("プロンプトガイダンス", 1.0, 10.0, 5.0, 0.1)
     if st.button("生成する", type="primary"):
-        st.session_state.error = ""
-        st.session_state.simple_busy = True; st.rerun()
+        st.session_state.error = ""; st.session_state.simple_busy = True; st.rerun()
     if st.session_state.simple_busy:
         st.session_state.simple_busy = False
         chars = [x.strip() for x in st.session_state.schars if x.strip()]
@@ -834,8 +776,7 @@ elif st.session_state.page == "simple":
                 st.session_state.simple_image = img
                 st.session_state.simple_history.append({"url": img, "quality": st.session_state.sq, "background": st.session_state.sb, "chars": list(st.session_state.schars), "other": st.session_state.so, "negative": st.session_state.sn, "size": size_name, "scale": scale})
                 st.session_state.points -= cost
-                save_user_state()
-                st.session_state.error = ""
+                save_user_state(); st.session_state.error = ""
             except Exception as e:
                 st.session_state.error = str(e)
         st.rerun()
@@ -900,12 +841,10 @@ else:
             c1, c2 = st.columns(2)
             with c1:
                 if st.button("生成", key=f"gen_{i}", type="primary"):
-                    st.session_state.error = ""
-                    st.session_state.busy_index = i; st.rerun()
+                    st.session_state.error = ""; st.session_state.busy_index = i; st.rerun()
             with c2:
                 if st.button("消す", key=f"clr_{i}"):
-                    st.session_state.panel_images[i] = None
-                    st.session_state.panel_bubbles[i] = []; st.rerun()
+                    st.session_state.panel_images[i] = None; st.session_state.panel_bubbles[i] = []; st.rerun()
             if st.session_state.panel_images[i]:
                 draft = st.session_state.drafts[i]
                 draft["text"] = st.text_input("新しいセリフ", value=draft.get("text", ""), key=f"bt_{i}")
@@ -919,8 +858,8 @@ else:
                     draft["size"] = st.slider("文字の大きさ", 16, 64, int(draft.get("size", 28)), key=f"bs_{i}")
                     draft["bold"] = st.slider("太さ", 0, 4, int(draft.get("bold", 0)), key=f"bb_{i}")
                     draft["tail_size"] = st.slider("しっぽの大きさ", 8, 80, int(draft.get("tail_size", 28)), key=f"bts_{i}")
-                    draft["x"] = st.slider("左右", 0, 80, int(draft.get("x", 8)), key=f"bx_{i}")
-                    draft["y"] = st.slider("上下", 0, 80, int(draft.get("y", 8)), key=f"by_{i}")
+                    draft["x"] = st.slider("左右", 0, 100, int(draft.get("x", 8)), key=f"bx_{i}")
+                    draft["y"] = st.slider("上下", 0, 100, int(draft.get("y", 8)), key=f"by_{i}")
                     draft["angle"] = st.slider("傾き", -45, 45, int(draft.get("angle", 0)), key=f"ba_{i}")
                 draft["fill"] = st.color_picker("吹き出し色", draft.get("fill", "#ffffff"), key=f"bf_{i}")
                 draft["color"] = st.color_picker("文字色", draft.get("color", "#111111"), key=f"bc_{i}")
@@ -944,6 +883,7 @@ else:
     if st.session_state.get("busy_index") is not None:
         i = int(st.session_state.busy_index)
         st.session_state.busy_index = None
+        st.info(f"コマ{i+1} 生成中...")
         try:
             make_one(i)
             st.session_state.error = ""
