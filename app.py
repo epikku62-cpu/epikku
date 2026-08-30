@@ -11,6 +11,8 @@ import random
 import re
 import socket
 import smtplib
+import subprocess
+import tempfile
 import requests
 from email.mime.text import MIMEText
 from io import BytesIO
@@ -25,6 +27,7 @@ except ImportError:
 st.set_page_config(page_title="panel AI.", page_icon="🎨", layout="wide")
 
 NAI_KEY = os.environ.get("NOVELAI_API_KEY", "")
+XAI_KEY = os.environ.get("XAI_API_KEY", "")
 STRIPE_SECRET_KEY = os.environ.get("STRIPE_SECRET_KEY", "")
 STRIPE_PRICE_ID = os.environ.get("STRIPE_PRICE_ID", "")
 SITE_URL = os.environ.get("SITE_URL", "https://aistation.onrender.com")
@@ -37,31 +40,17 @@ SMTP_PASS = os.environ.get("SMTP_PASS", "")
 if stripe is not None and STRIPE_SECRET_KEY:
     stripe.api_key = STRIPE_SECRET_KEY
 
-NAI_URLS = [
-    "https://image.novelai.net/ai/generate-image",
-    "https://api.novelai.net/ai/generate-image",
-]
+NAI_URLS = ["https://image.novelai.net/ai/generate-image", "https://api.novelai.net/ai/generate-image"]
 DATA_FILE = "studio_data.json"
 USERS_FILE = "users_data.json"
 HOME_IMG = "IMG_1106.jpeg"
 HEADER_IMG = "IMG_1107.jpeg"
+VID_DIR = "video_tmp"
 PHONE_W, PHONE_H = 1080, 1920
-MONTHLY_PRICE = 980
-MONTHLY_POINTS = 2000
-REF_SITE = 10
-SIGNUP_POINTS = 20
-POINT_PACKS = [
-    {"points": 300, "yen": 300},
-    {"points": 900, "yen": 900},
-    {"points": 1500, "yen": 1500},
-    {"points": 3000, "yen": 3000},
-]
+MONTHLY_PRICE, MONTHLY_POINTS, REF_SITE, SIGNUP_POINTS = 980, 2000, 10, 20
+POINT_PACKS = [{"points": 300, "yen": 300}, {"points": 900, "yen": 900}, {"points": 1500, "yen": 1500}, {"points": 3000, "yen": 3000}]
 ANIMALS = ["🐱", "🐶", "🐰", "🐻", "🦊", "🐼", "🐸", "🦉", "🐧", "🐯"]
-LAYOUTS = {
-    "縦4": {"cols": 1, "count": 4}, "縦3": {"cols": 1, "count": 3}, "縦2": {"cols": 1, "count": 2},
-    "横4": {"cols": 4, "count": 4}, "横3": {"cols": 3, "count": 3}, "横2": {"cols": 2, "count": 2},
-    "2×2": {"cols": 2, "count": 4},
-}
+LAYOUTS = {"縦4": {"cols": 1, "count": 4}, "縦3": {"cols": 1, "count": 3}, "縦2": {"cols": 1, "count": 2}, "横4": {"cols": 4, "count": 4}, "横3": {"cols": 3, "count": 3}, "横2": {"cols": 2, "count": 2}, "2×2": {"cols": 2, "count": 4}}
 SIZES = {
     "横長": {"wh": (PHONE_W, PHONE_H // 4), "gen": (1216, 832), "cost": 0, "paid": False},
     "縦長": {"wh": (PHONE_H // 4, PHONE_W), "gen": (832, 1216), "cost": 0, "paid": False},
@@ -86,14 +75,12 @@ BUBBLE_TYPES = ["ふきだし", "叫び", "考え", "文字だけ"]
 TAILS = ["下", "下左", "下右", "左", "右"]
 TEXT_DIR = ["横書き", "縦書き"]
 FONT_SPECS = {
-    "ゴシック": {"file": "font_gothic.otf", "urls": [
-        "https://github.com/googlefonts/noto-cjk/raw/main/Sans/OTF/Japanese/NotoSansCJKjp-Regular.otf",
-        "https://cdn.jsdelivr.net/gh/notofonts/noto-cjk@main/Sans/OTF/Japanese/NotoSansCJKjp-Regular.otf",
-    ]},
+    "ゴシック": {"file": "font_gothic.otf", "urls": ["https://github.com/googlefonts/noto-cjk/raw/main/Sans/OTF/Japanese/NotoSansCJKjp-Regular.otf", "https://cdn.jsdelivr.net/gh/notofonts/noto-cjk@main/Sans/OTF/Japanese/NotoSansCJKjp-Regular.otf"]},
     "丸文字": {"file": "font_maru.ttf", "urls": ["https://cdn.jsdelivr.net/gh/google/fonts@main/ofl/kosugimaru/KosugiMaru-Regular.ttf"]},
     "かわいい": {"file": "font_kawaii.ttf", "urls": ["https://cdn.jsdelivr.net/gh/google/fonts@main/ofl/hachimarupop/HachiMaruPop-Regular.ttf"]},
     "手書き風": {"file": "font_te.ttf", "urls": ["https://cdn.jsdelivr.net/gh/google/fonts@main/ofl/yuseimagic/YuseiMagic-Regular.ttf"]},
 }
+os.makedirs(VID_DIR, exist_ok=True)
 
 def file_b64(path):
     if not os.path.exists(path):
@@ -120,13 +107,8 @@ def mail_domain_ok(m):
 def send_code_mail(to_addr, code):
     body = f"確認コード: {code}\nこのコードをサイトに入力してください。"
     if RESEND_API_KEY and MAIL_FROM:
-        res = requests.post(
-            "https://api.resend.com/emails",
-            headers={"Authorization": f"Bearer {RESEND_API_KEY}", "Content-Type": "application/json"},
-            json={"from": MAIL_FROM, "to": [to_addr], "subject": "panel AI. 登録確認", "text": body},
-            timeout=20,
-        )
-        return (res.status_code in (200, 201), res.text[:200])
+        res = requests.post("https://api.resend.com/emails", headers={"Authorization": f"Bearer {RESEND_API_KEY}", "Content-Type": "application/json"}, json={"from": MAIL_FROM, "to": [to_addr], "subject": "panel AI. 登録確認", "text": body}, timeout=20)
+        return res.status_code in (200, 201), res.text[:200]
     if SMTP_HOST and SMTP_USER and SMTP_PASS and MAIL_FROM:
         try:
             msg = MIMEText(body, "plain", "utf-8")
@@ -134,9 +116,7 @@ def send_code_mail(to_addr, code):
             msg["From"] = MAIL_FROM
             msg["To"] = to_addr
             with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=20) as s:
-                s.starttls()
-                s.login(SMTP_USER, SMTP_PASS)
-                s.sendmail(MAIL_FROM, [to_addr], msg.as_string())
+                s.starttls(); s.login(SMTP_USER, SMTP_PASS); s.sendmail(MAIL_FROM, [to_addr], msg.as_string())
             return True, ""
         except Exception as e:
             return False, str(e)
@@ -178,8 +158,7 @@ def download_one(path, urls):
                 with open(path, "wb") as f:
                     f.write(r.content)
                 try:
-                    ImageFont.truetype(path, 24)
-                    return True
+                    ImageFont.truetype(path, 24); return True
                 except Exception:
                     os.remove(path)
         except Exception:
@@ -209,8 +188,7 @@ def uri_to_image(uri):
         return None
     if uri.startswith("data:"):
         return Image.open(BytesIO(base64.b64decode(uri.split(",", 1)[1]))).convert("RGB")
-    res = requests.get(uri, timeout=90)
-    res.raise_for_status()
+    res = requests.get(uri, timeout=90); res.raise_for_status()
     return Image.open(BytesIO(res.content)).convert("RGB")
 
 def pad_ref(uri):
@@ -219,8 +197,7 @@ def pad_ref(uri):
     canvas = Image.new("RGB", (tw, th), (0, 0, 0))
     img.thumbnail((tw, th))
     canvas.paste(img, ((tw - img.width) // 2, (th - img.height) // 2))
-    buf = BytesIO()
-    canvas.save(buf, format="PNG")
+    buf = BytesIO(); canvas.save(buf, format="PNG")
     return base64.b64encode(buf.getvalue()).decode()
 
 def is_premium():
@@ -243,8 +220,15 @@ def save_user_state():
         users[name]["rank"] = "vip" if is_premium() else "ブロンズ"
         users[name]["icon"] = st.session_state.get("icon", "")
         users[name]["history"] = st.session_state.get("simple_history", [])[-30:]
+        users[name]["library"] = st.session_state.get("library", [])[-40:]
         save_json(USERS_FILE, users)
         save_json(DATA_FILE, {"characters": st.session_state.characters})
+
+def add_library(uri, label=""):
+    if not uri:
+        return
+    st.session_state.library.append({"id": str(uuid.uuid4())[:8], "url": uri, "label": label or "保存画像", "time": datetime.now().strftime("%m/%d %H:%M")})
+    save_user_state()
 
 def nai_wh(w, h):
     return max(64, min(1920, int(round(w / 64) * 64))), max(64, min(1920, int(round(h / 64) * 64)))
@@ -295,6 +279,53 @@ def nai_request(prompt, width, height, model, steps=23, scale=5.0, negative="", 
             last_err = f"{res.status_code}: {res.text[:400]}"
     raise Exception(last_err or "NovelAIの生成に失敗しました")
 
+def grok_image_to_video(image_uri, prompt, duration=6):
+    if not XAI_KEY:
+        raise Exception("XAI_API_KEY がありません")
+    if image_uri.startswith("data:"):
+        img_payload = {"url": image_uri}
+    else:
+        img_payload = {"url": image_uri}
+    headers = {"Authorization": f"Bearer {XAI_KEY}", "Content-Type": "application/json"}
+    payload = {"model": "grok-imagine-video-1.5", "prompt": prompt or "subtle natural motion, keep the same character and style", "image": img_payload, "duration": int(duration)}
+    res = requests.post("https://api.x.ai/v1/videos/generations", headers=headers, json=payload, timeout=240)
+    if res.status_code not in (200, 201, 202):
+        raise Exception(f"{res.status_code}: {res.text[:500]}")
+    data = res.json() if res.content else {}
+    video_url = data.get("url") or data.get("video_url") or (data.get("video") or {}).get("url") or data.get("data", [{}])[0].get("url") if isinstance(data.get("data"), list) else None
+    job = data.get("id") or data.get("request_id")
+    if not video_url and job:
+        for _ in range(40):
+            chk = requests.get(f"https://api.x.ai/v1/videos/generations/{job}", headers=headers, timeout=60)
+            if chk.status_code == 200:
+                d = chk.json()
+                video_url = d.get("url") or d.get("video_url") or (d.get("video") or {}).get("url")
+                if video_url:
+                    break
+            import time; time.sleep(3)
+    if not video_url:
+        raise Exception(f"動画URLが返りませんでした: {str(data)[:400]}")
+    raw = requests.get(video_url, timeout=180)
+    raw.raise_for_status()
+    path = os.path.join(VID_DIR, f"{uuid.uuid4().hex}.mp4")
+    with open(path, "wb") as f:
+        f.write(raw.content)
+    return path
+
+def concat_videos(paths, out_path):
+    lst = os.path.join(VID_DIR, f"{uuid.uuid4().hex}.txt")
+    with open(lst, "w", encoding="utf-8") as f:
+        for p in paths:
+            f.write(f"file '{os.path.abspath(p)}'\n")
+    cmd = ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", lst, "-c", "copy", out_path]
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    if r.returncode != 0 or not os.path.exists(out_path):
+        cmd = ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", lst, "-c:v", "libx264", "-pix_fmt", "yuv420p", out_path]
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        if r.returncode != 0:
+            raise Exception(r.stderr[-400:] if r.stderr else "結合に失敗しました")
+    return out_path
+
 def wrap_text(text, font, max_width):
     lines, line = [], ""
     for ch in text:
@@ -316,8 +347,7 @@ def wrap_text(text, font, max_width):
 def draw_text(draw, xy, text, font, fill, bold=0):
     x, y = xy
     if bold <= 0:
-        draw.text((x, y), text, font=font, fill=fill)
-        return
+        draw.text((x, y), text, font=font, fill=fill); return
     for dx in range(-bold, bold + 1):
         for dy in range(-bold, bold + 1):
             if dx or dy:
@@ -349,8 +379,7 @@ def draw_one_bubble(img, bub):
         box_w = int(text_w + pad * 2 + bold * 2)
         box_h = int(pad * 2 + int(size * 1.3) * len(lines) + bold * 2)
     if kind == "叫び":
-        box_w = int(box_w * 1.25)
-        box_h = int(box_h * 1.28)
+        box_w = int(box_w * 1.25); box_h = int(box_h * 1.28)
     extra = tail_size + 48
     layer = Image.new("RGBA", (box_w + extra * 2, box_h + extra * 2), (0, 0, 0, 0))
     draw = ImageDraw.Draw(layer)
@@ -391,7 +420,12 @@ def draw_one_bubble(img, bub):
     else:
         ty = y0 + pad - 2
         for line in lines:
-            draw_text(draw, (x0 + (box_w - (font.getlength(line) if hasattr(font, "getlength") else len(line) * size)) / 2 if kind == "叫び" else x0 + pad, ty), line, font, color, bold)
+            try:
+                lw = font.getlength(line)
+            except Exception:
+                lw = len(line) * size
+            tx = x0 + (box_w - lw) / 2 if kind == "叫び" else x0 + pad
+            draw_text(draw, (tx, ty), line, font, color, bold)
             ty += int(size * 1.3)
     angle = int(bub.get("angle", 0))
     if angle:
@@ -419,9 +453,7 @@ def combine_panels(images, cols=2):
     return canvas
 
 def image_to_bytes(img):
-    buf = BytesIO()
-    img.save(buf, format="PNG")
-    return buf.getvalue()
+    buf = BytesIO(); img.save(buf, format="PNG"); return buf.getvalue()
 
 def char_label(ch):
     return ch.get("save_name") or ch.get("name") or "無名"
@@ -454,6 +486,7 @@ def apply_login(name, data):
     st.session_state.points = int(data.get("points", 0))
     st.session_state.premium_until = data.get("premium_until", "")
     st.session_state.simple_history = data.get("history", [])
+    st.session_state.library = data.get("library", [])
 
 prepare_fonts()
 usable_fonts = [k for k, ok in prepare_fonts().items() if ok] or ["ゴシック"]
@@ -465,7 +498,8 @@ defaults = {
     "error": "", "busy_index": None, "combined": None, "points": 0, "premium_until": "",
     "simple_image": None, "simple_busy": False, "simple_history": [], "show_history": False,
     "hist_pick": None, "sq": "", "sb": "", "so": "", "sn": "", "schars": [""],
-    "icon": random.choice(ANIMALS), "email": "", "pending": None,
+    "icon": random.choice(ANIMALS), "email": "", "pending": None, "library": [],
+    "video_src": None, "video_out": None, "v4_clips": [None] * 4, "v4_prompts": ["", "", "", ""], "v4_joined": None, "vbusy": None,
 }
 for k, v in defaults.items():
     if k not in st.session_state:
@@ -477,14 +511,12 @@ qs = st.query_params
 if st.session_state.logged_in and qs.get("checkout") == "success":
     st.session_state.premium_until = (datetime.now() + timedelta(days=30)).isoformat()
     st.session_state.points = int(st.session_state.points) + MONTHLY_POINTS
-    save_user_state()
-    st.query_params.clear()
+    save_user_state(); st.query_params.clear()
 if st.session_state.logged_in and qs.get("buypoints"):
     try:
         add = int(str(qs.get("buypoints")))
         if add in [p["points"] for p in POINT_PACKS]:
-            st.session_state.points = int(st.session_state.points) + add
-            save_user_state()
+            st.session_state.points = int(st.session_state.points) + add; save_user_state()
     except Exception:
         pass
     st.query_params.clear()
@@ -523,8 +555,7 @@ with st.sidebar:
         if st.button("アイコン変更", use_container_width=True):
             st.session_state.page = "icon"; st.rerun()
         if st.button("ログアウト", use_container_width=True):
-            st.session_state.logged_in = False
-            st.session_state.page = "home"; st.rerun()
+            st.session_state.logged_in = False; st.session_state.page = "home"; st.rerun()
     else:
         if st.button("登録", use_container_width=True):
             st.session_state.page = "register"; st.rerun()
@@ -532,7 +563,7 @@ with st.sidebar:
             st.session_state.page = "register"; st.rerun()
     st.write(f"ポイント {st.session_state.points}")
     st.write(f"会員 {member_label() if st.session_state.logged_in else '未登録'}")
-    for label, page in [("画像生成モード", "simple"), ("セット", "chars"), ("4コマ", "make"), ("ポイント購入", "shop"), ("説明書", "help"), ("月額登録", "plan"), ("お問い合わせ", "contact")]:
+    for label, page in [("画像生成モード", "simple"), ("セット", "chars"), ("4コマ", "make"), ("保存庫", "lib"), ("動画生成", "video"), ("4コマ動画", "v4"), ("ポイント購入", "shop"), ("説明書", "help"), ("月額登録", "plan"), ("お問い合わせ", "contact")]:
         if st.button(label, use_container_width=True):
             st.session_state.page = page; st.rerun()
 
@@ -546,7 +577,106 @@ if st.session_state.page == "help":
     <h2>画像生成モード</h2><p>ポイントを消費して画像生成<br>日本語で作成可能<br>おすすめ</p>
     <h2>セット</h2><p>絵柄の登録<br>キャラの登録<br>登録したら4コマ画像生成の時、絵柄、キャラが反映される</p>
     <h2>4コマ</h2><p>セット絵柄、キャラを使えて画像生成して、会話、吹き出しをつけれるよ！<br>最後に合体させて4コマ完成！</p>
+    <h2>動画</h2><p>保存庫の画像かアップロードした画像を動画にできます。4コマ動画は1コマずつ作って最後にまとめます。今はテストのためポイント消費なし。</p>
     <h2>月額登録</h2><p>セット機能開放<br>サイズの変更開放<br>ポイント付与</p></div>""", unsafe_allow_html=True)
+    show_ad()
+
+elif st.session_state.page == "lib":
+    st.subheader("保存庫")
+    if not st.session_state.library:
+        st.write("まだありません。画像生成や4コマで「保存庫に入れる」を押してください。")
+    for i, item in enumerate(reversed(st.session_state.library)):
+        st.image(item["url"], width=160)
+        st.caption(f"{item.get('label','')} {item.get('time','')}")
+        a, b = st.columns(2)
+        with a:
+            if st.button("動画にする", key=f"libv_{i}"):
+                st.session_state.video_src = item["url"]; st.session_state.page = "video"; st.rerun()
+        with b:
+            if st.button("消す", key=f"libd_{i}"):
+                real = len(st.session_state.library) - 1 - i
+                st.session_state.library.pop(real); save_user_state(); st.rerun()
+    show_ad()
+
+elif st.session_state.page == "video":
+    st.subheader("動画生成")
+    st.caption("テスト中のためポイント消費なし")
+    up = st.file_uploader("画像をアップロード", type=["png", "jpg", "jpeg"])
+    if up:
+        st.session_state.video_src = uploaded_to_uri(up)
+    if st.session_state.library:
+        picks = [f"{x.get('time','')} {x.get('label','')}" for x in st.session_state.library]
+        sel = st.selectbox("保存庫から選ぶ", ["選ばない"] + picks)
+        if sel != "選ばない":
+            st.session_state.video_src = st.session_state.library[picks.index(sel)]["url"]
+    if st.session_state.video_src:
+        st.image(st.session_state.video_src, width=240)
+    motion = st.text_area("動きの内容", placeholder="ゆっくり瞬きする、髪が少し揺れる")
+    dur = st.slider("秒数", 3, 10, 6)
+    if st.button("動画にする", type="primary"):
+        if not st.session_state.video_src:
+            st.session_state.error = "画像を選んでください"
+        else:
+            try:
+                st.info("生成中...")
+                path = grok_image_to_video(st.session_state.video_src, motion, dur)
+                st.session_state.video_out = path
+                st.session_state.error = ""
+            except Exception as e:
+                st.session_state.error = str(e)
+            st.rerun()
+    if st.session_state.video_out and os.path.exists(st.session_state.video_out):
+        st.video(st.session_state.video_out)
+        with open(st.session_state.video_out, "rb") as f:
+            st.download_button("動画を保存", data=f.read(), file_name="video.mp4", mime="video/mp4")
+    show_ad()
+
+elif st.session_state.page == "v4":
+    st.subheader("4コマ動画")
+    st.caption("1コマずつ動画にして、最後にまとめます。テスト中はポイントなし")
+    for i in range(4):
+        with st.expander(f"コマ {i+1}", expanded=True):
+            src = st.session_state.panel_images[i]
+            if st.session_state.library:
+                picks = ["今の4コマ画像"] + [f"{x.get('time','')} {x.get('label','')}" for x in st.session_state.library]
+                sel = st.selectbox("画像", picks, key=f"v4s_{i}")
+                if sel != "今の4コマ画像":
+                    src = st.session_state.library[picks.index(sel) - 1]["url"]
+            up = st.file_uploader("アップロード", type=["png", "jpg", "jpeg"], key=f"v4u_{i}")
+            if up:
+                src = uploaded_to_uri(up)
+            if src:
+                st.image(src, width=180)
+            st.session_state.v4_prompts[i] = st.text_input("動き", value=st.session_state.v4_prompts[i], key=f"v4p_{i}")
+            if st.button("このコマを動画にする", key=f"v4g_{i}"):
+                if not src:
+                    st.session_state.error = "画像がありません"
+                else:
+                    try:
+                        st.info(f"コマ{i+1} 生成中...")
+                        st.session_state.v4_clips[i] = grok_image_to_video(src, st.session_state.v4_prompts[i], 5)
+                        st.session_state.error = ""
+                    except Exception as e:
+                        st.session_state.error = str(e)
+                    st.rerun()
+            if st.session_state.v4_clips[i] and os.path.exists(st.session_state.v4_clips[i]):
+                st.video(st.session_state.v4_clips[i])
+    if st.button("4本を1本にまとめる", type="primary"):
+        clips = [p for p in st.session_state.v4_clips if p and os.path.exists(p)]
+        if len(clips) < 2:
+            st.session_state.error = "2本以上必要です"
+        else:
+            try:
+                out = os.path.join(VID_DIR, f"join_{uuid.uuid4().hex}.mp4")
+                st.session_state.v4_joined = concat_videos(clips, out)
+                st.session_state.error = ""
+            except Exception as e:
+                st.session_state.error = str(e)
+            st.rerun()
+    if st.session_state.v4_joined and os.path.exists(st.session_state.v4_joined):
+        st.video(st.session_state.v4_joined)
+        with open(st.session_state.v4_joined, "rb") as f:
+            st.download_button("まとめた動画を保存", data=f.read(), file_name="yonkoma.mp4", mime="video/mp4")
     show_ad()
 
 elif st.session_state.page == "icon":
@@ -565,7 +695,6 @@ elif st.session_state.page == "icon":
 elif st.session_state.page == "shop":
     st.subheader("ポイント購入")
     st.write("1ポイント = 1円")
-    st.caption("月額は980円で2000ポイントです。単発より得です。")
     if not st.session_state.logged_in:
         st.warning("購入にはログインが必要です。")
     elif stripe is None or not STRIPE_SECRET_KEY:
@@ -574,17 +703,11 @@ elif st.session_state.page == "shop":
         for pack in POINT_PACKS:
             c1, c2 = st.columns([3, 2])
             with c1:
-                st.write(f"**{pack['points']}ポイント**"); st.caption(f"{pack['yen']}円")
+                st.write(f"**{pack['points']}ポイント**")
             with c2:
                 if st.button(f"{pack['yen']}円で買う", key=f"buy_{pack['points']}"):
                     try:
-                        session = stripe.checkout.Session.create(
-                            mode="payment",
-                            line_items=[{"price_data": {"currency": "jpy", "unit_amount": pack["yen"], "product_data": {"name": f"{pack['points']}ポイント"}}, "quantity": 1}],
-                            success_url=f"{SITE_URL}/?buypoints={pack['points']}",
-                            cancel_url=f"{SITE_URL}/?buypoints=cancel",
-                            client_reference_id=st.session_state.get("username", ""),
-                        )
+                        session = stripe.checkout.Session.create(mode="payment", line_items=[{"price_data": {"currency": "jpy", "unit_amount": pack["yen"], "product_data": {"name": f"{pack['points']}ポイント"}}, "quantity": 1}], success_url=f"{SITE_URL}/?buypoints={pack['points']}", cancel_url=f"{SITE_URL}/?buypoints=cancel", client_reference_id=st.session_state.get("username", ""))
                         st.markdown(f"[決済ページへ進む]({session.url})")
                     except Exception as e:
                         st.error(str(e))
@@ -617,7 +740,7 @@ elif st.session_state.page == "register":
                 st.error(f"メールを送れませんでした: {err}")
             else:
                 st.session_state.pending = {"name": name, "email": norm_mail(mail), "password": hash_password(pw), "icon": uploaded_to_uri(icon_up) if icon_up else random.choice(ANIMALS), "code": code}
-                st.success("確認コードを送りました。メールを見てください。")
+                st.success("確認コードを送りました。")
     if st.session_state.pending:
         code_in = st.text_input("確認コード")
         if st.button("登録する", type="primary"):
@@ -628,11 +751,10 @@ elif st.session_state.page == "register":
             elif email_taken(users, p["email"]) or p["name"] in users:
                 st.error("すでに登録されています")
             else:
-                users[p["name"]] = {"password": p["password"], "email": p["email"], "icon": p["icon"], "characters": [], "points": SIGNUP_POINTS, "premium_until": "", "rank": "ブロンズ", "history": []}
+                users[p["name"]] = {"password": p["password"], "email": p["email"], "icon": p["icon"], "characters": [], "points": SIGNUP_POINTS, "premium_until": "", "rank": "ブロンズ", "history": [], "library": []}
                 save_json(USERS_FILE, users)
                 apply_login(p["name"], users[p["name"]])
-                st.session_state.pending = None
-                st.session_state.page = "simple"; st.rerun()
+                st.session_state.pending = None; st.session_state.page = "simple"; st.rerun()
     st.write("ログイン")
     lu = st.text_input("メールまたはユーザーネーム", key="lu")
     lp = st.text_input("ログイン用パスワード", type="password", key="lp")
@@ -646,28 +768,18 @@ elif st.session_state.page == "register":
     show_ad()
 
 elif st.session_state.page == "contact":
-    st.subheader("お問い合わせ")
-    st.write("広告や不具合は、あとから載せる連絡先へどうぞ。")
-    show_ad()
+    st.subheader("お問い合わせ"); st.write("広告や不具合は、あとから載せる連絡先へどうぞ。"); show_ad()
 
 elif st.session_state.page == "plan":
     st.subheader("月額登録")
     st.write(f"**{MONTHLY_PRICE}円 / 30日**")
-    st.write(f"- {MONTHLY_POINTS}ポイント付与")
-    st.write("- 会員状態 VIP")
     if is_premium():
         st.success(f"VIPです。期限 {str(st.session_state.premium_until)[:10]}")
     elif stripe is None or not STRIPE_SECRET_KEY or not STRIPE_PRICE_ID:
         st.error("決済設定がまだです。")
     elif st.button(f"{MONTHLY_PRICE}円で登録する", type="primary"):
         try:
-            session = stripe.checkout.Session.create(
-                mode="subscription",
-                line_items=[{"price": STRIPE_PRICE_ID, "quantity": 1}],
-                success_url=f"{SITE_URL}/?checkout=success",
-                cancel_url=f"{SITE_URL}/?checkout=cancel",
-                client_reference_id=st.session_state.get("username", ""),
-            )
+            session = stripe.checkout.Session.create(mode="subscription", line_items=[{"price": STRIPE_PRICE_ID, "quantity": 1}], success_url=f"{SITE_URL}/?checkout=success", cancel_url=f"{SITE_URL}/?checkout=cancel", client_reference_id=st.session_state.get("username", ""))
             st.markdown(f"[決済ページへ進む]({session.url})")
         except Exception as e:
             st.error(str(e))
@@ -683,13 +795,11 @@ elif st.session_state.page == "chars":
     if use_type != "絵柄だけ":
         char_files = st.file_uploader("キャラ（最大3）", type=["png", "jpg", "jpeg"], accept_multiple_files=True, key="char_ups")
         for i, f in enumerate((char_files or [])[:3]):
-            st.image(f, width=110)
-            char_strengths.append(st.slider(f"キャラ強度{i+1}", 1, 10, 8, key=f"cs_{i}"))
+            st.image(f, width=110); char_strengths.append(st.slider(f"キャラ強度{i+1}", 1, 10, 8, key=f"cs_{i}"))
     if use_type != "キャラだけ":
         style_files = st.file_uploader("絵柄（最大3）", type=["png", "jpg", "jpeg"], accept_multiple_files=True, key="style_ups")
         for i, f in enumerate((style_files or [])[:3]):
-            st.image(f, width=110)
-            style_strengths.append(st.slider(f"絵柄強度{i+1}", 1, 10, 8, key=f"ss_{i}"))
+            st.image(f, width=110); style_strengths.append(st.slider(f"絵柄強度{i+1}", 1, 10, 8, key=f"ss_{i}"))
     if st.button("保存", type="primary"):
         chars = [{"uri": uploaded_to_uri(f), "strength": char_strengths[i]} for i, f in enumerate((char_files or [])[:3])]
         styles = [{"uri": uploaded_to_uri(f), "strength": style_strengths[i]} for i, f in enumerate((style_files or [])[:3])]
@@ -697,7 +807,7 @@ elif st.session_state.page == "chars":
             st.warning("画像を入れてください")
         else:
             st.session_state.characters.append({"id": str(uuid.uuid4())[:8], "save_name": save_name.strip() or f"セット{len(st.session_state.characters)+1}", "kind": use_type, "chars": chars, "styles": styles})
-            save_user_state(); st.success("保存しました"); st.rerun()
+            save_user_state(); st.rerun()
     for i, ch in enumerate(st.session_state.characters):
         c1, c2 = st.columns([4, 1])
         with c1:
@@ -714,8 +824,6 @@ elif st.session_state.page == "simple":
     if st.session_state.show_history:
         if st.button("戻る"):
             st.session_state.show_history = False; st.session_state.hist_pick = None; st.rerun()
-        if not st.session_state.simple_history:
-            st.write("まだありません")
         for hi, item in enumerate(reversed(st.session_state.simple_history)):
             st.image(item["url"], width=160)
             if st.button("この画像", key=f"hpick_{hi}"):
@@ -726,14 +834,11 @@ elif st.session_state.page == "simple":
             with a:
                 if st.button("はい"):
                     item = st.session_state.hist_pick
-                    st.session_state.sq = item.get("quality", "")
-                    st.session_state.sb = item.get("background", "")
-                    st.session_state.so = item.get("other", "")
-                    st.session_state.sn = item.get("negative", "")
+                    st.session_state.sq = item.get("quality", ""); st.session_state.sb = item.get("background", "")
+                    st.session_state.so = item.get("other", ""); st.session_state.sn = item.get("negative", "")
                     st.session_state.schars = item.get("chars") or [""]
                     st.session_state.simple_image = item.get("url")
-                    st.session_state.hist_pick = None
-                    st.session_state.show_history = False; st.rerun()
+                    st.session_state.hist_pick = None; st.session_state.show_history = False; st.rerun()
             with b:
                 if st.button("いいえ"):
                     st.session_state.hist_pick = None; st.rerun()
@@ -775,8 +880,7 @@ elif st.session_state.page == "simple":
                 img = nai_request(", ".join(parts), w, h, "nai-diffusion-5-full", steps=20, scale=scale, negative=st.session_state.sn.strip(), char_texts=chars)
                 st.session_state.simple_image = img
                 st.session_state.simple_history.append({"url": img, "quality": st.session_state.sq, "background": st.session_state.sb, "chars": list(st.session_state.schars), "other": st.session_state.so, "negative": st.session_state.sn, "size": size_name, "scale": scale})
-                st.session_state.points -= cost
-                save_user_state(); st.session_state.error = ""
+                st.session_state.points -= cost; save_user_state(); st.session_state.error = ""
             except Exception as e:
                 st.session_state.error = str(e)
         st.rerun()
@@ -784,6 +888,10 @@ elif st.session_state.page == "simple":
         st.image(st.session_state.simple_image, use_container_width=True)
         raw = uri_to_image(st.session_state.simple_image)
         st.download_button("PNG保存", data=image_to_bytes(raw), file_name="simple.png", mime="image/png")
+        if st.button("保存庫に入れる"):
+            add_library(st.session_state.simple_image, "画像生成"); st.success("入れました")
+        if st.button("この画像を動画にする"):
+            st.session_state.video_src = st.session_state.simple_image; st.session_state.page = "video"; st.rerun()
     show_ad()
 
 else:
@@ -819,8 +927,7 @@ else:
         st.session_state.panel_images[i] = nai_request(scene, gw, gh, "nai-diffusion-4-5-full", steps=23, scale=5.0, char_refs=chars, style_refs=styles)
         st.session_state.panel_sizes[i] = spec["wh"]
         if cost > 0:
-            st.session_state.points -= cost
-            save_user_state()
+            st.session_state.points -= cost; save_user_state()
 
     for i in range(n):
         with st.expander(f"コマ {i+1}", expanded=True):
@@ -838,13 +945,16 @@ else:
             curc = st.session_state.scene_chars[i]
             idx = options.index(curc) if curc in options else 0
             st.session_state.scene_chars[i] = st.selectbox("セット", options, index=idx, key=f"ch_{i}")
-            c1, c2 = st.columns(2)
+            c1, c2, c3 = st.columns(3)
             with c1:
                 if st.button("生成", key=f"gen_{i}", type="primary"):
                     st.session_state.error = ""; st.session_state.busy_index = i; st.rerun()
             with c2:
                 if st.button("消す", key=f"clr_{i}"):
                     st.session_state.panel_images[i] = None; st.session_state.panel_bubbles[i] = []; st.rerun()
+            with c3:
+                if st.session_state.panel_images[i] and st.button("保存庫へ", key=f"sv_{i}"):
+                    add_library(st.session_state.panel_images[i], f"4コマ{i+1}"); st.success("入れました")
             if st.session_state.panel_images[i]:
                 draft = st.session_state.drafts[i]
                 draft["text"] = st.text_input("新しいセリフ", value=draft.get("text", ""), key=f"bt_{i}")
@@ -865,8 +975,7 @@ else:
                 draft["color"] = st.color_picker("文字色", draft.get("color", "#111111"), key=f"bc_{i}")
                 st.session_state.drafts[i] = draft
                 if st.button("このセリフを追加", key=f"addb_{i}") and draft["text"].strip():
-                    st.session_state.panel_bubbles[i].append(dict(draft))
-                    st.session_state.drafts[i] = empty_bubble(); st.rerun()
+                    st.session_state.panel_bubbles[i].append(dict(draft)); st.session_state.drafts[i] = empty_bubble(); st.rerun()
                 for bi, bb in enumerate(st.session_state.panel_bubbles[i]):
                     k1, k2 = st.columns([5, 1])
                     with k1:
@@ -885,12 +994,10 @@ else:
         st.session_state.busy_index = None
         st.info(f"コマ{i+1} 生成中...")
         try:
-            make_one(i)
-            st.session_state.error = ""
+            make_one(i); st.session_state.error = ""
         except Exception as e:
             st.session_state.error = str(e)
         st.rerun()
-    st.markdown("---")
     if st.button("1枚にまとめる", type="primary"):
         panels = []
         for i in range(n):
@@ -903,4 +1010,8 @@ else:
     if st.session_state.combined is not None:
         st.image(st.session_state.combined, use_container_width=True)
         st.download_button("PNG保存", data=image_to_bytes(st.session_state.combined), file_name="yonkoma.png", mime="image/png")
+        if st.button("まとめた画像を保存庫へ"):
+            buf = BytesIO(); st.session_state.combined.save(buf, format="PNG")
+            add_library("data:image/png;base64," + base64.b64encode(buf.getvalue()).decode(), "4コマまとめ")
+            st.success("入れました")
     show_ad()
