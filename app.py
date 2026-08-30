@@ -322,23 +322,16 @@ def concat_videos(paths, out_path):
             raise Exception(r.stderr[-400:] if r.stderr else "結合に失敗しました")
     return out_path
 
-def even(n):
-    n = int(n)
-    return n if n % 2 == 0 else n - 1
-
 def compose_yonkoma_video(paths, layout_key="2×2", out_path="out.mp4"):
     n = len(paths)
     if n < 2:
         raise Exception("2本以上必要です")
     if layout_key.startswith("横"):
-        cols, rows = n, 1
-        cw, ch = even(PHONE_H // n), even(PHONE_W)
+        cols, rows, cw, ch = n, 1, 480, 480
     elif layout_key == "2×2":
-        cols, rows = 2, 2
-        cw, ch = even(PHONE_W // 2), even(PHONE_H // 2)
+        cols, rows, cw, ch = 2, 2, 640, 640
     else:
-        cols, rows = 1, n
-        cw, ch = even(PHONE_W), even(PHONE_H // n)
+        cols, rows, cw, ch = 1, n, 720, 400
     ins = []
     for p in paths:
         ins += ["-i", p]
@@ -534,7 +527,7 @@ defaults = {
     "hist_pick": None, "sq": "", "sb": "", "so": "", "sn": "", "schars": [""],
     "icon": random.choice(ANIMALS), "email": "", "pending": None, "library": [],
     "video_src": None, "video_out": None, "v4_clips": [None] * 4, "v4_prompts": ["", "", "", ""],
-    "v4_durs": [5, 5, 5, 5], "v4_count": 4, "v4_layout": "縦4", "v4_play": "同時に動く", "v4_joined": None,
+    "v4_durs": [5, 5, 5, 5], "v4_count": 4, "v4_layout": "2×2", "v4_play": "同時に動く", "v4_joined": None,
 }
 for k, v in defaults.items():
     if k not in st.session_state:
@@ -612,7 +605,7 @@ if st.session_state.page == "help":
     <h2>画像生成モード</h2><p>ポイントを消費して画像生成<br>日本語で作成可能<br>おすすめ</p>
     <h2>セット</h2><p>絵柄の登録<br>キャラの登録<br>登録したら4コマ画像生成の時、絵柄、キャラが反映される</p>
     <h2>4コマ</h2><p>セット絵柄、キャラを使えて画像生成して、会話、吹き出しをつけれるよ！<br>最後に合体させて4コマ完成！</p>
-    <h2>動画</h2><p>保存庫の画像かアップロードした画像を動画にできます。2〜4コマを同時再生か順番再生でまとめられます。まとめた動画はスマホサイズです。</p>
+    <h2>動画</h2><p>保存庫の画像かアップロードした画像を動画にできます。2〜4コマを同時再生か順番再生でまとめられます。</p>
     <h2>月額登録</h2><p>セット機能開放<br>サイズの変更開放<br>ポイント付与</p></div>""", unsafe_allow_html=True)
     show_ad()
 
@@ -666,7 +659,7 @@ elif st.session_state.page == "video":
 
 elif st.session_state.page == "v4":
     st.subheader("4コマ動画")
-    st.caption("まとめるとスマホサイズ（1080×1920）を2・3・4分割します")
+    st.caption("アップロードした画像から動画を作り、縦・横・2×2でまとめます")
     st.session_state.v4_count = st.radio("コマ数", [2, 3, 4], index=[2, 3, 4].index(int(st.session_state.v4_count)), horizontal=True)
     n = int(st.session_state.v4_count)
     layout_opts = {2: ["縦2", "横2"], 3: ["縦3", "横3"], 4: ["縦4", "横4", "2×2"]}[n]
