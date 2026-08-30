@@ -12,7 +12,7 @@ import re
 import socket
 import smtplib
 import subprocess
-import tempfile
+import time
 import requests
 from email.mime.text import MIMEText
 from io import BytesIO
@@ -282,29 +282,39 @@ def nai_request(prompt, width, height, model, steps=23, scale=5.0, negative="", 
 def grok_image_to_video(image_uri, prompt, duration=6):
     if not XAI_KEY:
         raise Exception("XAI_API_KEY がありません")
-    if image_uri.startswith("data:"):
-        img_payload = {"url": image_uri}
-    else:
-        img_payload = {"url": image_uri}
     headers = {"Authorization": f"Bearer {XAI_KEY}", "Content-Type": "application/json"}
-    payload = {"model": "grok-imagine-video-1.5", "prompt": prompt or "subtle natural motion, keep the same character and style", "image": img_payload, "duration": int(duration)}
-    res = requests.post("https://api.x.ai/v1/videos/generations", headers=headers, json=payload, timeout=240)
+    payload = {
+        "model": "grok-imagine-video-1.5",
+        "prompt": prompt or "subtle natural motion, keep the same character and style",
+        "image": {"url": image_uri},
+        "duration": int(duration),
+        "resolution": "720p",
+    }
+    res = requests.post("https://api.x.ai/v1/videos/generations", headers=headers, json=payload, timeout=60)
     if res.status_code not in (200, 201, 202):
         raise Exception(f"{res.status_code}: {res.text[:500]}")
-    data = res.json() if res.content else {}
-    video_url = data.get("url") or data.get("video_url") or (data.get("video") or {}).get("url") or data.get("data", [{}])[0].get("url") if isinstance(data.get("data"), list) else None
-    job = data.get("id") or data.get("request_id")
-    if not video_url and job:
-        for _ in range(40):
-            chk = requests.get(f"https://api.x.ai/v1/videos/generations/{job}", headers=headers, timeout=60)
-            if chk.status_code == 200:
-                d = chk.json()
-                video_url = d.get("url") or d.get("video_url") or (d.get("video") or {}).get("url")
-                if video_url:
-                    break
-            import time; time.sleep(3)
+    data = res.json()
+    request_id = data.get("request_id") or data.get("id")
+    if not request_id:
+        raise Exception(f"request_idがありません: {str(data)[:400]}")
+    video_url = None
+    last = ""
+    for _ in range(60):
+        chk = requests.get(f"https://api.x.ai/v1/videos/{request_id}", headers={"Authorization": headers["Authorization"]}, timeout=30)
+        last = chk.text[:400]
+        if chk.status_code != 200:
+            time.sleep(3)
+            continue
+        d = chk.json()
+        status = d.get("status")
+        if status == "done":
+            video_url = (d.get("video") or {}).get("url") or d.get("url")
+            break
+        if status in ("failed", "expired"):
+            raise Exception(f"生成失敗: {last}")
+        time.sleep(3)
     if not video_url:
-        raise Exception(f"動画URLが返りませんでした: {str(data)[:400]}")
+        raise Exception(f"時間切れです: {last}")
     raw = requests.get(video_url, timeout=180)
     raw.raise_for_status()
     path = os.path.join(VID_DIR, f"{uuid.uuid4().hex}.mp4")
@@ -499,7 +509,7 @@ defaults = {
     "simple_image": None, "simple_busy": False, "simple_history": [], "show_history": False,
     "hist_pick": None, "sq": "", "sb": "", "so": "", "sn": "", "schars": [""],
     "icon": random.choice(ANIMALS), "email": "", "pending": None, "library": [],
-    "video_src": None, "video_out": None, "v4_clips": [None] * 4, "v4_prompts": ["", "", "", ""], "v4_joined": None, "vbusy": None,
+    "video_src": None, "video_out": None, "v4_clips": [None] * 4, "v4_prompts": ["", "", "", ""], "v4_joined": None,
 }
 for k, v in defaults.items():
     if k not in st.session_state:
@@ -600,7 +610,7 @@ elif st.session_state.page == "lib":
 
 elif st.session_state.page == "video":
     st.subheader("動画生成")
-    st.caption("テスト中のためポイント消費なし")
+    st.caption("テスト中のためポイント消費なし。最新モデル grok-imagine-video-1.5")
     up = st.file_uploader("画像をアップロード", type=["png", "jpg", "jpeg"])
     if up:
         st.session_state.video_src = uploaded_to_uri(up)
@@ -618,7 +628,7 @@ elif st.session_state.page == "video":
             st.session_state.error = "画像を選んでください"
         else:
             try:
-                st.info("生成中...")
+                st.info("生成中... 20〜60秒かかることがあります")
                 path = grok_image_to_video(st.session_state.video_src, motion, dur)
                 st.session_state.video_out = path
                 st.session_state.error = ""
@@ -653,7 +663,7 @@ elif st.session_state.page == "v4":
                     st.session_state.error = "画像がありません"
                 else:
                     try:
-                        st.info(f"コマ{i+1} 生成中...")
+                        st.info(f"コマ{i+1} 生成中... 20〜60秒かかることがあります")
                         st.session_state.v4_clips[i] = grok_image_to_video(src, st.session_state.v4_prompts[i], 5)
                         st.session_state.error = ""
                     except Exception as e:
