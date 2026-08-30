@@ -281,13 +281,7 @@ def grok_image_to_video(image_uri, prompt, duration=6):
     if not XAI_KEY:
         raise Exception("XAI_API_KEY がありません")
     headers = {"Authorization": f"Bearer {XAI_KEY}", "Content-Type": "application/json"}
-    payload = {
-        "model": "grok-imagine-video-1.5",
-        "prompt": prompt or "subtle natural motion, keep the same character and style",
-        "image": {"url": image_uri},
-        "duration": int(duration),
-        "resolution": "720p",
-    }
+    payload = {"model": "grok-imagine-video-1.5", "prompt": prompt or "subtle natural motion, keep the same character and style", "image": {"url": image_uri}, "duration": int(duration), "resolution": "720p"}
     res = requests.post("https://api.x.ai/v1/videos/generations", headers=headers, json=payload, timeout=60)
     if res.status_code not in (200, 201, 202):
         raise Exception(f"{res.status_code}: {res.text[:500]}")
@@ -328,22 +322,32 @@ def concat_videos(paths, out_path):
             raise Exception(r.stderr[-400:] if r.stderr else "結合に失敗しました")
     return out_path
 
+def even(n):
+    n = int(n)
+    return n if n % 2 == 0 else n - 1
+
 def compose_yonkoma_video(paths, layout_key="2×2", out_path="out.mp4"):
     n = len(paths)
     if n < 2:
         raise Exception("2本以上必要です")
     if layout_key.startswith("横"):
-        cols, rows, cw, ch = n, 1, 480, 480
+        cols, rows = n, 1
+        cw, ch = even(PHONE_H // n), even(PHONE_W)
     elif layout_key == "2×2":
-        cols, rows, cw, ch = 2, 2, 640, 640
+        cols, rows = 2, 2
+        cw, ch = even(PHONE_W // 2), even(PHONE_H // 2)
     else:
-        cols, rows, cw, ch = 1, n, 720, 405
+        cols, rows = 1, n
+        cw, ch = even(PHONE_W), even(PHONE_H // n)
     ins = []
     for p in paths:
         ins += ["-i", p]
     parts, labels = [], []
     for i in range(n):
-        parts.append(f"[{i}:v]scale={cw}:{ch}:force_original_aspect_ratio=decrease,pad={cw}:{ch}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=24[v{i}]")
+        parts.append(
+            f"[{i}:v]fps=24,scale={cw}:{ch}:force_original_aspect_ratio=decrease:force_divisible_by=2,"
+            f"pad={cw}:{ch}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,format=yuv420p[v{i}]"
+        )
         labels.append(f"[v{i}]")
     if cols == 1:
         filt = ";".join(parts) + ";" + "".join(labels) + f"vstack=inputs={n}[out]"
@@ -530,7 +534,7 @@ defaults = {
     "hist_pick": None, "sq": "", "sb": "", "so": "", "sn": "", "schars": [""],
     "icon": random.choice(ANIMALS), "email": "", "pending": None, "library": [],
     "video_src": None, "video_out": None, "v4_clips": [None] * 4, "v4_prompts": ["", "", "", ""],
-    "v4_durs": [5, 5, 5, 5], "v4_count": 4, "v4_layout": "2×2", "v4_play": "同時に動く", "v4_joined": None,
+    "v4_durs": [5, 5, 5, 5], "v4_count": 4, "v4_layout": "縦4", "v4_play": "同時に動く", "v4_joined": None,
 }
 for k, v in defaults.items():
     if k not in st.session_state:
@@ -608,14 +612,14 @@ if st.session_state.page == "help":
     <h2>画像生成モード</h2><p>ポイントを消費して画像生成<br>日本語で作成可能<br>おすすめ</p>
     <h2>セット</h2><p>絵柄の登録<br>キャラの登録<br>登録したら4コマ画像生成の時、絵柄、キャラが反映される</p>
     <h2>4コマ</h2><p>セット絵柄、キャラを使えて画像生成して、会話、吹き出しをつけれるよ！<br>最後に合体させて4コマ完成！</p>
-    <h2>動画</h2><p>保存庫の画像かアップロードした画像を動画にできます。2〜4コマを同時再生か順番再生でまとめられます。今はテストのためポイント消費なし。</p>
+    <h2>動画</h2><p>保存庫の画像かアップロードした画像を動画にできます。2〜4コマを同時再生か順番再生でまとめられます。まとめた動画はスマホサイズです。</p>
     <h2>月額登録</h2><p>セット機能開放<br>サイズの変更開放<br>ポイント付与</p></div>""", unsafe_allow_html=True)
     show_ad()
 
 elif st.session_state.page == "lib":
     st.subheader("保存庫")
     if not st.session_state.library:
-        st.write("まだありません。画像生成や4コマで「保存庫に入れる」を押してください。")
+        st.write("まだありません。")
     for i, item in enumerate(reversed(st.session_state.library)):
         st.image(item["url"], width=160)
         st.caption(f"{item.get('label','')} {item.get('time','')}")
@@ -630,7 +634,7 @@ elif st.session_state.page == "lib":
 
 elif st.session_state.page == "video":
     st.subheader("動画生成")
-    st.caption("テスト中のためポイント消費なし。最新モデル grok-imagine-video-1.5")
+    st.caption("テスト中のためポイント消費なし")
     up = st.file_uploader("画像をアップロード", type=["png", "jpg", "jpeg"])
     if up:
         st.session_state.video_src = uploaded_to_uri(up)
@@ -641,7 +645,7 @@ elif st.session_state.page == "video":
             st.session_state.video_src = st.session_state.library[picks.index(sel)]["url"]
     if st.session_state.video_src:
         st.image(st.session_state.video_src, width=240)
-    motion = st.text_area("動きの内容", placeholder="ゆっくり瞬きする、髪が少し揺れる")
+    motion = st.text_area("動きの内容", placeholder="ゆっくり瞬きする")
     dur = st.slider("秒数", 3, 10, 6)
     if st.button("動画にする", type="primary"):
         if not st.session_state.video_src:
@@ -662,7 +666,7 @@ elif st.session_state.page == "video":
 
 elif st.session_state.page == "v4":
     st.subheader("4コマ動画")
-    st.caption("2・3・4コマを選んで、同時再生か順番再生でまとめます。テスト中はポイントなし")
+    st.caption("まとめるとスマホサイズ（1080×1920）を2・3・4分割します")
     st.session_state.v4_count = st.radio("コマ数", [2, 3, 4], index=[2, 3, 4].index(int(st.session_state.v4_count)), horizontal=True)
     n = int(st.session_state.v4_count)
     layout_opts = {2: ["縦2", "横2"], 3: ["縦3", "横3"], 4: ["縦4", "横4", "2×2"]}[n]
@@ -690,7 +694,7 @@ elif st.session_state.page == "v4":
                     st.session_state.error = "画像がありません"
                 else:
                     try:
-                        st.info(f"コマ{i+1} 生成中... 20〜60秒かかることがあります")
+                        st.info(f"コマ{i+1} 生成中...")
                         st.session_state.v4_clips[i] = grok_image_to_video(src, st.session_state.v4_prompts[i], st.session_state.v4_durs[i])
                         st.session_state.error = ""
                     except Exception as e:
@@ -698,21 +702,22 @@ elif st.session_state.page == "v4":
                     st.rerun()
             if st.session_state.v4_clips[i] and os.path.exists(st.session_state.v4_clips[i]):
                 st.video(st.session_state.v4_clips[i])
+    ready = [st.session_state.v4_clips[i] for i in range(n) if st.session_state.v4_clips[i] and os.path.exists(st.session_state.v4_clips[i])]
+    st.caption(f"できている動画 {len(ready)} / {n}")
     if st.button("漫画動画としてまとめる", type="primary"):
-        clips = [st.session_state.v4_clips[i] for i in range(n) if st.session_state.v4_clips[i] and os.path.exists(st.session_state.v4_clips[i])]
-        if len(clips) < n:
-            st.session_state.error = f"{n}本そろえてください"
+        if len(ready) < n:
+            st.session_state.error = f"{n}本そろえてください。今は {len(ready)} 本です"
         else:
             try:
                 out = os.path.join(VID_DIR, f"join_{uuid.uuid4().hex}.mp4")
                 if st.session_state.v4_play == "順番に動く":
-                    st.session_state.v4_joined = concat_videos(clips, out)
+                    st.session_state.v4_joined = concat_videos(ready, out)
                 else:
-                    st.session_state.v4_joined = compose_yonkoma_video(clips, st.session_state.v4_layout, out)
+                    st.session_state.v4_joined = compose_yonkoma_video(ready, st.session_state.v4_layout, out)
                 st.session_state.error = ""
             except Exception as e:
                 st.session_state.error = str(e)
-            st.rerun()
+        st.rerun()
     if st.session_state.v4_joined and os.path.exists(st.session_state.v4_joined):
         st.video(st.session_state.v4_joined)
         with open(st.session_state.v4_joined, "rb") as f:
@@ -734,7 +739,6 @@ elif st.session_state.page == "icon":
 
 elif st.session_state.page == "shop":
     st.subheader("ポイント購入")
-    st.write("1ポイント = 1円")
     if not st.session_state.logged_in:
         st.warning("購入にはログインが必要です。")
     elif stripe is None or not STRIPE_SECRET_KEY:
@@ -768,7 +772,7 @@ elif st.session_state.page == "register":
         elif not valid_mail_format(mail):
             st.error("メールの形が正しくありません")
         elif not mail_domain_ok(mail):
-            st.error("存在しないアドレス、または受け取れないドメインです")
+            st.error("存在しないアドレスです")
         elif name in users:
             st.error("その名前は使われています")
         elif email_taken(users, mail):
