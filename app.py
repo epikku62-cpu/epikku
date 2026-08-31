@@ -26,17 +26,6 @@ except ImportError:
 
 st.set_page_config(page_title="panel AI.", page_icon="🎨", layout="wide", initial_sidebar_state="collapsed")
 
-st.markdown("""
-<!-- Google tag (gtag.js) -->
-<script async src="https://www.googletagmanager.com/gtag/js?id=G-5THYDBQXN9"></script>
-<script>
-window.dataLayer = window.dataLayer || [];
-function gtag(){dataLayer.push(arguments);}
-gtag('js', new Date());
-gtag('config', 'G-5THYDBQXN9');
-</script>
-""", unsafe_allow_html=True)
-
 GSC = os.environ.get("GOOGLE_SITE_VERIFICATION", "")
 if GSC:
     st.markdown(f'<meta name="google-site-verification" content="{GSC}">', unsafe_allow_html=True)
@@ -1235,16 +1224,32 @@ else:
             options = ["セットなし"] + (names if (is_premium() or is_owner()) else [])
             curc = st.session_state.scene_chars[i]
             st.session_state.scene_chars[i] = st.selectbox("セット", options, index=options.index(curc) if curc in options else 0, key=f"ch_{i}")
+            if st.session_state.get("busy_index") == i:
+                st.info(f"コマ{i+1} 生成中…")
+                try:
+                    make_one(i)
+                    st.session_state.error = ""
+                except Exception as e:
+                    st.session_state.error = str(e)
+                st.session_state.busy_index = None
+                go("make")
+                st.rerun()
             c1, c2, c3 = st.columns(3)
             with c1:
                 if st.button("生成", key=f"gen_{i}", type="primary"):
-                    st.session_state.error = ""; st.session_state.busy_index = i; st.rerun()
+                    st.session_state.error = ""
+                    st.session_state.busy_index = i
+                    st.rerun()
             with c2:
                 if st.button("消す", key=f"clr_{i}"):
-                    st.session_state.panel_images[i] = None; st.session_state.panel_bubbles[i] = []; st.session_state.panel_upload[i] = False; st.rerun()
+                    st.session_state.panel_images[i] = None
+                    st.session_state.panel_bubbles[i] = []
+                    st.session_state.panel_upload[i] = False
+                    st.rerun()
             with c3:
                 if st.session_state.panel_images[i] and st.button("保存庫へ", key=f"sv_{i}"):
-                    add_library(st.session_state.panel_images[i], f"4コマ{i+1}"); st.success("入れました")
+                    add_library(st.session_state.panel_images[i], f"4コマ{i+1}")
+                    st.success("入れました")
             if st.session_state.panel_images[i]:
                 draft = st.session_state.drafts[i]
                 draft["text"] = st.text_input("新しいセリフ", value=draft.get("text", ""), key=f"bt_{i}")
@@ -1265,40 +1270,39 @@ else:
                 draft["color"] = st.color_picker("文字色", draft.get("color", "#111111"), key=f"bc_{i}")
                 st.session_state.drafts[i] = draft
                 if st.button("このセリフを追加", key=f"addb_{i}") and draft["text"].strip():
-                    st.session_state.panel_bubbles[i].append(dict(draft)); st.session_state.drafts[i] = empty_bubble(); st.rerun()
+                    st.session_state.panel_bubbles[i].append(dict(draft))
+                    st.session_state.drafts[i] = empty_bubble()
+                    st.rerun()
                 for bi, bb in enumerate(st.session_state.panel_bubbles[i]):
                     k1, k2 = st.columns([5, 1])
                     with k1:
                         st.caption(bb.get("text", ""))
                     with k2:
                         if st.button("×", key=f"delb_{i}_{bi}"):
-                            st.session_state.panel_bubbles[i].pop(bi); st.rerun()
+                            st.session_state.panel_bubbles[i].pop(bi)
+                            st.rerun()
                 preview = draw_all_bubbles(panel_raw(i), st.session_state.panel_bubbles[i])
                 if draft["text"].strip():
                     preview = draw_one_bubble(preview, draft)
                 st.image(preview, width=340)
 
-    if st.session_state.get("busy_index") is not None:
-        i = int(st.session_state.busy_index)
-        st.session_state.busy_index = None
-        st.info(f"コマ{i+1} 生成中...")
-        try:
-            make_one(i); st.session_state.error = ""
-        except Exception as e:
-            st.session_state.error = str(e)
-        go("make"); st.rerun()
     if st.button("1枚にまとめる", type="primary"):
         panels = []
         for i in range(n):
             if not st.session_state.panel_images[i]:
-                st.error(f"コマ{i+1}がありません"); panels = None; break
+                st.error(f"コマ{i+1}がありません")
+                panels = None
+                break
             panels.append(draw_all_bubbles(panel_raw(i), st.session_state.panel_bubbles[i]))
         if panels:
-            st.session_state.combined = combine_panels(panels, cols=LAYOUTS[layout]["cols"]); go("make"); st.rerun()
+            st.session_state.combined = combine_panels(panels, cols=LAYOUTS[layout]["cols"])
+            go("make")
+            st.rerun()
     if st.session_state.combined is not None:
         st.image(st.session_state.combined, use_container_width=True)
         st.download_button("PNG保存", data=image_to_bytes(st.session_state.combined), file_name="yonkoma.png", mime="image/png")
         if st.button("まとめた画像を保存庫へ"):
-            buf = BytesIO(); st.session_state.combined.save(buf, format="PNG")
+            buf = BytesIO()
+            st.session_state.combined.save(buf, format="PNG")
             add_library("data:image/png;base64," + base64.b64encode(buf.getvalue()).decode(), "4コマまとめ")
             st.success("入れました")
