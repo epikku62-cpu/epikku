@@ -403,6 +403,28 @@ def grok_poll_video(request_id):
         return "error", str(d)[:400]
     return "wait", status or "pending"
 
+def probe_duration(path):
+    r = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", path], capture_output=True, text=True)
+    try:
+        return max(0.2, float((r.stdout or "0").strip() or 0))
+    except Exception:
+        return 3.0
+
+def layout_cell(layout_key, n):
+    if str(layout_key).startswith("横"):
+        return n, 1, 480, 480
+    if layout_key == "2×2":
+        return 2, 2, 640, 640
+    return 1, n, 640, 640
+
+def stack_filter(cols, rows, n, labels):
+    joined = "".join(labels)
+    if cols == 1:
+        return joined + f"vstack=inputs={n}[out]"
+    if rows == 1:
+        return joined + f"hstack=inputs={n}[out]"
+    return joined + f"xstack=inputs={n}:layout=0_0|w0_0|0_h0|w0_h0[out]"
+
 def concat_videos(paths, out_path):
     lst = os.path.join(VID_DIR, f"{uuid.uuid4().hex}.txt")
     with open(lst, "w", encoding="utf-8") as f:
@@ -415,33 +437,48 @@ def concat_videos(paths, out_path):
             raise Exception(r.stderr[-400:] if r.stderr else "結合に失敗しました")
     return out_path
 
-def compose_yonkoma_video(paths, layout_key="2×2", out_path="out.mp4"):
+def compose_yonkoma_video(paths, layout_key="2×2", out_path="out.mp4", sequential=False):
     n = len(paths)
     if n < 2:
         raise Exception("2本以上必要です")
-    if layout_key.startswith("横"):
-        cols, rows, cw, ch = n, 1, 480, 480
-    elif layout_key == "2×2":
-        cols, rows, cw, ch = 2, 2, 640, 640
-    else:
-        cols, rows, cw, ch = 1, n, 640, 640
-    ins = []
-    for p in paths:
-        ins += ["-i", p]
-    parts, labels = [], []
-    for i in range(n):
-        parts.append(f"[{i}:v]fps=24,scale={cw}:{ch}:force_original_aspect_ratio=decrease:force_divisible_by=2,pad={cw}:{ch}:(ow-iw)/2:(oh-ih)/2:color=white,setsar=1,format=yuv420p[v{i}]")
-        labels.append(f"[v{i}]")
-    if cols == 1:
-        filt = ";".join(parts) + ";" + "".join(labels) + f"vstack=inputs={n}[out]"
-    elif rows == 1:
-        filt = ";".join(parts) + ";" + "".join(labels) + f"hstack=inputs={n}[out]"
-    else:
-        filt = ";".join(parts) + ";" + "".join(labels) + f"xstack=inputs={n}:layout=0_0|w0_0|0_h0|w0_h0[out]"
-    r = subprocess.run(["ffmpeg", "-y"] + ins + ["-filter_complex", filt, "-map", "[out]", "-an", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-shortest", out_path], capture_output=True, text=True)
-    if r.returncode != 0 or not os.path.exists(out_path):
-        raise Exception((r.stderr or "結合失敗")[-500:])
-    return out_path
+    cols, rows, cw, ch = layout_cell(layout_key, n)
+    scale = (
+        f"fps=24,scale={cw}:{ch}:force_original_aspect_ratio=decrease:force_divisible_by=2,"
+        f"pad={cw}:{ch}:(ow-iw)/2:(oh-ih)/2:color=white,setsar=1,format=yuv420p"
+    )
+    if not sequential:
+        ins = []
+        for p in paths:
+            ins += ["-i", p]
+        parts, labels = [], []
+        for i in range(n):
+            parts.append(f"[{i}:v]{scale}[v{i}]")
+            labels.append(f"[v{i}]")
+        filt = ";".join(parts) + ";" + stack_filter(cols, rows, n, labels)
+        r = subprocess.run(["ffmpeg", "-y"] + ins + ["-filter_complex", filt, "-map", "[out]", "-an", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-shortest", out_path], capture_output=True, text=True)
+        if r.returncode != 0 or not os.path.exists(out_path):
+            raise Exception((r.stderr or "結合失敗")[-500:])
+        return out_path
+    durs = [probe_duration(p) for p in paths]
+    segs = []
+    for k in range(n):
+        ins = []
+        for p in paths:
+            ins += ["-i", p]
+        parts, labels = [], []
+        for i in range(n):
+            if i == k:
+                parts.append(f"[{i}:v]{scale},setpts=PTS-STARTPTS[v{i}]")
+            else:
+                parts.append(f"[{i}:v]trim=start=0:end=0.05,loop=-1:size=1,setpts=N/24/TB,{scale},trim=duration={durs[k]:.3f},setpts=PTS-STARTPTS[v{i}]")
+            labels.append(f"[v{i}]")
+        filt = ";".join(parts) + ";" + stack_filter(cols, rows, n, labels)
+        seg = os.path.join(VID_DIR, f"seq_{k}_{uuid.uuid4().hex}.mp4")
+        r = subprocess.run(["ffmpeg", "-y"] + ins + ["-filter_complex", filt, "-map", "[out]", "-an", "-t", f"{durs[k]:.3f}", "-c:v", "libx264", "-pix_fmt", "yuv420p", seg], capture_output=True, text=True)
+        if r.returncode != 0 or not os.path.exists(seg):
+            raise Exception((r.stderr or "順番まとめ失敗")[-500:])
+        segs.append(seg)
+    return concat_videos(segs, out_path)
 
 def wrap_text(text, font, max_width):
     lines, line = [], ""
@@ -812,7 +849,7 @@ elif st.session_state.page == "video":
 
 elif st.session_state.page == "v4":
     st.subheader("4コマ動画")
-    st.caption("画像から作るか、10秒以下のmp4を入れてください。まとめは20ポイントです。")
+    st.caption("同時に動くも順番に動くも、同じ4コマの1枚絵です。順番は1コマずつ動きます。")
     job = st.session_state.get("vjob") if isinstance(st.session_state.get("vjob"), dict) else None
     st.session_state.v4_count = st.radio("コマ数", [2, 3, 4], index=[2, 3, 4].index(int(st.session_state.v4_count)), horizontal=True)
     n = int(st.session_state.v4_count)
@@ -895,10 +932,12 @@ elif st.session_state.page == "v4":
             try:
                 take_points(JOIN_COST)
                 out = os.path.join(VID_DIR, f"join_{uuid.uuid4().hex}.mp4")
-                if st.session_state.v4_play == "順番に動く":
-                    st.session_state.v4_joined = concat_videos(ready_clips, out)
-                else:
-                    st.session_state.v4_joined = compose_yonkoma_video(ready_clips, st.session_state.v4_layout, out)
+                st.session_state.v4_joined = compose_yonkoma_video(
+                    ready_clips,
+                    st.session_state.v4_layout,
+                    out,
+                    sequential=(st.session_state.v4_play == "順番に動く"),
+                )
                 st.session_state.error = ""
             except Exception as e:
                 st.session_state.error = str(e)
@@ -1039,7 +1078,7 @@ elif st.session_state.page == "plan":
 
 elif st.session_state.page == "chars":
     st.subheader("セット")
-    if not is_premium():
+    if not is_premium() and not is_owner():
         st.warning("セットはVIPだけです。")
         show_ad()
         st.stop()
@@ -1127,7 +1166,7 @@ elif st.session_state.page == "simple":
                 st.rerun()
     st.session_state.so = st.text_area("その他プロンプト", value=st.session_state.so)
     st.session_state.sn = st.text_area("除外プロンプト", value=st.session_state.sn)
-    size_opts = [k for k, v in SIMPLE_SIZES.items() if (is_premium() or not v["paid"])]
+    size_opts = [k for k, v in SIMPLE_SIZES.items() if (is_premium() or is_owner() or not v["paid"])]
     size_name = st.radio("サイズ", size_opts, horizontal=True)
     spec = SIMPLE_SIZES[size_name]
     st.caption(f"{spec['gen'][0]} × {spec['gen'][1]}　{spec['cost']}ポイント")
