@@ -26,6 +26,17 @@ except ImportError:
 
 st.set_page_config(page_title="panel AI.", page_icon="🎨", layout="wide", initial_sidebar_state="collapsed")
 
+st.markdown("""
+<!-- Google tag (gtag.js) -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=G-5THYDBQXN9"></script>
+<script>
+window.dataLayer = window.dataLayer || [];
+function gtag(){dataLayer.push(arguments);}
+gtag('js', new Date());
+gtag('config', 'G-5THYDBQXN9');
+</script>
+""", unsafe_allow_html=True)
+
 GSC = os.environ.get("GOOGLE_SITE_VERIFICATION", "")
 if GSC:
     st.markdown(f'<meta name="google-site-verification" content="{GSC}">', unsafe_allow_html=True)
@@ -671,7 +682,7 @@ def render_top_menu():
             st.rerun()
     if not st.session_state.menu_open:
         return
-    st.markdown('<div style="background:#fff;border:3px solid #ffb6d5;border-radius:20px;padding:12px;margin:8px 0 16px;">', unsafe_allow_html=True)
+    st.markdown('<div style="background:#fff;border:3px solid #111;border-radius:20px;padding:12px;margin:8px 0 16px;">', unsafe_allow_html=True)
     st.markdown("**メニュー**")
     if st.session_state.logged_in:
         icon = st.session_state.get("icon", "🐱")
@@ -751,19 +762,24 @@ section[data-testid="stSidebar"],
 [data-testid="stDecoration"],
 #MainMenu { display: none !important; }
 div[data-testid="stButton"] > button {
-  background: linear-gradient(180deg,#ffc1dc,#ff6ea8) !important;
-  color: #fff !important;
-  border: 3px solid #fff !important;
+  background: #ffffff !important;
+  color: #111111 !important;
+  border: 2px solid #111111 !important;
   border-radius: 999px !important;
   font-weight: 800 !important;
-  box-shadow: 0 5px 0 #ff4d88 !important;
+  box-shadow: none !important;
 }
 div[data-testid="stButton"] > button[kind="primary"] {
-  background: linear-gradient(180deg,#ff9ec8,#ff4d88) !important;
-  color: #fff !important;
-  border: 3px solid #fff !important;
-  border-radius: 999px !important;
-  box-shadow: 0 5px 0 #d63384 !important;
+  background: #ffffff !important;
+  color: #111111 !important;
+  border: 2px solid #111111 !important;
+  box-shadow: none !important;
+}
+section.main div[data-testid="stHorizontalBlock"]:first-of-type div[data-testid="column"]:first-child div[data-testid="stButton"] > button {
+  background: linear-gradient(180deg,#ffc1dc,#ff6ea8) !important;
+  color: #ffffff !important;
+  border: 3px solid #ffffff !important;
+  box-shadow: 0 5px 0 #ff4d88 !important;
 }
 </style>
 """, unsafe_allow_html=True)
