@@ -24,7 +24,7 @@ try:
 except ImportError:
     stripe = None
 
-st.set_page_config(page_title="panel AI.", page_icon="🎨", layout="wide")
+st.set_page_config(page_title="panel AI.", page_icon="🎨", layout="wide", initial_sidebar_state="collapsed")
 
 GSC = os.environ.get("GOOGLE_SITE_VERIFICATION", "")
 if GSC:
@@ -708,24 +708,25 @@ section[data-testid="stSidebar"] { background:#fff !important; }
 section[data-testid="stSidebar"] * { color:#111 !important; }
 section[data-testid="stSidebar"] button { background:#fff !important; color:#111 !important; border:2px solid #111 !important; }
 section[data-testid="stSidebar"] button p { color:#111 !important; }
-[data-testid="stStatusWidget"] { display: none !important; }
+[data-testid="stStatusWidget"],
 [data-testid="stToolbar"],
 [data-testid="stHeaderActionElements"],
 [data-testid="stDecoration"],
-#MainMenu,
-header [data-testid="stToolbar"],
-header [data-testid="baseButton-headerNoPadding"],
-header button[kind="headerNoPadding"] { display: none !important; visibility: hidden !important; }
+#MainMenu { display: none !important; }
 
 [data-testid="stSidebarCollapsedControl"],
 [data-testid="collapsedControl"] {
+  display: flex !important;
+  visibility: visible !important;
   position: relative !important;
   width: 96px !important; min-width: 96px !important; height: 38px !important;
   background: #fff0f6 !important; border: 2px solid #ff8ab8 !important;
-  border-radius: 999px !important; overflow: hidden !important; display: flex !important;
+  border-radius: 999px !important; overflow: hidden !important; z-index: 999 !important;
 }
 [data-testid="stSidebarCollapsedControl"] svg,
-[data-testid="collapsedControl"] svg { display: none !important; }
+[data-testid="collapsedControl"] svg,
+[data-testid="stSidebarCollapsedControl"] span,
+[data-testid="collapsedControl"] span { display: none !important; }
 [data-testid="stSidebarCollapsedControl"]::after,
 [data-testid="collapsedControl"]::after {
   content: "メニュー" !important;
@@ -736,13 +737,16 @@ header button[kind="headerNoPadding"] { display: none !important; visibility: hi
 
 section[data-testid="stSidebar"] [data-testid="stSidebarCollapseButton"],
 section[data-testid="stSidebar"] button[kind="header"] {
+  display: flex !important;
   position: relative !important;
   width: 96px !important; height: 38px !important;
   background: #fff0f6 !important; border: 2px solid #ff8ab8 !important;
   border-radius: 999px !important; overflow: hidden !important;
 }
 section[data-testid="stSidebar"] [data-testid="stSidebarCollapseButton"] svg,
-section[data-testid="stSidebar"] button[kind="header"] svg { display: none !important; }
+section[data-testid="stSidebar"] button[kind="header"] svg,
+section[data-testid="stSidebar"] [data-testid="stSidebarCollapseButton"] span,
+section[data-testid="stSidebar"] button[kind="header"] span { display: none !important; }
 section[data-testid="stSidebar"] [data-testid="stSidebarCollapseButton"]::after,
 section[data-testid="stSidebar"] button[kind="header"]::after {
   content: "閉じる" !important;
