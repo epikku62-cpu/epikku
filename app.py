@@ -394,13 +394,16 @@ def compose_yonkoma_video(paths, layout_key="2×2", out_path="out.mp4"):
     elif layout_key == "2×2":
         cols, rows, cw, ch = 2, 2, 640, 640
     else:
-        cols, rows, cw, ch = 1, n, 720, 400
+        cols, rows, cw, ch = 1, n, 640, 640
     ins = []
     for p in paths:
         ins += ["-i", p]
     parts, labels = [], []
     for i in range(n):
-        parts.append(f"[{i}:v]fps=24,scale={cw}:{ch}:force_original_aspect_ratio=decrease:force_divisible_by=2,pad={cw}:{ch}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,format=yuv420p[v{i}]")
+        parts.append(
+            f"[{i}:v]fps=24,scale={cw}:{ch}:force_original_aspect_ratio=decrease:force_divisible_by=2,"
+            f"pad={cw}:{ch}:(ow-iw)/2:(oh-ih)/2:color=white,setsar=1,format=yuv420p[v{i}]"
+        )
         labels.append(f"[v{i}]")
     if cols == 1:
         filt = ";".join(parts) + ";" + "".join(labels) + f"vstack=inputs={n}[out]"
@@ -408,7 +411,10 @@ def compose_yonkoma_video(paths, layout_key="2×2", out_path="out.mp4"):
         filt = ";".join(parts) + ";" + "".join(labels) + f"hstack=inputs={n}[out]"
     else:
         filt = ";".join(parts) + ";" + "".join(labels) + f"xstack=inputs={n}:layout=0_0|w0_0|0_h0|w0_h0[out]"
-    r = subprocess.run(["ffmpeg", "-y"] + ins + ["-filter_complex", filt, "-map", "[out]", "-an", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-shortest", out_path], capture_output=True, text=True)
+    r = subprocess.run(
+        ["ffmpeg", "-y"] + ins + ["-filter_complex", filt, "-map", "[out]", "-an", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-shortest", out_path],
+        capture_output=True, text=True
+    )
     if r.returncode != 0 or not os.path.exists(out_path):
         raise Exception((r.stderr or "結合失敗")[-500:])
     return out_path
