@@ -96,6 +96,10 @@ def is_owner():
     e = norm_mail(st.session_state.get("email"))
     return bool(OWNER_ACCOUNTS) and (u in OWNER_ACCOUNTS or e in OWNER_ACCOUNTS)
 
+def go(page):
+    st.session_state.page = page
+    st.query_params["p"] = page
+
 def file_b64(path):
     if not os.path.exists(path):
         return ""
@@ -248,6 +252,24 @@ def add_library(uri, label=""):
         return
     st.session_state.library.append({"id": str(uuid.uuid4())[:8], "url": uri, "label": label or "保存画像", "time": datetime.now().strftime("%m/%d %H:%M")})
     save_user_state()
+
+def show_wait(cid, text="生成中"):
+    st.markdown(f"""
+    <div style="margin:8px 0;padding:12px;border-radius:14px;background:#fff0f6;color:#ff4d88;font-weight:800;">
+      {text}… <span id="{cid}">20</span>
+    </div>
+    <script>
+    (function(){{
+      let s=20; const e=document.getElementById("{cid}");
+      const t=setInterval(function(){{
+        s--;
+        if(!e) return;
+        if(s<=0){{ clearInterval(t); e.parentElement.innerText="0になりました。確認を押してください"; }}
+        else e.innerText=s;
+      }},1000);
+    }})();
+    </script>
+    """, unsafe_allow_html=True)
 
 def nai_wh(w, h):
     return max(64, min(1920, int(round(w / 64) * 64))), max(64, min(1920, int(round(h / 64) * 64)))
@@ -555,7 +577,7 @@ defaults = {
     "icon": random.choice(ANIMALS), "email": "", "pending": None, "library": [],
     "video_src": None, "video_out": None, "v4_clips": [None] * 4, "v4_prompts": ["", "", "", ""],
     "v4_durs": [5, 5, 5, 5], "v4_count": 4, "v4_layout": "2×2", "v4_play": "同時に動く",
-    "v4_joined": None, "vjob": None, "v4_joining": False,
+    "v4_joined": None, "vjob": None, "v4_joining": False, "_booted": False,
 }
 for k, v in defaults.items():
     if k not in st.session_state:
@@ -563,11 +585,16 @@ for k, v in defaults.items():
 if "characters" not in st.session_state:
     st.session_state.characters = load_json(DATA_FILE, {"characters": []}).get("characters", [])
 
+if not st.session_state._booted:
+    st.session_state._booted = True
+    if st.query_params.get("p"):
+        st.session_state.page = st.query_params.get("p")
+
 qs = st.query_params
 if st.session_state.logged_in and qs.get("checkout") == "success":
     st.session_state.premium_until = (datetime.now() + timedelta(days=30)).isoformat()
     st.session_state.points = int(st.session_state.points) + MONTHLY_POINTS
-    save_user_state(); st.query_params.clear()
+    save_user_state(); st.query_params.clear(); go("plan")
 if st.session_state.logged_in and qs.get("buypoints"):
     try:
         add = int(str(qs.get("buypoints")))
@@ -575,7 +602,7 @@ if st.session_state.logged_in and qs.get("buypoints"):
             st.session_state.points = int(st.session_state.points) + add; save_user_state()
     except Exception:
         pass
-    st.query_params.clear()
+    st.query_params.clear(); go("shop")
 
 st.markdown("""
 <style>
@@ -603,21 +630,16 @@ if st.session_state.page == "home":
     <style>
     div[data-testid="stButton"] > button {
       background: linear-gradient(180deg,#ff9ec8,#ff4d88) !important;
-      color: #fff !important;
-      border: 4px solid #fff !important;
-      border-radius: 999px !important;
-      font-size: 34px !important;
-      font-weight: 900 !important;
-      letter-spacing: .08em !important;
-      padding: 18px 0 !important;
-      box-shadow: 0 10px 18px rgba(255,90,150,.35) !important;
+      color: #fff !important; border: 4px solid #fff !important; border-radius: 999px !important;
+      font-size: 34px !important; font-weight: 900 !important; letter-spacing: .08em !important;
+      padding: 18px 0 !important; box-shadow: 0 10px 18px rgba(255,90,150,.35) !important;
     }
     </style>
     """, unsafe_allow_html=True)
     mid = st.columns([1, 2, 1])
     with mid[1]:
         if st.button("panel", use_container_width=True):
-            st.session_state.page = "help"; st.rerun()
+            go("help"); st.rerun()
     show_ad(); st.stop()
 
 show_header()
@@ -630,19 +652,19 @@ with st.sidebar:
             st.write(icon)
         st.write(st.session_state.get("username", ""))
         if st.button("アイコン変更", use_container_width=True):
-            st.session_state.page = "icon"; st.rerun()
+            go("icon"); st.rerun()
         if st.button("ログアウト", use_container_width=True):
-            st.session_state.logged_in = False; st.session_state.page = "home"; st.rerun()
+            st.session_state.logged_in = False; go("home"); st.rerun()
     else:
         if st.button("登録", use_container_width=True):
-            st.session_state.page = "register"; st.rerun()
+            go("register"); st.rerun()
         if st.button("ログイン", use_container_width=True):
-            st.session_state.page = "register"; st.rerun()
+            go("register"); st.rerun()
     st.write(f"ポイント {st.session_state.points}")
     st.write(f"会員 {member_label() if st.session_state.logged_in else '未登録'}")
     for label, page in [("画像生成モード", "simple"), ("セット", "chars"), ("4コマ", "make"), ("保存庫", "lib"), ("動画生成", "video"), ("4コマ動画", "v4"), ("ポイント購入", "shop"), ("説明書", "help"), ("月額登録", "plan"), ("お問い合わせ", "contact")]:
         if st.button(label, use_container_width=True):
-            st.session_state.page = page; st.rerun()
+            go(page); st.rerun()
 
 if st.session_state.error:
     st.error(st.session_state.error)
@@ -668,7 +690,7 @@ elif st.session_state.page == "lib":
         a, b = st.columns(2)
         with a:
             if st.button("動画にする", key=f"libv_{i}"):
-                st.session_state.video_src = item["url"]; st.session_state.page = "video"; st.rerun()
+                st.session_state.video_src = item["url"]; go("video"); st.rerun()
         with b:
             if st.button("消す", key=f"libd_{i}"):
                 st.session_state.library.pop(len(st.session_state.library) - 1 - i); save_user_state(); st.rerun()
@@ -680,14 +702,14 @@ elif st.session_state.page == "video":
         st.success("管理者のため、動画はポイントなしです")
     job = st.session_state.get("vjob")
     if job and job.get("kind") == "video":
-        st.info("生成中... 20秒くらい待ってから確認してください")
+        show_wait("cd_video", "生成中")
         if st.button("確認する"):
             state, val = grok_poll_video(job["id"])
             if state == "done":
                 st.session_state.video_out = val; st.session_state.vjob = None
             elif state == "error":
                 st.session_state.error = val; st.session_state.vjob = None
-            st.rerun()
+            go("video"); st.rerun()
     up = st.file_uploader("画像をアップロード", type=["png", "jpg", "jpeg"])
     if up:
         st.session_state.video_src = uploaded_to_uri(up)
@@ -712,7 +734,7 @@ elif st.session_state.page == "video":
                 st.session_state.error = ""
             except Exception as e:
                 st.session_state.error = str(e)
-        st.rerun()
+        go("video"); st.rerun()
     if st.session_state.video_out and os.path.exists(st.session_state.video_out):
         st.video(st.session_state.video_out)
         with open(st.session_state.video_out, "rb") as f:
@@ -721,34 +743,10 @@ elif st.session_state.page == "video":
 
 elif st.session_state.page == "v4":
     st.subheader("4コマ動画")
-    st.caption("管理者はポイントなし。ほかの人は1コマごとにポイント消費。まとめは無料")
+    st.caption("カウントが0になってから、そのコマの確認を押してください。まとめも同じです。")
     if is_owner():
         st.success("管理者のため、動画はポイントなしです")
-    if st.session_state.get("v4_joining"):
-        st.info("まとめて生成中...")
-        n = int(st.session_state.v4_count)
-        ready = [st.session_state.v4_clips[i] for i in range(n) if st.session_state.v4_clips[i] and os.path.exists(st.session_state.v4_clips[i])]
-        try:
-            out = os.path.join(VID_DIR, f"join_{uuid.uuid4().hex}.mp4")
-            if st.session_state.v4_play == "順番に動く":
-                st.session_state.v4_joined = concat_videos(ready, out)
-            else:
-                st.session_state.v4_joined = compose_yonkoma_video(ready, st.session_state.v4_layout, out)
-            st.session_state.error = ""
-        except Exception as e:
-            st.session_state.error = str(e)
-        st.session_state.v4_joining = False
-        st.rerun()
-    job = st.session_state.get("vjob")
-    if job and job.get("kind") == "v4":
-        st.info(f"コマ{job['i']+1} 生成中... 20秒くらい待ってから確認してください")
-        if st.button("確認する"):
-            state, val = grok_poll_video(job["id"])
-            if state == "done":
-                st.session_state.v4_clips[job["i"]] = val; st.session_state.vjob = None
-            elif state == "error":
-                st.session_state.error = val; st.session_state.vjob = None
-            st.rerun()
+    job = st.session_state.get("vjob") if isinstance(st.session_state.get("vjob"), dict) else None
     st.session_state.v4_count = st.radio("コマ数", [2, 3, 4], index=[2, 3, 4].index(int(st.session_state.v4_count)), horizontal=True)
     n = int(st.session_state.v4_count)
     layout_opts = {2: ["縦2", "横2"], 3: ["縦3", "横3"], 4: ["縦4", "横4", "2×2"]}[n]
@@ -772,6 +770,15 @@ elif st.session_state.page == "v4":
             st.session_state.v4_prompts[i] = st.text_input("動き", value=st.session_state.v4_prompts[i], key=f"v4p_{i}")
             st.session_state.v4_durs[i] = st.slider("秒数", 3, 10, int(st.session_state.v4_durs[i]), key=f"v4d_{i}")
             st.caption("ポイントなし" if is_owner() else f"消費 {video_cost(st.session_state.v4_durs[i])}ポイント")
+            if job and job.get("kind") == "v4" and int(job.get("i", -1)) == i:
+                show_wait(f"cd_p{i}", f"コマ{i+1} 生成中")
+                if st.button("確認する", key=f"v4chk_{i}"):
+                    state, val = grok_poll_video(job["id"])
+                    if state == "done":
+                        st.session_state.v4_clips[i] = val; st.session_state.vjob = None
+                    elif state == "error":
+                        st.session_state.error = val; st.session_state.vjob = None
+                    go("v4"); st.rerun()
             if st.button("このコマを動画にする", key=f"v4g_{i}"):
                 if not src:
                     st.session_state.error = "画像がありません"
@@ -783,18 +790,34 @@ elif st.session_state.page == "v4":
                         st.session_state.error = ""
                     except Exception as e:
                         st.session_state.error = str(e)
-                st.rerun()
+                go("v4"); st.rerun()
             if st.session_state.v4_clips[i] and os.path.exists(st.session_state.v4_clips[i]):
                 st.video(st.session_state.v4_clips[i])
     ready = [st.session_state.v4_clips[i] for i in range(n) if st.session_state.v4_clips[i] and os.path.exists(st.session_state.v4_clips[i])]
+    st.markdown("---")
+    st.subheader("まとめ")
     st.caption(f"できている動画 {len(ready)} / {n}")
+    if st.session_state.get("v4_joining"):
+        show_wait("cd_join", "まとめ生成中")
+        if st.button("まとめを確認する"):
+            try:
+                out = os.path.join(VID_DIR, f"join_{uuid.uuid4().hex}.mp4")
+                if st.session_state.v4_play == "順番に動く":
+                    st.session_state.v4_joined = concat_videos(ready, out)
+                else:
+                    st.session_state.v4_joined = compose_yonkoma_video(ready, st.session_state.v4_layout, out)
+                st.session_state.error = ""
+            except Exception as e:
+                st.session_state.error = str(e)
+            st.session_state.v4_joining = False
+            go("v4"); st.rerun()
     if st.button("漫画動画としてまとめる", type="primary"):
         if len(ready) < n:
             st.session_state.error = f"{n}本そろえてください。今は {len(ready)} 本です"
         else:
             st.session_state.v4_joining = True
             st.session_state.error = ""
-        st.rerun()
+        go("v4"); st.rerun()
     if st.session_state.v4_joined and os.path.exists(st.session_state.v4_joined):
         st.video(st.session_state.v4_joined)
         with open(st.session_state.v4_joined, "rb") as f:
@@ -875,7 +898,7 @@ elif st.session_state.page == "register":
                 users[p["name"]] = {"password": p["password"], "email": p["email"], "icon": p["icon"], "characters": [], "points": SIGNUP_POINTS, "premium_until": "", "rank": "ブロンズ", "history": [], "library": []}
                 save_json(USERS_FILE, users)
                 apply_login(p["name"], users[p["name"]])
-                st.session_state.pending = None; st.session_state.page = "simple"; st.rerun()
+                st.session_state.pending = None; go("simple"); st.rerun()
     st.write("ログイン")
     lu = st.text_input("メールまたはユーザーネーム", key="lu")
     lp = st.text_input("ログイン用パスワード", type="password", key="lp")
@@ -883,7 +906,7 @@ elif st.session_state.page == "register":
         users = load_json(USERS_FILE, {})
         found = find_user(users, lu)
         if found and users[found]["password"] == hash_password(lp):
-            apply_login(found, users[found]); st.session_state.page = "simple"; st.rerun()
+            apply_login(found, users[found]); go("simple"); st.rerun()
         else:
             st.error("ログインできません")
     show_ad()
@@ -1004,7 +1027,7 @@ elif st.session_state.page == "simple":
                 st.session_state.points -= cost; save_user_state(); st.session_state.error = ""
             except Exception as e:
                 st.session_state.error = str(e)
-        st.rerun()
+        go("simple"); st.rerun()
     if st.session_state.simple_image:
         st.image(st.session_state.simple_image, use_container_width=True)
         raw = uri_to_image(st.session_state.simple_image)
@@ -1012,7 +1035,7 @@ elif st.session_state.page == "simple":
         if st.button("保存庫に入れる"):
             add_library(st.session_state.simple_image, "画像生成"); st.success("入れました")
         if st.button("この画像を動画にする"):
-            st.session_state.video_src = st.session_state.simple_image; st.session_state.page = "video"; st.rerun()
+            st.session_state.video_src = st.session_state.simple_image; go("video"); st.rerun()
     show_ad()
 
 else:
@@ -1118,7 +1141,7 @@ else:
             make_one(i); st.session_state.error = ""
         except Exception as e:
             st.session_state.error = str(e)
-        st.rerun()
+        go("make"); st.rerun()
     if st.button("1枚にまとめる", type="primary"):
         panels = []
         for i in range(n):
@@ -1127,7 +1150,7 @@ else:
             raw = uri_to_image(st.session_state.panel_images[i]).resize(st.session_state.panel_sizes[i])
             panels.append(draw_all_bubbles(raw, st.session_state.panel_bubbles[i]))
         if panels:
-            st.session_state.combined = combine_panels(panels, cols=LAYOUTS[layout]["cols"]); st.rerun()
+            st.session_state.combined = combine_panels(panels, cols=LAYOUTS[layout]["cols"]); go("make"); st.rerun()
     if st.session_state.combined is not None:
         st.image(st.session_state.combined, use_container_width=True)
         st.download_button("PNG保存", data=image_to_bytes(st.session_state.combined), file_name="yonkoma.png", mime="image/png")
