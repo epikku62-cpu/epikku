@@ -455,10 +455,7 @@ def compose_yonkoma_video(paths, layout_key="2×2", out_path="out.mp4", sequenti
     if n < 2:
         raise Exception("2本以上必要です")
     cols, rows, cw, ch = layout_cell(layout_key, n)
-    scale = (
-        f"fps=24,scale={cw}:{ch}:force_original_aspect_ratio=decrease:force_divisible_by=2,"
-        f"pad={cw}:{ch}:(ow-iw)/2:(oh-ih)/2:color=white,setsar=1,format=yuv420p"
-    )
+    scale = f"fps=24,scale={cw}:{ch}:force_original_aspect_ratio=decrease:force_divisible_by=2,pad={cw}:{ch}:(ow-iw)/2:(oh-ih)/2:color=white,setsar=1,format=yuv420p"
     if not sequential:
         ins = []
         for p in paths:
@@ -682,7 +679,6 @@ for k, v in defaults.items():
         st.session_state[k] = v
 if "characters" not in st.session_state:
     st.session_state.characters = load_json(DATA_FILE, {"characters": []}).get("characters", [])
-
 if not st.session_state._booted:
     st.session_state._booted = True
     if st.query_params.get("p"):
@@ -713,56 +709,48 @@ section[data-testid="stSidebar"] * { color:#111 !important; }
 section[data-testid="stSidebar"] button { background:#fff !important; color:#111 !important; border:2px solid #111 !important; }
 section[data-testid="stSidebar"] button p { color:#111 !important; }
 [data-testid="stStatusWidget"] { display: none !important; }
+[data-testid="stToolbar"],
+[data-testid="stHeaderActionElements"],
+[data-testid="stDecoration"],
+#MainMenu,
+header [data-testid="stToolbar"],
+header [data-testid="baseButton-headerNoPadding"],
+header button[kind="headerNoPadding"] { display: none !important; visibility: hidden !important; }
+
 [data-testid="stSidebarCollapsedControl"],
-[data-testid="collapsedControl"],
-[data-testid="stExpandSidebarButton"],
-button[kind="header"],
-button[kind="headerNoPadding"] {
+[data-testid="collapsedControl"] {
   position: relative !important;
-  width: 96px !important;
-  min-width: 96px !important;
-  height: 38px !important;
-  background: #fff0f6 !important;
-  border: 2px solid #ff8ab8 !important;
-  border-radius: 999px !important;
-  overflow: hidden !important;
+  width: 96px !important; min-width: 96px !important; height: 38px !important;
+  background: #fff0f6 !important; border: 2px solid #ff8ab8 !important;
+  border-radius: 999px !important; overflow: hidden !important; display: flex !important;
 }
 [data-testid="stSidebarCollapsedControl"] svg,
-[data-testid="collapsedControl"] svg,
-[data-testid="stExpandSidebarButton"] svg,
-button[kind="header"] svg,
-button[kind="headerNoPadding"] svg { display: none !important; }
+[data-testid="collapsedControl"] svg { display: none !important; }
 [data-testid="stSidebarCollapsedControl"]::after,
-[data-testid="collapsedControl"]::after,
-[data-testid="stExpandSidebarButton"]::after,
-button[kind="header"]::after,
-button[kind="headerNoPadding"]::after {
+[data-testid="collapsedControl"]::after {
   content: "メニュー" !important;
   position: absolute; inset: 0;
   display: flex; align-items: center; justify-content: center;
   color: #ff4d88 !important; font-weight: 900 !important; font-size: 15px !important;
-  letter-spacing: .08em;
+}
+
+section[data-testid="stSidebar"] [data-testid="stSidebarCollapseButton"],
+section[data-testid="stSidebar"] button[kind="header"] {
+  position: relative !important;
+  width: 96px !important; height: 38px !important;
+  background: #fff0f6 !important; border: 2px solid #ff8ab8 !important;
+  border-radius: 999px !important; overflow: hidden !important;
+}
+section[data-testid="stSidebar"] [data-testid="stSidebarCollapseButton"] svg,
+section[data-testid="stSidebar"] button[kind="header"] svg { display: none !important; }
+section[data-testid="stSidebar"] [data-testid="stSidebarCollapseButton"]::after,
+section[data-testid="stSidebar"] button[kind="header"]::after {
+  content: "閉じる" !important;
+  position: absolute; inset: 0;
+  display: flex; align-items: center; justify-content: center;
+  color: #ff4d88 !important; font-weight: 900 !important; font-size: 15px !important;
 }
 </style>
-<script>
-const doc = window.parent ? window.parent.document : document;
-const fixMenu = () => {
-  doc.querySelectorAll('button').forEach((b) => {
-    const t = (b.innerText || "").trim();
-    if (t === ">>" || t === "<<" || t === "«" || t === "»" || t === "››" || t === "‹‹") {
-      b.innerText = "メニュー";
-      b.style.color = "#ff4d88";
-      b.style.fontWeight = "900";
-      b.style.background = "#fff0f6";
-      b.style.border = "2px solid #ff8ab8";
-      b.style.borderRadius = "999px";
-    }
-  });
-};
-fixMenu();
-setTimeout(fixMenu, 300);
-setTimeout(fixMenu, 800);
-</script>
 """, unsafe_allow_html=True)
 
 if st.session_state.page == "home":
@@ -772,8 +760,7 @@ if st.session_state.page == "home":
     st.markdown("<div style='height:42vh'></div>", unsafe_allow_html=True)
     st.markdown("""
     <div style="text-align:center;color:#ff4d88;font-size:20px;font-weight:800;line-height:1.7;
-    background:rgba(255,255,255,.82);padding:16px 14px;border-radius:22px;border:3px solid #ffb6d5;
-    box-shadow:0 8px 18px rgba(255,120,170,.25);">
+    background:rgba(255,255,255,.82);padding:16px 14px;border-radius:22px;border:3px solid #ffb6d5;">
     panel AIは<br>4コマ画像・4コマ動画<br>画像生成・動画生成<br>作成AIサイト ♡
     </div>
     """, unsafe_allow_html=True)
@@ -782,16 +769,14 @@ if st.session_state.page == "home":
     div[data-testid="stButton"] > button {
       background: linear-gradient(180deg,#ff9ec8,#ff4d88) !important;
       color: #fff !important; border: 4px solid #fff !important; border-radius: 999px !important;
-      font-size: 34px !important; font-weight: 900 !important; letter-spacing: .08em !important;
-      padding: 18px 0 !important; box-shadow: 0 10px 18px rgba(255,90,150,.35) !important;
+      font-size: 34px !important; font-weight: 900 !important; padding: 18px 0 !important;
     }
     </style>
     """, unsafe_allow_html=True)
     mid = st.columns([1, 2, 1])
     with mid[1]:
         if st.button("panel", use_container_width=True):
-            go("help")
-            st.rerun()
+            go("help"); st.rerun()
     st.stop()
 
 show_header()
@@ -807,9 +792,7 @@ with st.sidebar:
         if st.button("アイコン変更", use_container_width=True):
             go("icon"); st.rerun()
         if st.button("ログアウト", use_container_width=True):
-            st.session_state.logged_in = False
-            go("home")
-            st.rerun()
+            st.session_state.logged_in = False; go("home"); st.rerun()
     else:
         if st.button("登録", use_container_width=True):
             go("register"); st.rerun()
@@ -819,14 +802,12 @@ with st.sidebar:
     st.write(f"会員 {member_label() if st.session_state.logged_in else '未登録'}")
     for label, page in [("画像生成モード", "simple"), ("セット", "chars"), ("4コマ", "make"), ("保存庫", "lib"), ("動画生成", "video"), ("4コマ動画", "v4"), ("ポイント購入", "shop"), ("説明書", "help"), ("月額登録", "plan"), ("お問い合わせ", "contact")]:
         if st.button(label, use_container_width=True):
-            go(page)
-            st.rerun()
+            go(page); st.rerun()
 
 if st.session_state.error:
     st.error(st.session_state.error)
     if st.button("閉じる"):
-        st.session_state.error = ""
-        st.rerun()
+        st.session_state.error = ""; st.rerun()
 
 if st.session_state.page == "help":
     st.markdown("""<div style="color:#111;background:#fff;padding:16px;border-radius:12px;">
@@ -836,8 +817,7 @@ if st.session_state.page == "help":
     <h2>動画生成モード</h2><p>ポイントで動画生成<br>秒数が長いほどポイントが増える<br>4コマ動画も1コマずつポイント消費<br>自分のmp4（10秒以下）を入れてまとめることもできる<br>まとめは20ポイント</p>
     <h2>月額登録</h2><p>セット機能開放<br>サイズの変更開放<br>ポイント付与</p></div>""", unsafe_allow_html=True)
     if st.button("メニューに戻って登録して始めよう！", type="primary", use_container_width=True):
-        go("register" if not st.session_state.logged_in else "simple")
-        st.rerun()
+        go("register" if not st.session_state.logged_in else "simple"); st.rerun()
 
 elif st.session_state.page == "lib":
     st.subheader("保存庫")
@@ -849,12 +829,10 @@ elif st.session_state.page == "lib":
         a, b = st.columns(2)
         with a:
             if st.button("動画にする", key=f"libv_{i}"):
-                st.session_state.video_src = item["url"]
-                go("video"); st.rerun()
+                st.session_state.video_src = item["url"]; go("video"); st.rerun()
         with b:
             if st.button("消す", key=f"libd_{i}"):
-                st.session_state.library.pop(len(st.session_state.library) - 1 - i)
-                save_user_state(); st.rerun()
+                st.session_state.library.pop(len(st.session_state.library) - 1 - i); save_user_state(); st.rerun()
 
 elif st.session_state.page == "video":
     st.subheader("動画生成")
@@ -891,8 +869,7 @@ elif st.session_state.page == "video":
         else:
             try:
                 take_points(video_cost(dur))
-                jid = grok_start_video(st.session_state.video_src, motion, dur)
-                st.session_state.vjob = {"kind": "video", "id": jid}
+                st.session_state.vjob = {"kind": "video", "id": grok_start_video(st.session_state.video_src, motion, dur)}
                 start_wait(); st.session_state.error = ""
             except Exception as e:
                 st.session_state.error = str(e)
@@ -928,8 +905,7 @@ elif st.session_state.page == "v4":
             vup = st.file_uploader("動画をアップロード（mp4・10秒以下）", type=["mp4"], key=f"v4vu_{i}")
             if vup is not None and st.button("この動画を使う", key=f"v4vuse_{i}"):
                 try:
-                    st.session_state.v4_clips[i] = save_upload_mp4(vup)
-                    st.session_state.error = ""
+                    st.session_state.v4_clips[i] = save_upload_mp4(vup); st.session_state.error = ""
                 except Exception as e:
                     st.session_state.error = str(e)
                 go("v4"); st.rerun()
@@ -954,8 +930,7 @@ elif st.session_state.page == "v4":
                 else:
                     try:
                         take_points(video_cost(st.session_state.v4_durs[i]))
-                        jid = grok_start_video(src, st.session_state.v4_prompts[i], st.session_state.v4_durs[i])
-                        st.session_state.vjob = {"kind": "v4", "i": i, "id": jid}
+                        st.session_state.vjob = {"kind": "v4", "i": i, "id": grok_start_video(src, st.session_state.v4_prompts[i], st.session_state.v4_durs[i])}
                         start_wait(); st.session_state.error = ""
                     except Exception as e:
                         st.session_state.error = str(e)
@@ -976,14 +951,12 @@ elif st.session_state.page == "v4":
                 st.session_state.error = ""
             except Exception as e:
                 st.session_state.error = str(e)
-            st.session_state.v4_joining = False
-            go("v4"); st.rerun()
+            st.session_state.v4_joining = False; go("v4"); st.rerun()
     if st.button("漫画動画としてまとめる", type="primary"):
         if len(ready_clips) < n:
             st.session_state.error = f"{n}本そろえてください"
         else:
-            st.session_state.v4_joining = True
-            start_wait(); st.session_state.error = ""
+            st.session_state.v4_joining = True; start_wait(); st.session_state.error = ""
         go("v4"); st.rerun()
     if st.session_state.v4_joined and os.path.exists(st.session_state.v4_joined):
         st.video(st.session_state.v4_joined)
@@ -1155,15 +1128,10 @@ elif st.session_state.page == "simple":
             with a:
                 if st.button("はい"):
                     item = st.session_state.hist_pick
-                    st.session_state.sq = item.get("quality", "")
-                    st.session_state.sb = item.get("background", "")
-                    st.session_state.so = item.get("other", "")
-                    st.session_state.sn = item.get("negative", "")
-                    st.session_state.schars = item.get("chars") or [""]
-                    st.session_state.simple_image = item.get("url")
-                    st.session_state.hist_pick = None
-                    st.session_state.show_history = False
-                    st.rerun()
+                    st.session_state.sq = item.get("quality", ""); st.session_state.sb = item.get("background", "")
+                    st.session_state.so = item.get("other", ""); st.session_state.sn = item.get("negative", "")
+                    st.session_state.schars = item.get("chars") or [""]; st.session_state.simple_image = item.get("url")
+                    st.session_state.hist_pick = None; st.session_state.show_history = False; st.rerun()
             with b:
                 if st.button("いいえ"):
                     st.session_state.hist_pick = None; st.rerun()
@@ -1263,18 +1231,14 @@ else:
             st.session_state.scenes[i] = st.text_input("生成する内容", value=st.session_state.scenes[i], key=f"sc_{i}")
             options = ["セットなし"] + (names if (is_premium() or is_owner()) else [])
             curc = st.session_state.scene_chars[i]
-            idx = options.index(curc) if curc in options else 0
-            st.session_state.scene_chars[i] = st.selectbox("セット", options, index=idx, key=f"ch_{i}")
+            st.session_state.scene_chars[i] = st.selectbox("セット", options, index=options.index(curc) if curc in options else 0, key=f"ch_{i}")
             c1, c2, c3 = st.columns(3)
             with c1:
                 if st.button("生成", key=f"gen_{i}", type="primary"):
                     st.session_state.error = ""; st.session_state.busy_index = i; st.rerun()
             with c2:
                 if st.button("消す", key=f"clr_{i}"):
-                    st.session_state.panel_images[i] = None
-                    st.session_state.panel_bubbles[i] = []
-                    st.session_state.panel_upload[i] = False
-                    st.rerun()
+                    st.session_state.panel_images[i] = None; st.session_state.panel_bubbles[i] = []; st.session_state.panel_upload[i] = False; st.rerun()
             with c3:
                 if st.session_state.panel_images[i] and st.button("保存庫へ", key=f"sv_{i}"):
                     add_library(st.session_state.panel_images[i], f"4コマ{i+1}"); st.success("入れました")
@@ -1298,8 +1262,7 @@ else:
                 draft["color"] = st.color_picker("文字色", draft.get("color", "#111111"), key=f"bc_{i}")
                 st.session_state.drafts[i] = draft
                 if st.button("このセリフを追加", key=f"addb_{i}") and draft["text"].strip():
-                    st.session_state.panel_bubbles[i].append(dict(draft))
-                    st.session_state.drafts[i] = empty_bubble(); st.rerun()
+                    st.session_state.panel_bubbles[i].append(dict(draft)); st.session_state.drafts[i] = empty_bubble(); st.rerun()
                 for bi, bb in enumerate(st.session_state.panel_bubbles[i]):
                     k1, k2 = st.columns([5, 1])
                     with k1:
@@ -1328,8 +1291,7 @@ else:
                 st.error(f"コマ{i+1}がありません"); panels = None; break
             panels.append(draw_all_bubbles(panel_raw(i), st.session_state.panel_bubbles[i]))
         if panels:
-            st.session_state.combined = combine_panels(panels, cols=LAYOUTS[layout]["cols"])
-            go("make"); st.rerun()
+            st.session_state.combined = combine_panels(panels, cols=LAYOUTS[layout]["cols"]); go("make"); st.rerun()
     if st.session_state.combined is not None:
         st.image(st.session_state.combined, use_container_width=True)
         st.download_button("PNG保存", data=image_to_bytes(st.session_state.combined), file_name="yonkoma.png", mime="image/png")
