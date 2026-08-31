@@ -42,6 +42,7 @@ SMTP_PORT = int(os.environ.get("SMTP_PORT", "587"))
 SMTP_USER = os.environ.get("SMTP_USER", "")
 SMTP_PASS = os.environ.get("SMTP_PASS", "")
 OWNER_ACCOUNTS = [x.strip().lower() for x in os.environ.get("OWNER_ACCOUNTS", "").split(",") if x.strip()]
+CONTACT_TO = "panel.com@gmail.com"
 if stripe is not None and STRIPE_SECRET_KEY:
     stripe.api_key = STRIPE_SECRET_KEY
 
@@ -103,6 +104,16 @@ def go(page):
     st.session_state.page = page
     st.query_params["p"] = page
 
+def scroll_top():
+    st.markdown("""
+    <script>
+    const roots = window.parent ? window.parent.document : document;
+    const el = roots.querySelector('section.main') || roots.scrollingElement;
+    if (el) el.scrollTo(0, 0);
+    window.scrollTo(0, 0);
+    </script>
+    """, unsafe_allow_html=True)
+
 def start_wait():
     st.session_state.wait_until = time.time() + WAIT_SEC
 
@@ -157,15 +168,14 @@ def mail_domain_ok(m):
     except Exception:
         return False
 
-def send_code_mail(to_addr, code):
-    body = f"確認コード: {code}\nこのコードをサイトに入力してください。"
+def send_mail(to_addr, subject, body):
     if RESEND_API_KEY and MAIL_FROM:
-        res = requests.post("https://api.resend.com/emails", headers={"Authorization": f"Bearer {RESEND_API_KEY}", "Content-Type": "application/json"}, json={"from": MAIL_FROM, "to": [to_addr], "subject": "panel AI. 登録確認", "text": body}, timeout=20)
+        res = requests.post("https://api.resend.com/emails", headers={"Authorization": f"Bearer {RESEND_API_KEY}", "Content-Type": "application/json"}, json={"from": MAIL_FROM, "to": [to_addr], "subject": subject, "text": body}, timeout=20)
         return res.status_code in (200, 201), res.text[:200]
     if SMTP_HOST and SMTP_USER and SMTP_PASS and MAIL_FROM:
         try:
             msg = MIMEText(body, "plain", "utf-8")
-            msg["Subject"] = "panel AI. 登録確認"
+            msg["Subject"] = subject
             msg["From"] = MAIL_FROM
             msg["To"] = to_addr
             with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=20) as s:
@@ -176,6 +186,9 @@ def send_code_mail(to_addr, code):
         except Exception as e:
             return False, str(e)
     return False, "メール送信設定がありません"
+
+def send_code_mail(to_addr, code):
+    return send_mail(to_addr, "panel AI. 登録確認", f"確認コード: {code}\nこのコードをサイトに入力してください。")
 
 def load_json(path, default):
     if os.path.exists(path):
@@ -629,8 +642,11 @@ def show_header():
     if os.path.exists(HEADER_IMG):
         st.image(HEADER_IMG, use_container_width=True)
 
-def show_ad():
-    st.markdown('<div style="margin-top:24px;background:#eee;color:#111;text-align:center;padding:18px;border:1px dashed #999;">広告バナー（あとから貼ります）</div>', unsafe_allow_html=True)
+def panel_raw(i):
+    raw = uri_to_image(st.session_state.panel_images[i])
+    if not st.session_state.panel_upload[i]:
+        raw = raw.resize(st.session_state.panel_sizes[i])
+    return raw
 
 def empty_bubble():
     return {"text": "", "x": 8, "y": 8, "angle": 0, "fill": "#ffffff", "color": "#111111", "size": 28, "bold": 0, "tail_size": 28, "kind": "ふきだし", "font": "ゴシック", "dir": "横書き", "tail": "下"}
@@ -650,7 +666,7 @@ prepare_fonts()
 usable_fonts = [k for k, ok in prepare_fonts().items() if ok] or ["ゴシック"]
 defaults = {
     "logged_in": False, "page": "home", "layout": "縦4", "scenes": ["", "", "", ""],
-    "scene_chars": ["セットなし"] * 4, "panel_images": [None] * 4,
+    "scene_chars": ["セットなし"] * 4, "panel_images": [None] * 4, "panel_upload": [False] * 4,
     "panel_sizes": [SIZES["横長"]["wh"]] * 4, "panel_shape": ["横長"] * 4,
     "panel_bubbles": [[], [], [], []], "drafts": [empty_bubble() for _ in range(4)],
     "error": "", "busy_index": None, "combined": None, "points": 0, "premium_until": "",
@@ -697,6 +713,25 @@ section[data-testid="stSidebar"] * { color:#111 !important; }
 section[data-testid="stSidebar"] button { background:#fff !important; color:#111 !important; border:2px solid #111 !important; }
 section[data-testid="stSidebar"] button p { color:#111 !important; }
 [data-testid="stStatusWidget"] { display: none !important; }
+[data-testid="stSidebarCollapsedControl"],
+[data-testid="collapsedControl"] {
+  background: #fff0f6 !important;
+  border: 2px solid #ff8ab8 !important;
+  border-radius: 999px !important;
+  min-width: 86px !important;
+  height: 36px !important;
+  color: #ff4d88 !important;
+}
+[data-testid="stSidebarCollapsedControl"] svg,
+[data-testid="collapsedControl"] svg { display: none !important; }
+[data-testid="stSidebarCollapsedControl"]::after,
+[data-testid="collapsedControl"]::after {
+  content: "メニュー";
+  font-weight: 900;
+  color: #ff4d88;
+  font-size: 14px;
+  letter-spacing: .08em;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -727,11 +762,11 @@ if st.session_state.page == "home":
         if st.button("panel", use_container_width=True):
             go("help")
             st.rerun()
-    show_ad()
     st.stop()
 
 show_header()
 with st.sidebar:
+    st.markdown('<div style="font-weight:900;color:#ff4d88;font-size:22px;padding:4px 0 10px;">メニュー</div>', unsafe_allow_html=True)
     if st.session_state.logged_in:
         icon = st.session_state.get("icon", "🐱")
         if isinstance(icon, str) and icon.startswith("data:image"):
@@ -770,7 +805,10 @@ if st.session_state.page == "help":
     <h2>4コマ</h2><p>セット絵柄、キャラを使えて画像生成して、会話、吹き出しをつけれるよ！<br>最後に合体させて4コマ完成！</p>
     <h2>動画生成モード</h2><p>ポイントで動画生成<br>秒数が長いほどポイントが増える<br>4コマ動画も1コマずつポイント消費<br>自分のmp4（10秒以下）を入れてまとめることもできる<br>まとめは20ポイント</p>
     <h2>月額登録</h2><p>セット機能開放<br>サイズの変更開放<br>ポイント付与</p></div>""", unsafe_allow_html=True)
-    show_ad()
+    st.markdown("<div style='height:18px'></div>", unsafe_allow_html=True)
+    if st.button("メニューに戻って登録して始めよう！", type="primary", use_container_width=True):
+        go("register" if not st.session_state.logged_in else "simple")
+        st.rerun()
 
 elif st.session_state.page == "lib":
     st.subheader("保存庫")
@@ -790,7 +828,6 @@ elif st.session_state.page == "lib":
                 st.session_state.library.pop(len(st.session_state.library) - 1 - i)
                 save_user_state()
                 st.rerun()
-    show_ad()
 
 elif st.session_state.page == "video":
     st.subheader("動画生成")
@@ -845,7 +882,6 @@ elif st.session_state.page == "video":
         st.video(st.session_state.video_out)
         with open(st.session_state.video_out, "rb") as f:
             st.download_button("動画を保存", data=f.read(), file_name="video.mp4", mime="video/mp4")
-    show_ad()
 
 elif st.session_state.page == "v4":
     st.subheader("4コマ動画")
@@ -932,12 +968,7 @@ elif st.session_state.page == "v4":
             try:
                 take_points(JOIN_COST)
                 out = os.path.join(VID_DIR, f"join_{uuid.uuid4().hex}.mp4")
-                st.session_state.v4_joined = compose_yonkoma_video(
-                    ready_clips,
-                    st.session_state.v4_layout,
-                    out,
-                    sequential=(st.session_state.v4_play == "順番に動く"),
-                )
+                st.session_state.v4_joined = compose_yonkoma_video(ready_clips, st.session_state.v4_layout, out, sequential=(st.session_state.v4_play == "順番に動く"))
                 st.session_state.error = ""
             except Exception as e:
                 st.session_state.error = str(e)
@@ -957,13 +988,11 @@ elif st.session_state.page == "v4":
         st.video(st.session_state.v4_joined)
         with open(st.session_state.v4_joined, "rb") as f:
             st.download_button("漫画動画を保存", data=f.read(), file_name="manga.mp4", mime="video/mp4")
-    show_ad()
 
 elif st.session_state.page == "icon":
     st.subheader("アイコン変更")
     if not st.session_state.logged_in:
         st.warning("ログインしてください")
-        show_ad()
         st.stop()
     up = st.file_uploader("新しいアイコン", type=["png", "jpg", "jpeg"])
     if up:
@@ -976,7 +1005,6 @@ elif st.session_state.page == "icon":
         st.session_state.icon = random.choice(ANIMALS)
         save_user_state()
         st.rerun()
-    show_ad()
 
 elif st.session_state.page == "shop":
     st.subheader("ポイント購入")
@@ -996,7 +1024,6 @@ elif st.session_state.page == "shop":
                         st.markdown(f"[決済ページへ進む]({session.url})")
                     except Exception as e:
                         st.error(str(e))
-    show_ad()
 
 elif st.session_state.page == "register":
     st.subheader("登録 / ログイン")
@@ -1054,12 +1081,24 @@ elif st.session_state.page == "register":
             st.rerun()
         else:
             st.error("ログインできません")
-    show_ad()
 
 elif st.session_state.page == "contact":
     st.subheader("お問い合わせ")
-    st.write("広告や不具合は、あとから載せる連絡先へどうぞ。")
-    show_ad()
+    st.write(f"送信先: {CONTACT_TO}")
+    cname = st.text_input("お名前")
+    cmail = st.text_input("返信先メール")
+    cbody = st.text_area("内容")
+    if st.button("メールを送る", type="primary"):
+        if not cname or not cmail or not cbody:
+            st.warning("全部入れてください")
+        elif not valid_mail_format(cmail):
+            st.error("メールの形が正しくありません")
+        else:
+            ok, err = send_mail(CONTACT_TO, f"[panel AI] お問い合わせ {cname}", f"名前: {cname}\n返信先: {cmail}\nユーザー: {st.session_state.get('username','未ログイン')}\n\n{cbody}")
+            if ok:
+                st.success("送りました")
+            else:
+                st.error(f"送れませんでした: {err}")
 
 elif st.session_state.page == "plan":
     st.subheader("月額登録")
@@ -1074,13 +1113,11 @@ elif st.session_state.page == "plan":
             st.markdown(f"[決済ページへ進む]({session.url})")
         except Exception as e:
             st.error(str(e))
-    show_ad()
 
 elif st.session_state.page == "chars":
     st.subheader("セット")
     if not is_premium() and not is_owner():
         st.warning("セットはVIPだけです。")
-        show_ad()
         st.stop()
     save_name = st.text_input("保存名", placeholder="任意")
     use_type = st.radio("種類", ["キャラだけ", "絵柄だけ", "キャラ＋絵柄"], horizontal=True)
@@ -1113,9 +1150,9 @@ elif st.session_state.page == "chars":
                 st.session_state.characters.pop(i)
                 save_user_state()
                 st.rerun()
-    show_ad()
 
 elif st.session_state.page == "simple":
+    scroll_top()
     st.subheader("画像生成モード")
     if st.button("履歴"):
         st.session_state.show_history = True
@@ -1149,7 +1186,6 @@ elif st.session_state.page == "simple":
                 if st.button("いいえ"):
                     st.session_state.hist_pick = None
                     st.rerun()
-        show_ad()
         st.stop()
     st.session_state.sq = st.text_area("画質プロンプト", value=st.session_state.sq)
     st.session_state.sb = st.text_area("背景プロンプト", value=st.session_state.sb)
@@ -1208,7 +1244,6 @@ elif st.session_state.page == "simple":
             st.session_state.video_src = st.session_state.simple_image
             go("video")
             st.rerun()
-    show_ad()
 
 else:
     st.subheader("4コマ")
@@ -1241,6 +1276,7 @@ else:
         gw, gh = spec["gen"]
         st.session_state.panel_images[i] = nai_request(scene, gw, gh, "nai-diffusion-4-5-full", steps=23, scale=5.0, char_refs=chars, style_refs=styles)
         st.session_state.panel_sizes[i] = spec["wh"]
+        st.session_state.panel_upload[i] = False
 
     for i in range(n):
         with st.expander(f"コマ {i+1}", expanded=True):
@@ -1248,11 +1284,14 @@ else:
             shape = st.selectbox("サイズ", size_opts, index=size_opts.index(cur), key=f"shape_{i}")
             st.session_state.panel_shape[i] = shape
             spec = SIZES[shape]
-            st.session_state.panel_sizes[i] = spec["wh"]
+            if not st.session_state.panel_upload[i]:
+                st.session_state.panel_sizes[i] = spec["wh"]
             st.caption(f"{spec['wh'][0]} × {spec['wh'][1]}　消費 {spec['cost']}")
             up = st.file_uploader("持っている画像を使う", type=["png", "jpg", "jpeg"], key=f"up_{i}")
             if up:
                 st.session_state.panel_images[i] = uploaded_to_uri(up)
+                st.session_state.panel_upload[i] = True
+                st.session_state.panel_sizes[i] = uri_to_image(st.session_state.panel_images[i]).size
             st.session_state.scenes[i] = st.text_input("生成する内容", value=st.session_state.scenes[i], key=f"sc_{i}")
             options = ["セットなし"] + (names if (is_premium() or is_owner()) else [])
             curc = st.session_state.scene_chars[i]
@@ -1268,6 +1307,7 @@ else:
                 if st.button("消す", key=f"clr_{i}"):
                     st.session_state.panel_images[i] = None
                     st.session_state.panel_bubbles[i] = []
+                    st.session_state.panel_upload[i] = False
                     st.rerun()
             with c3:
                 if st.session_state.panel_images[i] and st.button("保存庫へ", key=f"sv_{i}"):
@@ -1304,8 +1344,7 @@ else:
                         if st.button("×", key=f"delb_{i}_{bi}"):
                             st.session_state.panel_bubbles[i].pop(bi)
                             st.rerun()
-                raw = uri_to_image(st.session_state.panel_images[i]).resize(st.session_state.panel_sizes[i])
-                preview = draw_all_bubbles(raw, st.session_state.panel_bubbles[i])
+                preview = draw_all_bubbles(panel_raw(i), st.session_state.panel_bubbles[i])
                 if draft["text"].strip():
                     preview = draw_one_bubble(preview, draft)
                 st.image(preview, width=340)
@@ -1328,8 +1367,7 @@ else:
                 st.error(f"コマ{i+1}がありません")
                 panels = None
                 break
-            raw = uri_to_image(st.session_state.panel_images[i]).resize(st.session_state.panel_sizes[i])
-            panels.append(draw_all_bubbles(raw, st.session_state.panel_bubbles[i]))
+            panels.append(draw_all_bubbles(panel_raw(i), st.session_state.panel_bubbles[i]))
         if panels:
             st.session_state.combined = combine_panels(panels, cols=LAYOUTS[layout]["cols"])
             go("make")
@@ -1342,4 +1380,3 @@ else:
             st.session_state.combined.save(buf, format="PNG")
             add_library("data:image/png;base64," + base64.b64encode(buf.getvalue()).decode(), "4コマまとめ")
             st.success("入れました")
-    show_ad()
