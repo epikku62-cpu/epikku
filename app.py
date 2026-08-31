@@ -53,7 +53,7 @@ HOME_IMG = "IMG_1106.jpeg"
 HEADER_IMG = "IMG_1107.jpeg"
 VID_DIR = "video_tmp"
 PHONE_W, PHONE_H = 1080, 1920
-MONTHLY_PRICE, MONTHLY_POINTS, REF_SITE, SIGNUP_POINTS = 980, 2000, 10, 20
+MONTHLY_PRICE, MONTHLY_POINTS, REF_SITE, SIGNUP_POINTS = 980, 1200, 10, 20
 VIDEO_PT_PER_SEC = 30
 JOIN_COST = 20
 MAX_UPLOAD_SEC = 10
@@ -818,12 +818,12 @@ if st.session_state.error:
         st.session_state.error = ""; st.rerun()
 
 if st.session_state.page == "help":
-    st.markdown("""<div style="color:#111;background:#fff;padding:16px;border-radius:12px;">
+    st.markdown(f"""<div style="color:#111;background:#fff;padding:16px;border-radius:12px;">
     <h2>画像生成モード</h2><p>ポイントを消費して画像生成<br>日本語で作成可能<br>おすすめ</p>
     <h2>セット</h2><p>絵柄の登録<br>キャラの登録<br>登録したら4コマ画像生成の時、絵柄、キャラが反映される</p>
     <h2>4コマ</h2><p>セット絵柄、キャラを使えて画像生成して、会話、吹き出しをつけれるよ！<br>最後に合体させて4コマ完成！</p>
     <h2>動画生成モード</h2><p>ポイントで動画生成<br>秒数が長いほどポイントが増える<br>4コマ動画も1コマずつポイント消費<br>自分のmp4（10秒以下）を入れてまとめることもできる<br>まとめは20ポイント</p>
-    <h2>月額登録</h2><p>セット機能開放<br>サイズの変更開放<br>ポイント付与</p></div>""", unsafe_allow_html=True)
+    <h2>月額登録</h2><p>セット機能開放<br>サイズの変更開放<br>{MONTHLY_POINTS}ポイント付与</p></div>""", unsafe_allow_html=True)
     if st.button("登録して始めよう！", type="primary", use_container_width=True):
         go("register" if not st.session_state.logged_in else "simple"); st.rerun()
 
@@ -1074,6 +1074,9 @@ elif st.session_state.page == "contact":
 elif st.session_state.page == "plan":
     st.subheader("月額登録")
     st.write(f"**{MONTHLY_PRICE}円 / 30日**")
+    st.write(f"- {MONTHLY_POINTS}ポイント付与")
+    st.write("- セット機能開放")
+    st.write("- サイズの変更開放")
     if is_premium():
         st.success(f"VIPです。期限 {str(st.session_state.premium_until)[:10]}")
     elif stripe is None or not STRIPE_SECRET_KEY or not STRIPE_PRICE_ID:
