@@ -522,6 +522,17 @@ def draw_text(draw, xy, text, font, fill, bold=0):
                 draw.text((x + dx, y + dy), text, font=font, fill=fill)
     draw.text((x, y), text, font=font, fill=fill)
 
+def paste_layer(img, layer, px, py):
+    sx = max(0, -px)
+    sy = max(0, -py)
+    dx = max(0, px)
+    dy = max(0, py)
+    cw = min(layer.width - sx, img.width - dx)
+    ch = min(layer.height - sy, img.height - dy)
+    if cw > 0 and ch > 0:
+        img.alpha_composite(layer.crop((sx, sy, sx + cw, sy + ch)), (dx, dy))
+    return img
+
 def draw_one_bubble(img, bub):
     text = (bub.get("text") or "").strip()
     if not text:
@@ -557,15 +568,17 @@ def draw_one_bubble(img, bub):
         draw.rounded_rectangle([x0, y0, x0 + box_w, y0 + box_h], radius=22, fill=fill, outline="#222222", width=3)
         ts = tail_size
         if tail == "下":
-            draw.polygon([(x0 + box_w * 0.38, y0 + box_h - 2), (x0 + box_w * 0.52, y0 + box_h - 2), (x0 + box_w * 0.34, y0 + box_h + ts)], fill=fill)
+            tpts = [(x0 + box_w * 0.38, y0 + box_h - 2), (x0 + box_w * 0.52, y0 + box_h - 2), (x0 + box_w * 0.34, y0 + box_h + ts)]
         elif tail == "下左":
-            draw.polygon([(x0 + 18, y0 + box_h - 2), (x0 + 18 + ts * 0.7, y0 + box_h - 2), (x0 + 8, y0 + box_h + ts)], fill=fill)
+            tpts = [(x0 + 18, y0 + box_h - 2), (x0 + 18 + ts * 0.7, y0 + box_h - 2), (x0 + 8, y0 + box_h + ts)]
         elif tail == "下右":
-            draw.polygon([(x0 + box_w - 18 - ts * 0.7, y0 + box_h - 2), (x0 + box_w - 18, y0 + box_h - 2), (x0 + box_w - 8, y0 + box_h + ts)], fill=fill)
+            tpts = [(x0 + box_w - 18 - ts * 0.7, y0 + box_h - 2), (x0 + box_w - 18, y0 + box_h - 2), (x0 + box_w - 8, y0 + box_h + ts)]
         elif tail == "左":
-            draw.polygon([(x0 + 2, y0 + box_h * 0.45), (x0 + 2, y0 + box_h * 0.62), (x0 - ts, y0 + box_h * 0.58)], fill=fill)
+            tpts = [(x0 + 2, y0 + box_h * 0.45), (x0 + 2, y0 + box_h * 0.62), (x0 - ts, y0 + box_h * 0.58)]
         else:
-            draw.polygon([(x0 + box_w - 2, y0 + box_h * 0.45), (x0 + box_w - 2, y0 + box_h * 0.62), (x0 + box_w + ts, y0 + box_h * 0.58)], fill=fill)
+            tpts = [(x0 + box_w - 2, y0 + box_h * 0.45), (x0 + box_w - 2, y0 + box_h * 0.62), (x0 + box_w + ts, y0 + box_h * 0.58)]
+        draw.polygon(tpts, fill=fill)
+        draw.line([tpts[0], tpts[2], tpts[1]], fill="#222222", width=3)
     elif kind == "叫び":
         pts = []
         for i in range(32):
@@ -599,10 +612,12 @@ def draw_one_bubble(img, bub):
     angle = int(bub.get("angle", 0))
     if angle:
         layer = layer.rotate(-angle, expand=True, resample=Image.BICUBIC)
-    px = int((w - layer.width) * float(bub.get("x", 8)) / 100)
-    py = int((h - layer.height) * float(bub.get("y", 8)) / 100)
-    img.alpha_composite(layer, (max(0, min(w - layer.width, px)), max(0, min(h - layer.height, py))))
-    return img.convert("RGB")
+        px = int((w - box_w) * float(bub.get("x", 8)) / 100) - (layer.width - box_w) // 2
+        py = int((h - box_h) * float(bub.get("y", 8)) / 100) - (layer.height - box_h) // 2
+    else:
+        px = int((w - box_w) * float(bub.get("x", 8)) / 100) - extra
+        py = int((h - box_h) * float(bub.get("y", 8)) / 100) - extra
+    return paste_layer(img, layer, px, py).convert("RGB")
 
 def draw_all_bubbles(panel_img, bubbles):
     img = panel_img
