@@ -54,6 +54,8 @@ VID_DIR = "video_tmp"
 PHONE_W, PHONE_H = 1080, 1920
 MONTHLY_PRICE, MONTHLY_POINTS, REF_SITE, SIGNUP_POINTS = 980, 2000, 10, 20
 VIDEO_PT_PER_SEC = 30
+JOIN_COST = 20
+MAX_UPLOAD_SEC = 10
 POINT_PACKS = [{"points": 300, "yen": 300}, {"points": 900, "yen": 900}, {"points": 1500, "yen": 1500}, {"points": 3000, "yen": 3000}]
 ANIMALS = ["🐱", "🐶", "🐰", "🐻", "🦊", "🐼", "🐸", "🦉", "🐧", "🐯"]
 LAYOUTS = {"縦4": {"cols": 1, "count": 4}, "縦3": {"cols": 1, "count": 3}, "縦2": {"cols": 1, "count": 2}, "横4": {"cols": 4, "count": 4}, "横3": {"cols": 3, "count": 3}, "横2": {"cols": 2, "count": 2}, "2×2": {"cols": 2, "count": 4}}
@@ -213,6 +215,23 @@ def shrink_for_video(image_uri):
     buf = BytesIO()
     img.convert("RGB").save(buf, format="JPEG", quality=80)
     return "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode()
+
+def save_upload_mp4(uploaded):
+    path = os.path.join(VID_DIR, f"up_{uuid.uuid4().hex}.mp4")
+    with open(path, "wb") as f:
+        f.write(uploaded.getvalue())
+    r = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", path], capture_output=True, text=True)
+    try:
+        sec = float((r.stdout or "0").strip() or 0)
+    except Exception:
+        sec = 0
+    if sec <= 0:
+        os.remove(path)
+        raise Exception("動画の長さが読めません。mp4にしてください")
+    if sec > MAX_UPLOAD_SEC + 0.3:
+        os.remove(path)
+        raise Exception(f"10秒以下のmp4だけ使えます。今は {sec:.1f}秒です")
+    return path
 
 def pad_ref(uri):
     img = uri_to_image(uri).convert("RGB")
@@ -676,7 +695,7 @@ if st.session_state.page == "help":
     <h2>画像生成モード</h2><p>ポイントを消費して画像生成<br>日本語で作成可能<br>おすすめ</p>
     <h2>セット</h2><p>絵柄の登録<br>キャラの登録<br>登録したら4コマ画像生成の時、絵柄、キャラが反映される</p>
     <h2>4コマ</h2><p>セット絵柄、キャラを使えて画像生成して、会話、吹き出しをつけれるよ！<br>最後に合体させて4コマ完成！</p>
-    <h2>動画生成モード</h2><p>ポイントで動画生成<br>秒数が長いほどポイントが増える<br>4コマ動画も1コマずつポイント消費</p>
+    <h2>動画生成モード</h2><p>ポイントで動画生成<br>秒数が長いほどポイントが増える<br>4コマ動画も1コマずつポイント消費<br>自分のmp4（10秒以下）を入れてまとめることもできる<br>まとめは20ポイント</p>
     <h2>月額登録</h2><p>セット機能開放<br>サイズの変更開放<br>ポイント付与</p></div>""", unsafe_allow_html=True)
     show_ad()
 
@@ -698,8 +717,6 @@ elif st.session_state.page == "lib":
 
 elif st.session_state.page == "video":
     st.subheader("動画生成")
-    if is_owner():
-        st.success("管理者のため、動画はポイントなしです")
     job = st.session_state.get("vjob")
     if job and job.get("kind") == "video":
         show_wait("cd_video", "生成中")
@@ -722,7 +739,7 @@ elif st.session_state.page == "video":
         st.image(st.session_state.video_src, width=240)
     motion = st.text_area("動きの内容", placeholder="ゆっくり瞬きする")
     dur = st.slider("秒数", 3, 10, 6)
-    st.caption("ポイントなし" if is_owner() else f"消費ポイント {video_cost(dur)}　（1秒 {VIDEO_PT_PER_SEC}ポイント）")
+    st.caption(f"消費ポイント {video_cost(dur)}　（1秒 {VIDEO_PT_PER_SEC}ポイント）")
     if st.button("動画にする", type="primary"):
         if not st.session_state.video_src:
             st.session_state.error = "画像を選んでください"
@@ -743,9 +760,7 @@ elif st.session_state.page == "video":
 
 elif st.session_state.page == "v4":
     st.subheader("4コマ動画")
-    st.caption("カウントが0になってから、そのコマの確認を押してください。まとめも同じです。")
-    if is_owner():
-        st.success("管理者のため、動画はポイントなしです")
+    st.caption("画像から作るか、10秒以下のmp4を入れてください。まとめは20ポイントです。")
     job = st.session_state.get("vjob") if isinstance(st.session_state.get("vjob"), dict) else None
     st.session_state.v4_count = st.radio("コマ数", [2, 3, 4], index=[2, 3, 4].index(int(st.session_state.v4_count)), horizontal=True)
     n = int(st.session_state.v4_count)
@@ -762,14 +777,22 @@ elif st.session_state.page == "v4":
                 sel = st.selectbox("画像", picks, key=f"v4s_{i}")
                 if sel != "今の4コマ画像":
                     src = st.session_state.library[picks.index(sel) - 1]["url"]
-            up = st.file_uploader("アップロード", type=["png", "jpg", "jpeg"], key=f"v4u_{i}")
+            up = st.file_uploader("画像をアップロード", type=["png", "jpg", "jpeg"], key=f"v4u_{i}")
             if up:
                 src = uploaded_to_uri(up)
             if src:
                 st.image(src, width=180)
+            vup = st.file_uploader("動画をアップロード（mp4・10秒以下）", type=["mp4"], key=f"v4vu_{i}")
+            if vup is not None and st.button("この動画を使う", key=f"v4vuse_{i}"):
+                try:
+                    st.session_state.v4_clips[i] = save_upload_mp4(vup)
+                    st.session_state.error = ""
+                except Exception as e:
+                    st.session_state.error = str(e)
+                go("v4"); st.rerun()
             st.session_state.v4_prompts[i] = st.text_input("動き", value=st.session_state.v4_prompts[i], key=f"v4p_{i}")
             st.session_state.v4_durs[i] = st.slider("秒数", 3, 10, int(st.session_state.v4_durs[i]), key=f"v4d_{i}")
-            st.caption("ポイントなし" if is_owner() else f"消費 {video_cost(st.session_state.v4_durs[i])}ポイント")
+            st.caption(f"画像から作る場合 {video_cost(st.session_state.v4_durs[i])}ポイント")
             if job and job.get("kind") == "v4" and int(job.get("i", -1)) == i:
                 show_wait(f"cd_p{i}", f"コマ{i+1} 生成中")
                 if st.button("確認する", key=f"v4chk_{i}"):
@@ -796,11 +819,12 @@ elif st.session_state.page == "v4":
     ready = [st.session_state.v4_clips[i] for i in range(n) if st.session_state.v4_clips[i] and os.path.exists(st.session_state.v4_clips[i])]
     st.markdown("---")
     st.subheader("まとめ")
-    st.caption(f"できている動画 {len(ready)} / {n}")
+    st.caption(f"できている動画 {len(ready)} / {n}　まとめ {JOIN_COST}ポイント")
     if st.session_state.get("v4_joining"):
         show_wait("cd_join", "まとめ生成中")
         if st.button("まとめを確認する"):
             try:
+                take_video_points(JOIN_COST)
                 out = os.path.join(VID_DIR, f"join_{uuid.uuid4().hex}.mp4")
                 if st.session_state.v4_play == "順番に動く":
                     st.session_state.v4_joined = concat_videos(ready, out)
