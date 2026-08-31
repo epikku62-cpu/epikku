@@ -12,7 +12,6 @@ import re
 import socket
 import smtplib
 import subprocess
-import time
 import requests
 from email.mime.text import MIMEText
 from io import BytesIO
@@ -101,6 +100,49 @@ def is_owner():
 def go(page):
     st.session_state.page = page
     st.query_params["p"] = page
+
+def clear_ready():
+    qp = dict(st.query_params)
+    if "ready" in qp:
+        del qp["ready"]
+        st.query_params.clear()
+        for k, v in qp.items():
+            st.query_params[k] = v
+
+def lock_other_buttons():
+    st.markdown("""
+    <style>
+    section.main .block-container { pointer-events: none; }
+    .wait-ok, .wait-ok * { pointer-events: auto !important; }
+    </style>
+    """, unsafe_allow_html=True)
+
+def show_gen_wait(cid, text="生成中"):
+    lock_other_buttons()
+    st.markdown(f"""
+    <div class="wait-ok" style="margin:8px 0;padding:12px;border-radius:14px;background:#fff0f6;color:#ff4d88;font-weight:800;">
+      {text}… <span id="{cid}">20</span>
+    </div>
+    <script>
+    (function(){{
+      let s=20; const e=document.getElementById("{cid}");
+      const t=setInterval(function(){{
+        s--;
+        if(!e) return;
+        if(s<=0){{
+          clearInterval(t);
+          const u=new URL(window.parent.location.href);
+          u.searchParams.set("ready","1");
+          window.parent.location.href=u.toString();
+        }} else e.innerText=s;
+      }},1000);
+    }})();
+    </script>
+    """, unsafe_allow_html=True)
+    st.markdown('<div class="wait-ok">', unsafe_allow_html=True)
+    cancel = st.button("キャンセル", key=f"cancel_{cid}")
+    st.markdown("</div>", unsafe_allow_html=True)
+    return cancel
 
 def file_b64(path):
     if not os.path.exists(path):
@@ -226,11 +268,9 @@ def save_upload_mp4(uploaded):
     except Exception:
         sec = 0
     if sec <= 0:
-        os.remove(path)
-        raise Exception("動画の長さが読めません。mp4にしてください")
+        os.remove(path); raise Exception("動画の長さが読めません。mp4にしてください")
     if sec > MAX_UPLOAD_SEC + 0.3:
-        os.remove(path)
-        raise Exception(f"10秒以下のmp4だけ使えます。今は {sec:.1f}秒です")
+        os.remove(path); raise Exception(f"10秒以下のmp4だけ使えます。今は {sec:.1f}秒です")
     return path
 
 def pad_ref(uri):
@@ -271,24 +311,6 @@ def add_library(uri, label=""):
         return
     st.session_state.library.append({"id": str(uuid.uuid4())[:8], "url": uri, "label": label or "保存画像", "time": datetime.now().strftime("%m/%d %H:%M")})
     save_user_state()
-
-def show_wait(cid, text="生成中"):
-    st.markdown(f"""
-    <div style="margin:8px 0;padding:12px;border-radius:14px;background:#fff0f6;color:#ff4d88;font-weight:800;">
-      {text}… <span id="{cid}">20</span>
-    </div>
-    <script>
-    (function(){{
-      let s=20; const e=document.getElementById("{cid}");
-      const t=setInterval(function(){{
-        s--;
-        if(!e) return;
-        if(s<=0){{ clearInterval(t); e.parentElement.innerText="0になりました。確認を押してください"; }}
-        else e.innerText=s;
-      }},1000);
-    }})();
-    </script>
-    """, unsafe_allow_html=True)
 
 def nai_wh(w, h):
     return max(64, min(1920, int(round(w / 64) * 64))), max(64, min(1920, int(round(h / 64) * 64)))
@@ -400,10 +422,7 @@ def compose_yonkoma_video(paths, layout_key="2×2", out_path="out.mp4"):
         ins += ["-i", p]
     parts, labels = [], []
     for i in range(n):
-        parts.append(
-            f"[{i}:v]fps=24,scale={cw}:{ch}:force_original_aspect_ratio=decrease:force_divisible_by=2,"
-            f"pad={cw}:{ch}:(ow-iw)/2:(oh-ih)/2:color=white,setsar=1,format=yuv420p[v{i}]"
-        )
+        parts.append(f"[{i}:v]fps=24,scale={cw}:{ch}:force_original_aspect_ratio=decrease:force_divisible_by=2,pad={cw}:{ch}:(ow-iw)/2:(oh-ih)/2:color=white,setsar=1,format=yuv420p[v{i}]")
         labels.append(f"[v{i}]")
     if cols == 1:
         filt = ";".join(parts) + ";" + "".join(labels) + f"vstack=inputs={n}[out]"
@@ -411,10 +430,7 @@ def compose_yonkoma_video(paths, layout_key="2×2", out_path="out.mp4"):
         filt = ";".join(parts) + ";" + "".join(labels) + f"hstack=inputs={n}[out]"
     else:
         filt = ";".join(parts) + ";" + "".join(labels) + f"xstack=inputs={n}:layout=0_0|w0_0|0_h0|w0_h0[out]"
-    r = subprocess.run(
-        ["ffmpeg", "-y"] + ins + ["-filter_complex", filt, "-map", "[out]", "-an", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-shortest", out_path],
-        capture_output=True, text=True
-    )
+    r = subprocess.run(["ffmpeg", "-y"] + ins + ["-filter_complex", filt, "-map", "[out]", "-an", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-shortest", out_path], capture_output=True, text=True)
     if r.returncode != 0 or not os.path.exists(out_path):
         raise Exception((r.stderr or "結合失敗")[-500:])
     return out_path
@@ -696,6 +712,8 @@ if st.session_state.error:
     if st.button("閉じる"):
         st.session_state.error = ""; st.rerun()
 
+ready = st.query_params.get("ready") == "1"
+
 if st.session_state.page == "help":
     st.markdown("""<div style="color:#111;background:#fff;padding:16px;border-radius:12px;">
     <h2>画像生成モード</h2><p>ポイントを消費して画像生成<br>日本語で作成可能<br>おすすめ</p>
@@ -723,16 +741,24 @@ elif st.session_state.page == "lib":
 
 elif st.session_state.page == "video":
     st.subheader("動画生成")
-    job = st.session_state.get("vjob")
-    if job and job.get("kind") == "video":
-        show_wait("cd_video", "生成中")
+    job = st.session_state.get("vjob") if isinstance(st.session_state.get("vjob"), dict) else None
+    if job and job.get("kind") == "video" and not ready:
+        if show_gen_wait("cd_video", "生成中"):
+            st.session_state.vjob = None; clear_ready(); go("video"); st.rerun()
+    elif job and job.get("kind") == "video" and ready:
+        lock_other_buttons()
+        st.markdown('<div class="wait-ok">', unsafe_allow_html=True)
+        st.write("0になりました。確認を押してください")
         if st.button("確認する"):
             state, val = grok_poll_video(job["id"])
             if state == "done":
                 st.session_state.video_out = val; st.session_state.vjob = None
             elif state == "error":
                 st.session_state.error = val; st.session_state.vjob = None
-            go("video"); st.rerun()
+            clear_ready(); go("video"); st.rerun()
+        if st.button("キャンセル"):
+            st.session_state.vjob = None; clear_ready(); go("video"); st.rerun()
+        st.markdown("</div>", unsafe_allow_html=True)
     up = st.file_uploader("画像をアップロード", type=["png", "jpg", "jpeg"])
     if up:
         st.session_state.video_src = uploaded_to_uri(up)
@@ -755,6 +781,7 @@ elif st.session_state.page == "video":
                 jid = grok_start_video(st.session_state.video_src, motion, dur)
                 st.session_state.vjob = {"kind": "video", "id": jid}
                 st.session_state.error = ""
+                clear_ready()
             except Exception as e:
                 st.session_state.error = str(e)
         go("video"); st.rerun()
@@ -791,23 +818,30 @@ elif st.session_state.page == "v4":
             vup = st.file_uploader("動画をアップロード（mp4・10秒以下）", type=["mp4"], key=f"v4vu_{i}")
             if vup is not None and st.button("この動画を使う", key=f"v4vuse_{i}"):
                 try:
-                    st.session_state.v4_clips[i] = save_upload_mp4(vup)
-                    st.session_state.error = ""
+                    st.session_state.v4_clips[i] = save_upload_mp4(vup); st.session_state.error = ""
                 except Exception as e:
                     st.session_state.error = str(e)
                 go("v4"); st.rerun()
             st.session_state.v4_prompts[i] = st.text_input("動き", value=st.session_state.v4_prompts[i], key=f"v4p_{i}")
             st.session_state.v4_durs[i] = st.slider("秒数", 3, 10, int(st.session_state.v4_durs[i]), key=f"v4d_{i}")
             st.caption(f"画像から作る場合 {video_cost(st.session_state.v4_durs[i])}ポイント")
-            if job and job.get("kind") == "v4" and int(job.get("i", -1)) == i:
-                show_wait(f"cd_p{i}", f"コマ{i+1} 生成中")
+            if job and job.get("kind") == "v4" and int(job.get("i", -1)) == i and not ready:
+                if show_gen_wait(f"cd_p{i}", f"コマ{i+1} 生成中"):
+                    st.session_state.vjob = None; clear_ready(); go("v4"); st.rerun()
+            elif job and job.get("kind") == "v4" and int(job.get("i", -1)) == i and ready:
+                lock_other_buttons()
+                st.markdown('<div class="wait-ok">', unsafe_allow_html=True)
+                st.write("0になりました。確認を押してください")
                 if st.button("確認する", key=f"v4chk_{i}"):
                     state, val = grok_poll_video(job["id"])
                     if state == "done":
                         st.session_state.v4_clips[i] = val; st.session_state.vjob = None
                     elif state == "error":
                         st.session_state.error = val; st.session_state.vjob = None
-                    go("v4"); st.rerun()
+                    clear_ready(); go("v4"); st.rerun()
+                if st.button("キャンセル", key=f"v4can_{i}"):
+                    st.session_state.vjob = None; clear_ready(); go("v4"); st.rerun()
+                st.markdown("</div>", unsafe_allow_html=True)
             if st.button("このコマを動画にする", key=f"v4g_{i}"):
                 if not src:
                     st.session_state.error = "画像がありません"
@@ -816,37 +850,44 @@ elif st.session_state.page == "v4":
                         take_video_points(video_cost(st.session_state.v4_durs[i]))
                         jid = grok_start_video(src, st.session_state.v4_prompts[i], st.session_state.v4_durs[i])
                         st.session_state.vjob = {"kind": "v4", "i": i, "id": jid}
-                        st.session_state.error = ""
+                        st.session_state.error = ""; clear_ready()
                     except Exception as e:
                         st.session_state.error = str(e)
                 go("v4"); st.rerun()
             if st.session_state.v4_clips[i] and os.path.exists(st.session_state.v4_clips[i]):
                 st.video(st.session_state.v4_clips[i])
-    ready = [st.session_state.v4_clips[i] for i in range(n) if st.session_state.v4_clips[i] and os.path.exists(st.session_state.v4_clips[i])]
+    ready_clips = [st.session_state.v4_clips[i] for i in range(n) if st.session_state.v4_clips[i] and os.path.exists(st.session_state.v4_clips[i])]
     st.markdown("---")
     st.subheader("まとめ")
-    st.caption(f"できている動画 {len(ready)} / {n}　まとめ {JOIN_COST}ポイント")
-    if st.session_state.get("v4_joining"):
-        show_wait("cd_join", "まとめ生成中")
-        if st.button("まとめを確認する"):
+    st.caption(f"できている動画 {len(ready_clips)} / {n}　まとめ {JOIN_COST}ポイント")
+    if st.session_state.get("v4_joining") and not ready:
+        if show_gen_wait("cd_join", "まとめ生成中"):
+            st.session_state.v4_joining = False; clear_ready(); go("v4"); st.rerun()
+    elif st.session_state.get("v4_joining") and ready:
+        lock_other_buttons()
+        st.markdown('<div class="wait-ok">', unsafe_allow_html=True)
+        st.write("0になりました。確認を押してください")
+        if st.button("確認する", key="join_ok"):
             try:
                 take_video_points(JOIN_COST)
                 out = os.path.join(VID_DIR, f"join_{uuid.uuid4().hex}.mp4")
                 if st.session_state.v4_play == "順番に動く":
-                    st.session_state.v4_joined = concat_videos(ready, out)
+                    st.session_state.v4_joined = concat_videos(ready_clips, out)
                 else:
-                    st.session_state.v4_joined = compose_yonkoma_video(ready, st.session_state.v4_layout, out)
+                    st.session_state.v4_joined = compose_yonkoma_video(ready_clips, st.session_state.v4_layout, out)
                 st.session_state.error = ""
             except Exception as e:
                 st.session_state.error = str(e)
             st.session_state.v4_joining = False
-            go("v4"); st.rerun()
+            clear_ready(); go("v4"); st.rerun()
+        if st.button("キャンセル", key="join_ng"):
+            st.session_state.v4_joining = False; clear_ready(); go("v4"); st.rerun()
+        st.markdown("</div>", unsafe_allow_html=True)
     if st.button("漫画動画としてまとめる", type="primary"):
-        if len(ready) < n:
-            st.session_state.error = f"{n}本そろえてください。今は {len(ready)} 本です"
+        if len(ready_clips) < n:
+            st.session_state.error = f"{n}本そろえてください。今は {len(ready_clips)} 本です"
         else:
-            st.session_state.v4_joining = True
-            st.session_state.error = ""
+            st.session_state.v4_joining = True; st.session_state.error = ""; clear_ready()
         go("v4"); st.rerun()
     if st.session_state.v4_joined and os.path.exists(st.session_state.v4_joined):
         st.video(st.session_state.v4_joined)
