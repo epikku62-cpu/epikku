@@ -100,13 +100,22 @@ def is_owner():
     e = norm_mail(st.session_state.get("email"))
     return bool(OWNER_ACCOUNTS) and (u in OWNER_ACCOUNTS or e in OWNER_ACCOUNTS)
 
+def scroll_top():
+    st.markdown("""
+    <script>
+    const d = window.parent ? window.parent.document : document;
+    const main = d.querySelector('section.main') || d.scrollingElement || d.documentElement;
+    if (main) main.scrollTo(0, 0);
+    window.scrollTo(0, 0);
+    if (d.body) d.body.scrollTop = 0;
+    </script>
+    """, unsafe_allow_html=True)
+
 def go(page):
     st.session_state.page = page
     st.session_state.menu_open = False
+    st.session_state.need_top = True
     st.query_params["p"] = page
-
-def scroll_top():
-    st.markdown("<script>window.scrollTo(0,0);</script>", unsafe_allow_html=True)
 
 def start_wait():
     st.session_state.wait_until = time.time() + WAIT_SEC
@@ -116,7 +125,6 @@ def lock_other_buttons():
     <style>
     section.main .block-container { pointer-events: none; }
     .wait-ok, .wait-ok * { pointer-events: auto !important; }
-    #menu-toggle, #menu-toggle * { pointer-events: auto !important; }
     </style>
     """, unsafe_allow_html=True)
 
@@ -663,7 +671,7 @@ def render_top_menu():
             st.rerun()
     if not st.session_state.menu_open:
         return
-    st.markdown('<div style="background:#fff;border:2px solid #111;border-radius:16px;padding:12px;margin:8px 0 16px;">', unsafe_allow_html=True)
+    st.markdown('<div style="background:#fff;border:3px solid #ffb6d5;border-radius:20px;padding:12px;margin:8px 0 16px;">', unsafe_allow_html=True)
     st.markdown("**メニュー**")
     if st.session_state.logged_in:
         icon = st.session_state.get("icon", "🐱")
@@ -702,7 +710,7 @@ defaults = {
     "video_src": None, "video_out": None, "v4_clips": [None] * 4, "v4_prompts": ["", "", "", ""],
     "v4_durs": [5, 5, 5, 5], "v4_count": 4, "v4_layout": "2×2", "v4_play": "同時に動く",
     "v4_joined": None, "vjob": None, "v4_joining": False, "wait_until": 0, "_booted": False,
-    "menu_open": False,
+    "menu_open": False, "need_top": True,
 }
 for k, v in defaults.items():
     if k not in st.session_state:
@@ -742,13 +750,28 @@ section[data-testid="stSidebar"],
 [data-testid="stHeaderActionElements"],
 [data-testid="stDecoration"],
 #MainMenu { display: none !important; }
-div[data-testid="stButton"] > button[kind="secondary"] {
+div[data-testid="stButton"] > button {
+  background: linear-gradient(180deg,#ffc1dc,#ff6ea8) !important;
+  color: #fff !important;
+  border: 3px solid #fff !important;
   border-radius: 999px !important;
+  font-weight: 800 !important;
+  box-shadow: 0 5px 0 #ff4d88 !important;
+}
+div[data-testid="stButton"] > button[kind="primary"] {
+  background: linear-gradient(180deg,#ff9ec8,#ff4d88) !important;
+  color: #fff !important;
+  border: 3px solid #fff !important;
+  border-radius: 999px !important;
+  box-shadow: 0 5px 0 #d63384 !important;
 }
 </style>
 """, unsafe_allow_html=True)
 
 render_top_menu()
+if st.session_state.get("need_top"):
+    scroll_top()
+    st.session_state.need_top = False
 
 if st.session_state.page == "home":
     b64 = file_b64(HOME_IMG)
@@ -760,13 +783,6 @@ if st.session_state.page == "home":
     background:rgba(255,255,255,.82);padding:16px 14px;border-radius:22px;border:3px solid #ffb6d5;">
     panel AIは<br>4コマ画像・4コマ動画<br>画像生成・動画生成<br>作成AIサイト ♡
     </div>
-    """, unsafe_allow_html=True)
-    st.markdown("""
-    <style>
-    div[data-testid="stButton"] > button[kind="secondary"] {
-      background: #fff0f6 !important; color: #ff4d88 !important; border: 2px solid #ff8ab8 !important;
-    }
-    </style>
     """, unsafe_allow_html=True)
     mid = st.columns([1, 2, 1])
     with mid[1]:
@@ -1083,7 +1099,6 @@ elif st.session_state.page == "chars":
                 st.session_state.characters.pop(i); save_user_state(); st.rerun()
 
 elif st.session_state.page == "simple":
-    scroll_top()
     st.subheader("画像生成モード")
     if st.button("履歴"):
         st.session_state.show_history = True; st.rerun()
