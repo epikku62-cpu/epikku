@@ -102,17 +102,11 @@ def is_owner():
 
 def go(page):
     st.session_state.page = page
+    st.session_state.menu_open = False
     st.query_params["p"] = page
 
 def scroll_top():
-    st.markdown("""
-    <script>
-    const roots = window.parent ? window.parent.document : document;
-    const el = roots.querySelector('section.main') || roots.scrollingElement;
-    if (el) el.scrollTo(0, 0);
-    window.scrollTo(0, 0);
-    </script>
-    """, unsafe_allow_html=True)
+    st.markdown("<script>window.scrollTo(0,0);</script>", unsafe_allow_html=True)
 
 def start_wait():
     st.session_state.wait_until = time.time() + WAIT_SEC
@@ -122,6 +116,7 @@ def lock_other_buttons():
     <style>
     section.main .block-container { pointer-events: none; }
     .wait-ok, .wait-ok * { pointer-events: auto !important; }
+    #menu-toggle, #menu-toggle * { pointer-events: auto !important; }
     </style>
     """, unsafe_allow_html=True)
 
@@ -659,6 +654,40 @@ def apply_login(name, data):
     st.session_state.simple_history = data.get("history", [])
     st.session_state.library = data.get("library", [])
 
+def render_top_menu():
+    left, _ = st.columns([1, 3])
+    with left:
+        label = "閉じる" if st.session_state.menu_open else "メニュー"
+        if st.button(label, key="panel_menu_toggle", use_container_width=True):
+            st.session_state.menu_open = not st.session_state.menu_open
+            st.rerun()
+    if not st.session_state.menu_open:
+        return
+    st.markdown('<div style="background:#fff;border:2px solid #111;border-radius:16px;padding:12px;margin:8px 0 16px;">', unsafe_allow_html=True)
+    st.markdown("**メニュー**")
+    if st.session_state.logged_in:
+        icon = st.session_state.get("icon", "🐱")
+        if isinstance(icon, str) and icon.startswith("data:image"):
+            st.image(icon, width=48)
+        else:
+            st.write(icon)
+        st.write(st.session_state.get("username", ""))
+        if st.button("アイコン変更", use_container_width=True):
+            go("icon"); st.rerun()
+        if st.button("ログアウト", use_container_width=True):
+            st.session_state.logged_in = False; go("home"); st.rerun()
+    else:
+        if st.button("登録", use_container_width=True):
+            go("register"); st.rerun()
+        if st.button("ログイン", use_container_width=True):
+            go("register"); st.rerun()
+    st.write(f"ポイント {st.session_state.points}")
+    st.write(f"会員 {member_label() if st.session_state.logged_in else '未登録'}")
+    for label, page in [("画像生成モード", "simple"), ("セット", "chars"), ("4コマ", "make"), ("保存庫", "lib"), ("動画生成", "video"), ("4コマ動画", "v4"), ("ポイント購入", "shop"), ("説明書", "help"), ("月額登録", "plan"), ("お問い合わせ", "contact")]:
+        if st.button(label, use_container_width=True, key=f"m_{page}"):
+            go(page); st.rerun()
+    st.markdown("</div>", unsafe_allow_html=True)
+
 prepare_fonts()
 usable_fonts = [k for k, ok in prepare_fonts().items() if ok] or ["ゴシック"]
 defaults = {
@@ -673,6 +702,7 @@ defaults = {
     "video_src": None, "video_out": None, "v4_clips": [None] * 4, "v4_prompts": ["", "", "", ""],
     "v4_durs": [5, 5, 5, 5], "v4_count": 4, "v4_layout": "2×2", "v4_play": "同時に動く",
     "v4_joined": None, "vjob": None, "v4_joining": False, "wait_until": 0, "_booted": False,
+    "menu_open": False,
 }
 for k, v in defaults.items():
     if k not in st.session_state:
@@ -704,64 +734,27 @@ if st.session_state.logged_in and qs.get("buypoints"):
 
 st.markdown("""
 <style>
-section[data-testid="stSidebar"] { background:#fff !important; }
-section[data-testid="stSidebar"] * { color:#111 !important; }
-section[data-testid="stSidebar"] button { background:#fff !important; color:#111 !important; border:2px solid #111 !important; }
-section[data-testid="stSidebar"] button p { color:#111 !important; }
+section[data-testid="stSidebar"],
+[data-testid="stSidebarCollapsedControl"],
+[data-testid="collapsedControl"],
 [data-testid="stStatusWidget"],
 [data-testid="stToolbar"],
 [data-testid="stHeaderActionElements"],
 [data-testid="stDecoration"],
 #MainMenu { display: none !important; }
-
-[data-testid="stSidebarCollapsedControl"],
-[data-testid="collapsedControl"] {
-  display: flex !important;
-  visibility: visible !important;
-  position: relative !important;
-  width: 96px !important; min-width: 96px !important; height: 38px !important;
-  background: #fff0f6 !important; border: 2px solid #ff8ab8 !important;
-  border-radius: 999px !important; overflow: hidden !important; z-index: 999 !important;
-}
-[data-testid="stSidebarCollapsedControl"] svg,
-[data-testid="collapsedControl"] svg,
-[data-testid="stSidebarCollapsedControl"] span,
-[data-testid="collapsedControl"] span { display: none !important; }
-[data-testid="stSidebarCollapsedControl"]::after,
-[data-testid="collapsedControl"]::after {
-  content: "メニュー" !important;
-  position: absolute; inset: 0;
-  display: flex; align-items: center; justify-content: center;
-  color: #ff4d88 !important; font-weight: 900 !important; font-size: 15px !important;
-}
-
-section[data-testid="stSidebar"] [data-testid="stSidebarCollapseButton"],
-section[data-testid="stSidebar"] button[kind="header"] {
-  display: flex !important;
-  position: relative !important;
-  width: 96px !important; height: 38px !important;
-  background: #fff0f6 !important; border: 2px solid #ff8ab8 !important;
-  border-radius: 999px !important; overflow: hidden !important;
-}
-section[data-testid="stSidebar"] [data-testid="stSidebarCollapseButton"] svg,
-section[data-testid="stSidebar"] button[kind="header"] svg,
-section[data-testid="stSidebar"] [data-testid="stSidebarCollapseButton"] span,
-section[data-testid="stSidebar"] button[kind="header"] span { display: none !important; }
-section[data-testid="stSidebar"] [data-testid="stSidebarCollapseButton"]::after,
-section[data-testid="stSidebar"] button[kind="header"]::after {
-  content: "閉じる" !important;
-  position: absolute; inset: 0;
-  display: flex; align-items: center; justify-content: center;
-  color: #ff4d88 !important; font-weight: 900 !important; font-size: 15px !important;
+div[data-testid="stButton"] > button[kind="secondary"] {
+  border-radius: 999px !important;
 }
 </style>
 """, unsafe_allow_html=True)
+
+render_top_menu()
 
 if st.session_state.page == "home":
     b64 = file_b64(HOME_IMG)
     if b64:
         st.markdown(f'<style>.stApp{{background-image:linear-gradient(rgba(255,255,255,.18),rgba(255,255,255,.18)),url("data:image/jpeg;base64,{b64}");background-size:cover;background-position:center;}}</style>', unsafe_allow_html=True)
-    st.markdown("<div style='height:42vh'></div>", unsafe_allow_html=True)
+    st.markdown("<div style='height:28vh'></div>", unsafe_allow_html=True)
     st.markdown("""
     <div style="text-align:center;color:#ff4d88;font-size:20px;font-weight:800;line-height:1.7;
     background:rgba(255,255,255,.82);padding:16px 14px;border-radius:22px;border:3px solid #ffb6d5;">
@@ -770,47 +763,22 @@ if st.session_state.page == "home":
     """, unsafe_allow_html=True)
     st.markdown("""
     <style>
-    div[data-testid="stButton"] > button {
-      background: linear-gradient(180deg,#ff9ec8,#ff4d88) !important;
-      color: #fff !important; border: 4px solid #fff !important; border-radius: 999px !important;
-      font-size: 34px !important; font-weight: 900 !important; padding: 18px 0 !important;
+    div[data-testid="stButton"] > button[kind="secondary"] {
+      background: #fff0f6 !important; color: #ff4d88 !important; border: 2px solid #ff8ab8 !important;
     }
     </style>
     """, unsafe_allow_html=True)
     mid = st.columns([1, 2, 1])
     with mid[1]:
-        if st.button("panel", use_container_width=True):
+        if st.button("panel", use_container_width=True, key="home_panel"):
             go("help"); st.rerun()
     st.stop()
 
 show_header()
-with st.sidebar:
-    st.markdown('<div style="font-weight:900;color:#ff4d88;font-size:22px;padding:4px 0 10px;">メニュー</div>', unsafe_allow_html=True)
-    if st.session_state.logged_in:
-        icon = st.session_state.get("icon", "🐱")
-        if isinstance(icon, str) and icon.startswith("data:image"):
-            st.image(icon, width=48)
-        else:
-            st.write(icon)
-        st.write(st.session_state.get("username", ""))
-        if st.button("アイコン変更", use_container_width=True):
-            go("icon"); st.rerun()
-        if st.button("ログアウト", use_container_width=True):
-            st.session_state.logged_in = False; go("home"); st.rerun()
-    else:
-        if st.button("登録", use_container_width=True):
-            go("register"); st.rerun()
-        if st.button("ログイン", use_container_width=True):
-            go("register"); st.rerun()
-    st.write(f"ポイント {st.session_state.points}")
-    st.write(f"会員 {member_label() if st.session_state.logged_in else '未登録'}")
-    for label, page in [("画像生成モード", "simple"), ("セット", "chars"), ("4コマ", "make"), ("保存庫", "lib"), ("動画生成", "video"), ("4コマ動画", "v4"), ("ポイント購入", "shop"), ("説明書", "help"), ("月額登録", "plan"), ("お問い合わせ", "contact")]:
-        if st.button(label, use_container_width=True):
-            go(page); st.rerun()
 
 if st.session_state.error:
     st.error(st.session_state.error)
-    if st.button("閉じる"):
+    if st.button("通知を閉じる"):
         st.session_state.error = ""; st.rerun()
 
 if st.session_state.page == "help":
@@ -820,7 +788,7 @@ if st.session_state.page == "help":
     <h2>4コマ</h2><p>セット絵柄、キャラを使えて画像生成して、会話、吹き出しをつけれるよ！<br>最後に合体させて4コマ完成！</p>
     <h2>動画生成モード</h2><p>ポイントで動画生成<br>秒数が長いほどポイントが増える<br>4コマ動画も1コマずつポイント消費<br>自分のmp4（10秒以下）を入れてまとめることもできる<br>まとめは20ポイント</p>
     <h2>月額登録</h2><p>セット機能開放<br>サイズの変更開放<br>ポイント付与</p></div>""", unsafe_allow_html=True)
-    if st.button("メニューに戻って登録して始めよう！", type="primary", use_container_width=True):
+    if st.button("登録して始めよう！", type="primary", use_container_width=True):
         go("register" if not st.session_state.logged_in else "simple"); st.rerun()
 
 elif st.session_state.page == "lib":
