@@ -414,12 +414,6 @@ def take_points(cost):
     st.session_state.points -= int(cost)
     save_user_state()
 
-def give_points(cost):
-    if is_owner() or int(cost) <= 0:
-        return
-    st.session_state.points = int(st.session_state.points) + int(cost)
-    save_user_state()
-
 def finish_action():
     st.session_state.act_busy = False
 
@@ -988,7 +982,6 @@ elif st.session_state.page == "video":
                 if state == "done":
                     st.session_state.video_out = val; st.session_state.vjob = None
                 elif state == "error":
-                    give_points(int(job.get("cost") or 0))
                     st.session_state.error = val; st.session_state.vjob = None
                 else:
                     start_wait(); st.session_state.error = "まだ生成中です。もう一度確認してください"
@@ -1016,14 +1009,8 @@ elif st.session_state.page == "video":
             st.session_state.error = "画像を選んでください"
         else:
             try:
-                cost = video_cost(dur)
-                take_points(cost)
-                try:
-                    rid = grok_start_video(st.session_state.video_src, motion, dur)
-                except Exception:
-                    give_points(cost)
-                    raise
-                st.session_state.vjob = {"kind": "video", "id": rid, "cost": cost}
+                take_points(video_cost(dur))
+                st.session_state.vjob = {"kind": "video", "id": grok_start_video(st.session_state.video_src, motion, dur)}
                 start_wait(); st.session_state.error = ""
             except Exception as e:
                 st.session_state.error = str(e)
@@ -1075,7 +1062,6 @@ elif st.session_state.page == "v4":
                         if state == "done":
                             st.session_state.v4_clips[i] = val; st.session_state.vjob = None
                         elif state == "error":
-                            give_points(int(job.get("cost") or 0))
                             st.session_state.error = val; st.session_state.vjob = None
                         else:
                             start_wait(); st.session_state.error = "まだ生成中です。もう一度確認してください"
@@ -1090,14 +1076,8 @@ elif st.session_state.page == "v4":
                     st.session_state.error = "画像がありません"
                 else:
                     try:
-                        cost = video_cost(st.session_state.v4_durs[i])
-                        take_points(cost)
-                        try:
-                            rid = grok_start_video(src, st.session_state.v4_prompts[i], st.session_state.v4_durs[i])
-                        except Exception:
-                            give_points(cost)
-                            raise
-                        st.session_state.vjob = {"kind": "v4", "i": i, "id": rid, "cost": cost}
+                        take_points(video_cost(st.session_state.v4_durs[i]))
+                        st.session_state.vjob = {"kind": "v4", "i": i, "id": grok_start_video(src, st.session_state.v4_prompts[i], st.session_state.v4_durs[i])}
                         start_wait(); st.session_state.error = ""
                     except Exception as e:
                         st.session_state.error = str(e)
@@ -1113,13 +1093,9 @@ elif st.session_state.page == "v4":
         if act == "confirm":
             try:
                 take_points(JOIN_COST)
-                try:
-                    out = os.path.join(VID_DIR, f"join_{uuid.uuid4().hex}.mp4")
-                    st.session_state.v4_joined = compose_yonkoma_video(ready_clips, st.session_state.v4_layout, out, sequential=(st.session_state.v4_play == "順番に動く"))
-                    st.session_state.error = ""
-                except Exception:
-                    give_points(JOIN_COST)
-                    raise
+                out = os.path.join(VID_DIR, f"join_{uuid.uuid4().hex}.mp4")
+                st.session_state.v4_joined = compose_yonkoma_video(ready_clips, st.session_state.v4_layout, out, sequential=(st.session_state.v4_play == "順番に動く"))
+                st.session_state.error = ""
             except Exception as e:
                 st.session_state.error = str(e)
             finally:
