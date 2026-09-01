@@ -14,10 +14,17 @@ import smtplib
 import subprocess
 import time
 import requests
+import shutil
+import tempfile
 from email.mime.text import MIMEText
 from io import BytesIO
 from datetime import datetime, timedelta
 from PIL import Image, ImageDraw, ImageFont
+
+try:
+    import fcntl
+except ImportError:
+    fcntl = None
 
 try:
     import stripe
@@ -47,11 +54,13 @@ if stripe is not None and STRIPE_SECRET_KEY:
     stripe.api_key = STRIPE_SECRET_KEY
 
 NAI_URLS = ["https://image.novelai.net/ai/generate-image", "https://api.novelai.net/ai/generate-image"]
-DATA_FILE = "studio_data.json"
-USERS_FILE = "users_data.json"
+DATA_DIR = os.environ.get("DATA_DIR", os.path.abspath("data"))
+os.makedirs(DATA_DIR, exist_ok=True)
+DATA_FILE = os.path.join(DATA_DIR, "studio_data.json")
+USERS_FILE = os.path.join(DATA_DIR, "users_data.json")
 HOME_IMG = "IMG_1106.jpeg"
 HEADER_IMG = "IMG_1107.jpeg"
-VID_DIR = "video_tmp"
+VID_DIR = os.path.join(DATA_DIR, "video_tmp")
 PHONE_W, PHONE_H = 1080, 1920
 MONTHLY_PRICE, MONTHLY_POINTS, REF_SITE, SIGNUP_POINTS = 980, 1200, 10, 20
 VIDEO_PT_PER_SEC = 30
@@ -132,6 +141,10 @@ def show_countdown_wait(label, key):
     lock_other_buttons()
     left = int(math.ceil(st.session_state.get("wait_until", 0) - time.time()))
     st.markdown('<div class="wait-ok">', unsafe_allow_html=True)
+    if st.session_state.get("act_busy"):
+        st.markdown(f'<div style="margin:8px 0;padding:12px;border-radius:14px;background:#fff0f6;color:#ff4d88;font-weight:800;">{label}… 処理中です。連打しないでください</div>', unsafe_allow_html=True)
+        st.markdown("</div>", unsafe_allow_html=True)
+        return None
     if left > 0:
         st.markdown(f'<div style="margin:8px 0;padding:12px;border-radius:14px;background:#fff0f6;color:#ff4d88;font-weight:800;">{label}… {left}</div>', unsafe_allow_html=True)
         if st.button("キャンセル", key=f"can_{key}"):
@@ -141,6 +154,7 @@ def show_countdown_wait(label, key):
         st.rerun()
     st.write("0になりました。確認を押してください")
     if st.button("確認する", key=f"ok_{key}"):
+        st.session_state.act_busy = True
         st.markdown("</div>", unsafe_allow_html=True)
         return "confirm"
     if st.button("キャンセル", key=f"can2_{key}"):
@@ -193,18 +207,72 @@ def send_mail(to_addr, subject, body):
 def send_code_mail(to_addr, code):
     return send_mail(to_addr, "panel AI. 登録確認", f"確認コード: {code}\nこのコードをサイトに入力してください。")
 
+def _read_json_file(path):
+    if not path or not os.path.exists(path) or os.path.getsize(path) <= 2:
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data
+    except Exception:
+        return None
+
 def load_json(path, default):
-    if os.path.exists(path):
+    data = _read_json_file(path)
+    if data is not None:
+        return data
+    data = _read_json_file(path + ".bak")
+    if data is not None:
         try:
-            with open(path, "r", encoding="utf-8") as f:
-                return json.load(f)
+            save_json(path, data)
         except Exception:
-            return default
+            pass
+        return data
+    old = os.path.basename(path)
+    if os.path.abspath(old) != os.path.abspath(path):
+        data = _read_json_file(old)
+        if data is not None:
+            try:
+                save_json(path, data)
+            except Exception:
+                pass
+            return data
     return default
 
 def save_json(path, data):
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    folder = os.path.dirname(path) or "."
+    fd, tmp = tempfile.mkstemp(prefix=".tmp_", suffix=".json", dir=folder)
+    locked = None
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            if fcntl is not None:
+                try:
+                    locked = open(path + ".lock", "a+", encoding="utf-8")
+                    fcntl.flock(locked.fileno(), fcntl.LOCK_EX)
+                except Exception:
+                    locked = None
+            json.dump(data, f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        if os.path.exists(path) and os.path.getsize(path) > 2:
+            try:
+                shutil.copy2(path, path + ".bak")
+            except Exception:
+                pass
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            try:
+                os.remove(tmp)
+            except Exception:
+                pass
+        if locked is not None:
+            try:
+                fcntl.flock(locked.fileno(), fcntl.LOCK_UN)
+                locked.close()
+            except Exception:
+                pass
 
 def email_taken(users, mail):
     mail = norm_mail(mail)
@@ -311,16 +379,26 @@ def member_label():
 def save_user_state():
     users = load_json(USERS_FILE, {})
     name = st.session_state.get("username")
-    if name in users:
-        users[name]["characters"] = st.session_state.characters
-        users[name]["points"] = st.session_state.points
-        users[name]["premium_until"] = st.session_state.premium_until
-        users[name]["rank"] = "vip" if is_premium() else "ブロンズ"
-        users[name]["icon"] = st.session_state.get("icon", "")
-        users[name]["history"] = st.session_state.get("simple_history", [])[-30:]
-        users[name]["library"] = st.session_state.get("library", [])[-40:]
-        save_json(USERS_FILE, users)
-        save_json(DATA_FILE, {"characters": st.session_state.characters})
+    if not name:
+        return
+    prev = users.get(name) if isinstance(users.get(name), dict) else {}
+    users[name] = {
+        "password": prev.get("password") or st.session_state.get("password_hash", ""),
+        "email": st.session_state.get("email") or prev.get("email", ""),
+        "icon": st.session_state.get("icon", prev.get("icon", "")),
+        "characters": st.session_state.get("characters", prev.get("characters", [])),
+        "points": int(st.session_state.get("points", prev.get("points", 0))),
+        "premium_until": st.session_state.get("premium_until") or prev.get("premium_until", ""),
+        "rank": "vip" if is_premium() else "ブロンズ",
+        "history": st.session_state.get("simple_history", prev.get("history", []))[-30:],
+        "library": st.session_state.get("library", prev.get("library", []))[-40:],
+    }
+    if not users[name]["password"] and prev.get("password"):
+        users[name]["password"] = prev["password"]
+    if prev.get("password") and not users[name]["password"]:
+        users[name]["password"] = prev["password"]
+    save_json(USERS_FILE, users)
+    save_json(DATA_FILE, {"characters": st.session_state.characters})
 
 def add_library(uri, label=""):
     if not uri:
@@ -335,6 +413,15 @@ def take_points(cost):
         raise Exception(f"ポイントが足りません。必要 {cost}")
     st.session_state.points -= int(cost)
     save_user_state()
+
+def give_points(cost):
+    if is_owner() or int(cost) <= 0:
+        return
+    st.session_state.points = int(st.session_state.points) + int(cost)
+    save_user_state()
+
+def finish_action():
+    st.session_state.act_busy = False
 
 def nai_wh(w, h):
     return max(64, min(1920, int(round(w / 64) * 64))), max(64, min(1920, int(round(h / 64) * 64)))
@@ -426,20 +513,62 @@ def probe_duration(path):
     except Exception:
         return 3.0
 
-def layout_cell(layout_key, n):
-    if str(layout_key).startswith("横"):
-        return n, 1, 480, 480
-    if layout_key == "2×2":
-        return 2, 2, 640, 640
-    return 1, n, 640, 640
+def probe_wh(path):
+    r = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height", "-of", "csv=p=0", path], capture_output=True, text=True)
+    try:
+        parts = (r.stdout or "").strip().split(",")
+        return max(2, int(parts[0])), max(2, int(parts[1]))
+    except Exception:
+        return 640, 640
 
-def stack_filter(cols, rows, n, labels):
+def even_size(n):
+    n = max(2, int(round(n)))
+    return n if n % 2 == 0 else n + 1
+
+def layout_kind(layout_key, n):
+    key = str(layout_key)
+    if key.startswith("横"):
+        return n, 1
+    if key == "2×2":
+        return 2, 2
+    return 1, n
+
+def panel_targets(paths, layout_key):
+    n = len(paths)
+    cols, rows = layout_kind(layout_key, n)
+    sizes = [probe_wh(p) for p in paths]
+    max_w = max(w for w, _h in sizes)
+    max_h = max(h for _w, h in sizes)
+    cap = 1080
+    out = []
+    if cols == 1:
+        tw = even_size(min(cap, max_w))
+        for w, h in sizes:
+            out.append((tw, even_size(h * tw / max(w, 1))))
+    elif rows == 1:
+        th = even_size(min(cap, max_h))
+        for w, h in sizes:
+            out.append((even_size(w * th / max(h, 1)), th))
+    else:
+        tw = even_size(min(cap, max_w))
+        for w, h in sizes:
+            out.append((tw, even_size(h * tw / max(w, 1))))
+    return cols, rows, out
+
+def scale_filter(w, h):
+    return f"fps=24,scale={w}:{h}:force_original_aspect_ratio=decrease:force_divisible_by=2,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:color=white,setsar=1,format=yuv420p"
+
+def stack_filter(cols, rows, n, labels, targets):
     joined = "".join(labels)
     if cols == 1:
         return joined + f"vstack=inputs={n}[out]"
     if rows == 1:
         return joined + f"hstack=inputs={n}[out]"
-    return joined + f"xstack=inputs={n}:layout=0_0|w0_0|0_h0|w0_h0[out]"
+    w0, h0 = targets[0]
+    w1, h1 = targets[1] if n > 1 else targets[0]
+    w2, h2 = targets[2] if n > 2 else targets[0]
+    layout = f"0_0|{w0}_0|0_{h0}|{w0}_{h0}"
+    return joined + f"xstack=inputs={n}:layout={layout}[out]"
 
 def concat_videos(paths, out_path):
     lst = os.path.join(VID_DIR, f"{uuid.uuid4().hex}.txt")
@@ -457,17 +586,17 @@ def compose_yonkoma_video(paths, layout_key="2×2", out_path="out.mp4", sequenti
     n = len(paths)
     if n < 2:
         raise Exception("2本以上必要です")
-    cols, rows, cw, ch = layout_cell(layout_key, n)
-    scale = f"fps=24,scale={cw}:{ch}:force_original_aspect_ratio=decrease:force_divisible_by=2,pad={cw}:{ch}:(ow-iw)/2:(oh-ih)/2:color=white,setsar=1,format=yuv420p"
+    cols, rows, targets = panel_targets(paths, layout_key)
     if not sequential:
         ins = []
         for p in paths:
             ins += ["-i", p]
         parts, labels = [], []
         for i in range(n):
-            parts.append(f"[{i}:v]{scale}[v{i}]")
+            tw, th = targets[i]
+            parts.append(f"[{i}:v]{scale_filter(tw, th)}[v{i}]")
             labels.append(f"[v{i}]")
-        filt = ";".join(parts) + ";" + stack_filter(cols, rows, n, labels)
+        filt = ";".join(parts) + ";" + stack_filter(cols, rows, n, labels, targets)
         r = subprocess.run(["ffmpeg", "-y"] + ins + ["-filter_complex", filt, "-map", "[out]", "-an", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-shortest", out_path], capture_output=True, text=True)
         if r.returncode != 0 or not os.path.exists(out_path):
             raise Exception((r.stderr or "結合失敗")[-500:])
@@ -480,12 +609,14 @@ def compose_yonkoma_video(paths, layout_key="2×2", out_path="out.mp4", sequenti
             ins += ["-i", p]
         parts, labels = [], []
         for i in range(n):
+            tw, th = targets[i]
+            sc = scale_filter(tw, th)
             if i == k:
-                parts.append(f"[{i}:v]{scale},setpts=PTS-STARTPTS[v{i}]")
+                parts.append(f"[{i}:v]{sc},setpts=PTS-STARTPTS[v{i}]")
             else:
-                parts.append(f"[{i}:v]trim=start=0:end=0.05,loop=-1:size=1,setpts=N/24/TB,{scale},trim=duration={durs[k]:.3f},setpts=PTS-STARTPTS[v{i}]")
+                parts.append(f"[{i}:v]trim=start=0:end=0.05,loop=-1:size=1,setpts=N/24/TB,{sc},trim=duration={durs[k]:.3f},setpts=PTS-STARTPTS[v{i}]")
             labels.append(f"[v{i}]")
-        filt = ";".join(parts) + ";" + stack_filter(cols, rows, n, labels)
+        filt = ";".join(parts) + ";" + stack_filter(cols, rows, n, labels, targets)
         seg = os.path.join(VID_DIR, f"seq_{k}_{uuid.uuid4().hex}.mp4")
         r = subprocess.run(["ffmpeg", "-y"] + ins + ["-filter_complex", filt, "-map", "[out]", "-an", "-t", f"{durs[k]:.3f}", "-c:v", "libx264", "-pix_fmt", "yuv420p", seg], capture_output=True, text=True)
         if r.returncode != 0 or not os.path.exists(seg):
@@ -670,12 +801,14 @@ def apply_login(name, data):
     st.session_state.logged_in = True
     st.session_state.username = name
     st.session_state.email = data.get("email", "")
+    st.session_state.password_hash = data.get("password", "")
     st.session_state.icon = data.get("icon", random.choice(ANIMALS))
     st.session_state.characters = data.get("characters", [])
     st.session_state.points = int(data.get("points", 0))
     st.session_state.premium_until = data.get("premium_until", "")
     st.session_state.simple_history = data.get("history", [])
     st.session_state.library = data.get("library", [])
+    save_user_state()
 
 def render_top_menu():
     left, _ = st.columns([1, 3])
@@ -725,7 +858,7 @@ defaults = {
     "video_src": None, "video_out": None, "v4_clips": [None] * 4, "v4_prompts": ["", "", "", ""],
     "v4_durs": [5, 5, 5, 5], "v4_count": 4, "v4_layout": "2×2", "v4_play": "同時に動く",
     "v4_joined": None, "vjob": None, "v4_joining": False, "wait_until": 0, "_booted": False,
-    "menu_open": False, "need_top": True,
+    "menu_open": False, "need_top": True, "act_busy": False, "password_hash": "",
 }
 for k, v in defaults.items():
     if k not in st.session_state:
@@ -848,15 +981,22 @@ elif st.session_state.page == "video":
     if job and job.get("kind") == "video":
         act = show_countdown_wait("生成中", "video")
         if act == "cancel":
-            st.session_state.vjob = None; go("video"); st.rerun()
+            finish_action(); st.session_state.vjob = None; go("video"); st.rerun()
         if act == "confirm":
-            state, val = grok_poll_video(job["id"])
-            if state == "done":
-                st.session_state.video_out = val; st.session_state.vjob = None
-            elif state == "error":
-                st.session_state.error = val; st.session_state.vjob = None
-            else:
-                start_wait(); st.session_state.error = "まだ生成中です。もう一度確認してください"
+            try:
+                state, val = grok_poll_video(job["id"])
+                if state == "done":
+                    st.session_state.video_out = val; st.session_state.vjob = None
+                elif state == "error":
+                    give_points(int(job.get("cost") or 0))
+                    st.session_state.error = val; st.session_state.vjob = None
+                else:
+                    start_wait(); st.session_state.error = "まだ生成中です。もう一度確認してください"
+            except Exception as e:
+                st.session_state.error = str(e)
+                start_wait()
+            finally:
+                finish_action()
             go("video"); st.rerun()
     up = st.file_uploader("画像をアップロード", type=["png", "jpg", "jpeg"])
     if up:
@@ -876,8 +1016,14 @@ elif st.session_state.page == "video":
             st.session_state.error = "画像を選んでください"
         else:
             try:
-                take_points(video_cost(dur))
-                st.session_state.vjob = {"kind": "video", "id": grok_start_video(st.session_state.video_src, motion, dur)}
+                cost = video_cost(dur)
+                take_points(cost)
+                try:
+                    rid = grok_start_video(st.session_state.video_src, motion, dur)
+                except Exception:
+                    give_points(cost)
+                    raise
+                st.session_state.vjob = {"kind": "video", "id": rid, "cost": cost}
                 start_wait(); st.session_state.error = ""
             except Exception as e:
                 st.session_state.error = str(e)
@@ -922,23 +1068,36 @@ elif st.session_state.page == "v4":
             if job and job.get("kind") == "v4" and int(job.get("i", -1)) == i:
                 act = show_countdown_wait(f"コマ{i+1} 生成中", f"p{i}")
                 if act == "cancel":
-                    st.session_state.vjob = None; go("v4"); st.rerun()
+                    finish_action(); st.session_state.vjob = None; go("v4"); st.rerun()
                 if act == "confirm":
-                    state, val = grok_poll_video(job["id"])
-                    if state == "done":
-                        st.session_state.v4_clips[i] = val; st.session_state.vjob = None
-                    elif state == "error":
-                        st.session_state.error = val; st.session_state.vjob = None
-                    else:
-                        start_wait(); st.session_state.error = "まだ生成中です。もう一度確認してください"
+                    try:
+                        state, val = grok_poll_video(job["id"])
+                        if state == "done":
+                            st.session_state.v4_clips[i] = val; st.session_state.vjob = None
+                        elif state == "error":
+                            give_points(int(job.get("cost") or 0))
+                            st.session_state.error = val; st.session_state.vjob = None
+                        else:
+                            start_wait(); st.session_state.error = "まだ生成中です。もう一度確認してください"
+                    except Exception as e:
+                        st.session_state.error = str(e)
+                        start_wait()
+                    finally:
+                        finish_action()
                     go("v4"); st.rerun()
             if st.button("このコマを動画にする", key=f"v4g_{i}"):
                 if not src:
                     st.session_state.error = "画像がありません"
                 else:
                     try:
-                        take_points(video_cost(st.session_state.v4_durs[i]))
-                        st.session_state.vjob = {"kind": "v4", "i": i, "id": grok_start_video(src, st.session_state.v4_prompts[i], st.session_state.v4_durs[i])}
+                        cost = video_cost(st.session_state.v4_durs[i])
+                        take_points(cost)
+                        try:
+                            rid = grok_start_video(src, st.session_state.v4_prompts[i], st.session_state.v4_durs[i])
+                        except Exception:
+                            give_points(cost)
+                            raise
+                        st.session_state.vjob = {"kind": "v4", "i": i, "id": rid, "cost": cost}
                         start_wait(); st.session_state.error = ""
                     except Exception as e:
                         st.session_state.error = str(e)
@@ -950,15 +1109,21 @@ elif st.session_state.page == "v4":
     if st.session_state.get("v4_joining"):
         act = show_countdown_wait("まとめ生成中", "join")
         if act == "cancel":
-            st.session_state.v4_joining = False; go("v4"); st.rerun()
+            finish_action(); st.session_state.v4_joining = False; go("v4"); st.rerun()
         if act == "confirm":
             try:
                 take_points(JOIN_COST)
-                out = os.path.join(VID_DIR, f"join_{uuid.uuid4().hex}.mp4")
-                st.session_state.v4_joined = compose_yonkoma_video(ready_clips, st.session_state.v4_layout, out, sequential=(st.session_state.v4_play == "順番に動く"))
-                st.session_state.error = ""
+                try:
+                    out = os.path.join(VID_DIR, f"join_{uuid.uuid4().hex}.mp4")
+                    st.session_state.v4_joined = compose_yonkoma_video(ready_clips, st.session_state.v4_layout, out, sequential=(st.session_state.v4_play == "順番に動く"))
+                    st.session_state.error = ""
+                except Exception:
+                    give_points(JOIN_COST)
+                    raise
             except Exception as e:
                 st.session_state.error = str(e)
+            finally:
+                finish_action()
             st.session_state.v4_joining = False; go("v4"); st.rerun()
     if st.button("漫画動画としてまとめる", type="primary"):
         if len(ready_clips) < n:
