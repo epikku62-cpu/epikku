@@ -567,23 +567,47 @@ def stack_filter(cols, rows, n, labels, targets):
     layout = f"0_0|{w0}_0|0_{h0}|{w0}_{h0}"
     return joined + f"xstack=inputs={n}:layout={layout}[out]"
 
-def concat_videos(paths, out_path):
+def has_audio(path):
+    r = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "a:0", "-show_entries", "stream=codec_type", "-of", "csv=p=0", path], capture_output=True, text=True)
+    return bool((r.stdout or "").strip())
+
+def concat_videos(paths, out_path, keep_audio=False):
     lst = os.path.join(VID_DIR, f"{uuid.uuid4().hex}.txt")
     with open(lst, "w", encoding="utf-8") as f:
         for p in paths:
             f.write(f"file '{os.path.abspath(p)}'\n")
-    r = subprocess.run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", lst, "-c", "copy", out_path], capture_output=True, text=True)
+    cmd = ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", lst, "-c:v", "libx264", "-pix_fmt", "yuv420p"]
+    if keep_audio:
+        cmd += ["-c:a", "aac", "-b:a", "128k"]
+    else:
+        cmd += ["-an"]
+    cmd.append(out_path)
+    r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode != 0 or not os.path.exists(out_path):
-        r = subprocess.run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", lst, "-c:v", "libx264", "-pix_fmt", "yuv420p", out_path], capture_output=True, text=True)
-        if r.returncode != 0:
-            raise Exception(r.stderr[-400:] if r.stderr else "結合に失敗しました")
+        raise Exception(r.stderr[-400:] if r.stderr else "結合に失敗しました")
     return out_path
 
-def compose_yonkoma_video(paths, layout_key="2×2", out_path="out.mp4", sequential=False):
+def run_compose_ffmpeg(ins, filt, out_path, keep_audio=False, extra=None, audio_map=None):
+    cmd = ["ffmpeg", "-y"] + ins + ["-filter_complex", filt, "-map", "[out]"]
+    if keep_audio and audio_map:
+        cmd += ["-map", audio_map, "-c:a", "aac", "-b:a", "128k"]
+    else:
+        cmd += ["-an"]
+    cmd += ["-c:v", "libx264", "-pix_fmt", "yuv420p"]
+    if extra:
+        cmd += extra
+    cmd.append(out_path)
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    if r.returncode != 0 or not os.path.exists(out_path):
+        raise Exception((r.stderr or "結合失敗")[-500:])
+    return out_path
+
+def compose_yonkoma_video(paths, layout_key="2×2", out_path="out.mp4", sequential=False, keep_audio=False):
     n = len(paths)
     if n < 2:
         raise Exception("2本以上必要です")
     cols, rows, targets = panel_targets(paths, layout_key)
+    audio_flags = [has_audio(p) for p in paths]
     if not sequential:
         ins = []
         for p in paths:
@@ -594,10 +618,20 @@ def compose_yonkoma_video(paths, layout_key="2×2", out_path="out.mp4", sequenti
             parts.append(f"[{i}:v]{scale_filter(tw, th)}[v{i}]")
             labels.append(f"[v{i}]")
         filt = ";".join(parts) + ";" + stack_filter(cols, rows, n, labels, targets)
-        r = subprocess.run(["ffmpeg", "-y"] + ins + ["-filter_complex", filt, "-map", "[out]", "-an", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-shortest", out_path], capture_output=True, text=True)
-        if r.returncode != 0 or not os.path.exists(out_path):
-            raise Exception((r.stderr or "結合失敗")[-500:])
-        return out_path
+        audio_map = None
+        if keep_audio and any(audio_flags):
+            a_parts, alabels = [], []
+            for i, ok in enumerate(audio_flags):
+                if ok:
+                    a_parts.append(f"[{i}:a]aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo[a{i}]")
+                    alabels.append(f"[a{i}]")
+            if len(alabels) == 1:
+                filt = filt + ";" + a_parts[0]
+                audio_map = alabels[0]
+            elif len(alabels) > 1:
+                filt = filt + ";" + ";".join(a_parts) + ";" + "".join(alabels) + f"amix=inputs={len(alabels)}:duration=shortest:dropout_transition=0[aout]"
+                audio_map = "[aout]"
+        return run_compose_ffmpeg(ins, filt, out_path, keep_audio=keep_audio, extra=["-shortest"], audio_map=audio_map)
     durs = [probe_duration(p) for p in paths]
     segs = []
     for k in range(n):
@@ -614,12 +648,14 @@ def compose_yonkoma_video(paths, layout_key="2×2", out_path="out.mp4", sequenti
                 parts.append(f"[{i}:v]trim=start=0:end=0.05,loop=-1:size=1,setpts=N/24/TB,{sc},trim=duration={durs[k]:.3f},setpts=PTS-STARTPTS[v{i}]")
             labels.append(f"[v{i}]")
         filt = ";".join(parts) + ";" + stack_filter(cols, rows, n, labels, targets)
+        audio_map = None
+        if keep_audio and audio_flags[k]:
+            filt += f";[{k}:a]aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo,atrim=duration={durs[k]:.3f},asetpts=PTS-STARTPTS[aout]"
+            audio_map = "[aout]"
         seg = os.path.join(VID_DIR, f"seq_{k}_{uuid.uuid4().hex}.mp4")
-        r = subprocess.run(["ffmpeg", "-y"] + ins + ["-filter_complex", filt, "-map", "[out]", "-an", "-t", f"{durs[k]:.3f}", "-c:v", "libx264", "-pix_fmt", "yuv420p", seg], capture_output=True, text=True)
-        if r.returncode != 0 or not os.path.exists(seg):
-            raise Exception((r.stderr or "順番まとめ失敗")[-500:])
+        run_compose_ffmpeg(ins, filt, seg, keep_audio=keep_audio, extra=["-t", f"{durs[k]:.3f}"], audio_map=audio_map)
         segs.append(seg)
-    return concat_videos(segs, out_path)
+    return concat_videos(segs, out_path, keep_audio=keep_audio)
 
 def wrap_text(text, font, max_width):
     lines, line = [], ""
@@ -854,7 +890,7 @@ defaults = {
     "icon": random.choice(ANIMALS), "email": "", "pending": None, "library": [],
     "video_src": None, "video_out": None, "v4_clips": [None] * 4, "v4_prompts": ["", "", "", ""],
     "v4_durs": [5, 5, 5, 5], "v4_count": 4, "v4_layout": "2×2", "v4_play": "同時に動く",
-    "v4_joined": None, "vjob": None, "v4_joining": False, "do_join": False, "wait_until": 0, "_booted": False,
+    "v4_joined": None, "vjob": None, "v4_joining": False, "do_join": False, "v4_audio": "音声を消す", "wait_until": 0, "_booted": False,
     "menu_open": False, "need_top": True, "act_busy": False, "password_hash": "",
 }
 for k, v in defaults.items():
@@ -1033,6 +1069,10 @@ elif st.session_state.page == "v4":
         st.session_state.v4_layout = layout_opts[0]
     st.session_state.v4_layout = st.radio("並び", layout_opts, horizontal=True, index=layout_opts.index(st.session_state.v4_layout))
     st.session_state.v4_play = st.radio("再生", ["同時に動く", "順番に動く"], horizontal=True, index=0 if st.session_state.v4_play == "同時に動く" else 1)
+    audio_opts = ["音声を消す", "音声を残す"]
+    if st.session_state.get("v4_audio") not in audio_opts:
+        st.session_state.v4_audio = "音声を消す"
+    st.session_state.v4_audio = st.radio("音声", audio_opts, horizontal=True, index=audio_opts.index(st.session_state.v4_audio))
     for i in range(n):
         with st.expander(f"コマ {i+1}", expanded=True):
             src = st.session_state.panel_images[i]
@@ -1095,7 +1135,7 @@ elif st.session_state.page == "v4":
         try:
             take_points(JOIN_COST)
             out = os.path.join(VID_DIR, f"join_{uuid.uuid4().hex}.mp4")
-            st.session_state.v4_joined = compose_yonkoma_video(ready_clips, st.session_state.v4_layout, out, sequential=(st.session_state.v4_play == "順番に動く"))
+            st.session_state.v4_joined = compose_yonkoma_video(ready_clips, st.session_state.v4_layout, out, sequential=(st.session_state.v4_play == "順番に動く"), keep_audio=(st.session_state.v4_audio == "音声を残す"))
             st.session_state.error = ""
         except Exception as e:
             st.session_state.error = str(e)
