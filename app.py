@@ -142,7 +142,11 @@ def show_countdown_wait(label, key):
     left = int(math.ceil(st.session_state.get("wait_until", 0) - time.time()))
     st.markdown('<div class="wait-ok">', unsafe_allow_html=True)
     if st.session_state.get("act_busy"):
-        st.markdown(f'<div style="margin:8px 0;padding:12px;border-radius:14px;background:#fff0f6;color:#ff4d88;font-weight:800;">{label}… 処理中です。連打しないでください</div>', unsafe_allow_html=True)
+        st.markdown(f'<div style="margin:8px 0;padding:12px;border-radius:14px;background:#fff0f6;color:#ff4d88;font-weight:800;">{label}… 処理が止まっています。解除してください</div>', unsafe_allow_html=True)
+        if st.button("解除する", key=f"unlock_{key}"):
+            st.session_state.act_busy = False
+            st.markdown("</div>", unsafe_allow_html=True)
+            return "cancel"
         st.markdown("</div>", unsafe_allow_html=True)
         return None
     if left > 0:
@@ -154,7 +158,6 @@ def show_countdown_wait(label, key):
         st.rerun()
     st.write("0になりました。確認を押してください")
     if st.button("確認する", key=f"ok_{key}"):
-        st.session_state.act_busy = True
         st.markdown("</div>", unsafe_allow_html=True)
         return "confirm"
     if st.button("キャンセル", key=f"can2_{key}"):
@@ -851,7 +854,7 @@ defaults = {
     "icon": random.choice(ANIMALS), "email": "", "pending": None, "library": [],
     "video_src": None, "video_out": None, "v4_clips": [None] * 4, "v4_prompts": ["", "", "", ""],
     "v4_durs": [5, 5, 5, 5], "v4_count": 4, "v4_layout": "2×2", "v4_play": "同時に動く",
-    "v4_joined": None, "vjob": None, "v4_joining": False, "wait_until": 0, "_booted": False,
+    "v4_joined": None, "vjob": None, "v4_joining": False, "do_join": False, "wait_until": 0, "_booted": False,
     "menu_open": False, "need_top": True, "act_busy": False, "password_hash": "",
 }
 for k, v in defaults.items():
@@ -1086,27 +1089,30 @@ elif st.session_state.page == "v4":
                 st.video(st.session_state.v4_clips[i])
     ready_clips = [st.session_state.v4_clips[i] for i in range(n) if st.session_state.v4_clips[i] and os.path.exists(st.session_state.v4_clips[i])]
     st.subheader("まとめ")
-    if st.session_state.get("v4_joining"):
-        act = show_countdown_wait("まとめ生成中", "join")
-        if act == "cancel":
-            finish_action(); st.session_state.v4_joining = False; go("v4"); st.rerun()
-        if act == "confirm":
-            try:
-                take_points(JOIN_COST)
-                out = os.path.join(VID_DIR, f"join_{uuid.uuid4().hex}.mp4")
-                st.session_state.v4_joined = compose_yonkoma_video(ready_clips, st.session_state.v4_layout, out, sequential=(st.session_state.v4_play == "順番に動く"))
-                st.session_state.error = ""
-            except Exception as e:
-                st.session_state.error = str(e)
-            finally:
-                finish_action()
-            st.session_state.v4_joining = False; go("v4"); st.rerun()
+    st.session_state.v4_joining = False
+    if st.session_state.get("do_join"):
+        st.markdown('<div style="margin:8px 0;padding:14px;border-radius:14px;background:#fff0f6;color:#ff4d88;font-weight:800;">動画をまとめています。画面を触らず、そのまま待ってください。</div>', unsafe_allow_html=True)
+        try:
+            take_points(JOIN_COST)
+            out = os.path.join(VID_DIR, f"join_{uuid.uuid4().hex}.mp4")
+            st.session_state.v4_joined = compose_yonkoma_video(ready_clips, st.session_state.v4_layout, out, sequential=(st.session_state.v4_play == "順番に動く"))
+            st.session_state.error = ""
+        except Exception as e:
+            st.session_state.error = str(e)
+        st.session_state.do_join = False
+        st.session_state.act_busy = False
+        go("v4")
+        st.rerun()
     if st.button("漫画動画としてまとめる", type="primary"):
         if len(ready_clips) < n:
             st.session_state.error = f"{n}本そろえてください"
         else:
-            st.session_state.v4_joining = True; start_wait(); st.session_state.error = ""
-        go("v4"); st.rerun()
+            st.session_state.do_join = True
+            st.session_state.vjob = None
+            st.session_state.act_busy = False
+            st.session_state.error = ""
+        go("v4")
+        st.rerun()
     if st.session_state.v4_joined and os.path.exists(st.session_state.v4_joined):
         st.video(st.session_state.v4_joined)
         with open(st.session_state.v4_joined, "rb") as f:
