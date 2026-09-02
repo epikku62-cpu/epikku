@@ -1399,39 +1399,60 @@ elif st.session_state.page == "simple":
     if st.button("履歴"):
         st.session_state.show_history = True; st.rerun()
     if st.session_state.show_history:
-        if st.button("戻る"):
-            st.session_state.show_history = False; st.session_state.hist_pick = None; st.rerun()
-        for hi, item in enumerate(reversed(st.session_state.simple_history)):
-            st.image(item["url"], width=160)
-            if st.button("この画像", key=f"hpick_{hi}"):
-                st.session_state.hist_pick = item; st.rerun()
-        if st.session_state.hist_pick:
-            st.write("反映しますか？")
+        pick = st.session_state.get("hist_pick")
+        if pick:
+            st.image(pick.get("url"), use_container_width=True)
+            st.write("画質: " + (pick.get("quality") or "なし"))
+            st.write("背景: " + (pick.get("background") or "なし"))
+            for i, c in enumerate(pick.get("chars") or []):
+                if str(c).strip():
+                    st.write(f"キャラ{i+1}: {c}")
+            st.write("その他: " + (pick.get("other") or "なし"))
+            st.write("除外: " + (pick.get("negative") or "なし"))
             a, b = st.columns(2)
             with a:
-                if st.button("はい"):
-                    item = st.session_state.hist_pick
-                    st.session_state.sq = item.get("quality", ""); st.session_state.sb = item.get("background", "")
-                    st.session_state.so = item.get("other", ""); st.session_state.sn = item.get("negative", "")
-                    st.session_state.schars = item.get("chars") or [""]; st.session_state.simple_image = item.get("url")
-                    st.session_state.hist_pick = None; st.session_state.show_history = False; st.rerun()
+                if st.button("使う", type="primary"):
+                    chars = list(pick.get("chars") or [""]) or [""]
+                    st.session_state.sq = pick.get("quality") or ""
+                    st.session_state.sb = pick.get("background") or ""
+                    st.session_state.so = pick.get("other") or ""
+                    st.session_state.sn = pick.get("negative") or ""
+                    st.session_state.schars = chars[:3]
+                    st.session_state.simple_image = pick.get("url")
+                    for i, c in enumerate(st.session_state.schars):
+                        st.session_state[f"scarea_{i}"] = c
+                    st.session_state.hist_pick = None
+                    st.session_state.show_history = False
+                    st.rerun()
             with b:
-                if st.button("いいえ"):
-                    st.session_state.hist_pick = None; st.rerun()
+                if st.button("戻る"):
+                    st.session_state.hist_pick = None
+                    st.rerun()
+        else:
+            if st.button("履歴を閉じる"):
+                st.session_state.show_history = False
+                st.rerun()
+            if not st.session_state.simple_history:
+                st.write("履歴はまだありません")
+            for hi, item in enumerate(reversed(st.session_state.simple_history)):
+                st.image(item.get("url"), width=160)
+                if st.button("この画像", key=f"hpick_{hi}"):
+                    st.session_state.hist_pick = item
+                    st.rerun()
         st.stop()
-    st.session_state.sq = st.text_area("画質プロンプト", value=st.session_state.sq)
-    st.session_state.sb = st.text_area("背景プロンプト", value=st.session_state.sb)
+    st.session_state.sq = st.text_area("画質プロンプト", key="sq")
+    st.session_state.sb = st.text_area("背景プロンプト", key="sb")
     if st.button("➕ キャラ追加") and len(st.session_state.schars) < 3:
         st.session_state.schars.append(""); st.rerun()
     for i in range(len(st.session_state.schars)):
         a, b = st.columns([5, 1])
         with a:
-            st.session_state.schars[i] = st.text_area(f"キャラクタープロンプト{i+1}", value=st.session_state.schars[i], key=f"scarea_{i}")
+            st.session_state.schars[i] = st.text_area(f"キャラクタープロンプト{i+1}", key=f"scarea_{i}")
         with b:
             if i > 0 and st.button("消す", key=f"scdel_{i}"):
                 st.session_state.schars.pop(i); st.rerun()
-    st.session_state.so = st.text_area("その他プロンプト", value=st.session_state.so)
-    st.session_state.sn = st.text_area("除外プロンプト", value=st.session_state.sn)
+    st.session_state.so = st.text_area("その他プロンプト", key="so")
+    st.session_state.sn = st.text_area("除外プロンプト", key="sn")
     size_opts = [k for k, v in SIMPLE_SIZES.items() if (is_premium() or is_owner() or not v["paid"])]
     size_name = st.radio("サイズ", size_opts, horizontal=True)
     spec = SIMPLE_SIZES[size_name]
@@ -1623,30 +1644,26 @@ elif st.session_state.page == "board":
         if not posts:
             st.write("まだ投稿はありません")
         else:
-            cards = []
-            for p in posts:
-                img = board_image_uri(p)
-                title = html_lib.escape((p.get("title") or "無題")[:16])
-                user = html_lib.escape(str(p.get("user") or ""))
-                tm = html_lib.escape(str(p.get("time") or ""))
-                pid = html_lib.escape(str(p.get("id") or ""))
-                src = img if img else ""
-                cards.append(
-                    f'<a class="bcard" href="?p=board&bid={pid}">'
-                    f'<img src="{src}" alt="">'
-                    f'<div class="bt">{title}</div>'
-                    f'<div class="bm">{user} {tm}</div></a>'
-                )
             st.markdown(
-                "<style>.bgrid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;}"
-                ".bcard{display:block;text-decoration:none;color:inherit;background:#fff;border:2px solid #111;border-radius:12px;padding:6px;}"
-                ".bcard img{width:100%;height:96px;object-fit:cover;border-radius:8px;display:block;}"
-                ".bt{font-size:12px;font-weight:700;margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}"
-                ".bm{font-size:10px;opacity:.75;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}"
-                "@media (max-width:700px){.bgrid{grid-template-columns:repeat(2,minmax(0,1fr));}.bcard img{height:88px;}}</style>"
-                f'<div class="bgrid">{"".join(cards)}</div>',
+                "<style>"
+                "div[data-testid='stHorizontalBlock']{display:flex !important;flex-direction:row !important;flex-wrap:wrap !important;gap:8px !important;}"
+                "div[data-testid='stHorizontalBlock'] > div{min-width:47% !important;width:47% !important;flex:0 0 47% !important;}"
+                "</style>",
                 unsafe_allow_html=True,
             )
+            for i in range(0, len(posts), 2):
+                row = st.columns(2)
+                for j, p in enumerate(posts[i:i + 2]):
+                    with row[j]:
+                        img = board_image_uri(p)
+                        if img:
+                            st.image(img, use_container_width=True)
+                        st.caption((p.get("title") or "無題")[:16])
+                        st.caption(f"{p.get('user','')} {p.get('time','')}")
+                        if st.button("見る", key=f"bsee_{p.get('id')}"):
+                            st.session_state.board_id = p.get("id")
+                            go("board")
+                            st.rerun()
 
 else:
     st.subheader("4コマ")
