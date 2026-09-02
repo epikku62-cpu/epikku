@@ -53,6 +53,21 @@ CONTACT_TO = "panel.com@gmail.com"
 if stripe is not None and STRIPE_SECRET_KEY:
     stripe.api_key = STRIPE_SECRET_KEY
 
+def stripe_ref():
+    return str(st.session_state.get("username") or st.session_state.get("email") or "").strip()
+
+def stripe_checkout(mode, line_items, success_url, cancel_url):
+    payload = {
+        "mode": mode,
+        "line_items": line_items,
+        "success_url": success_url,
+        "cancel_url": cancel_url,
+    }
+    ref = stripe_ref()
+    if ref:
+        payload["client_reference_id"] = ref[:200]
+    return stripe.checkout.Session.create(**payload)
+
 NAI_URLS = ["https://image.novelai.net/ai/generate-image", "https://api.novelai.net/ai/generate-image"]
 DATA_DIR = os.environ.get("DATA_DIR", os.path.abspath("data"))
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -1184,7 +1199,7 @@ elif st.session_state.page == "shop":
             with c2:
                 if st.button(f"{pack['yen']}円で買う", key=f"buy_{pack['points']}"):
                     try:
-                        session = stripe.checkout.Session.create(mode="payment", line_items=[{"price_data": {"currency": "jpy", "unit_amount": pack["yen"], "product_data": {"name": f"{pack['points']}ポイント"}}, "quantity": 1}], success_url=f"{SITE_URL}/?buypoints={pack['points']}", cancel_url=f"{SITE_URL}/?buypoints=cancel", client_reference_id=st.session_state.get("username", ""))
+                        session = stripe_checkout("payment", [{"price_data": {"currency": "jpy", "unit_amount": pack["yen"], "product_data": {"name": f"{pack['points']}ポイント"}}, "quantity": 1}], f"{SITE_URL}/?buypoints={pack['points']}", f"{SITE_URL}/?buypoints=cancel")
                         st.markdown(f"[決済ページへ進む]({session.url})")
                     except Exception as e:
                         st.error(str(e))
@@ -1266,11 +1281,13 @@ elif st.session_state.page == "plan":
     st.write("- サイズの変更開放")
     if is_premium():
         st.success(f"VIPです。期限 {str(st.session_state.premium_until)[:10]}")
+    elif not st.session_state.logged_in:
+        st.warning("月額登録にはログインが必要です。")
     elif stripe is None or not STRIPE_SECRET_KEY or not STRIPE_PRICE_ID:
         st.error("決済設定がまだです。")
     elif st.button(f"{MONTHLY_PRICE}円で登録する", type="primary"):
         try:
-            session = stripe.checkout.Session.create(mode="subscription", line_items=[{"price": STRIPE_PRICE_ID, "quantity": 1}], success_url=f"{SITE_URL}/?checkout=success", cancel_url=f"{SITE_URL}/?checkout=cancel", client_reference_id=st.session_state.get("username", ""))
+            session = stripe_checkout("subscription", [{"price": STRIPE_PRICE_ID, "quantity": 1}], f"{SITE_URL}/?checkout=success", f"{SITE_URL}/?checkout=cancel")
             st.markdown(f"[決済ページへ進む]({session.url})")
         except Exception as e:
             st.error(str(e))
