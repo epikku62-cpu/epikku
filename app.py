@@ -1440,19 +1440,22 @@ elif st.session_state.page == "simple":
                     st.session_state.hist_pick = item
                     st.rerun()
         st.stop()
-    st.session_state.sq = st.text_area("画質プロンプト", key="sq")
-    st.session_state.sb = st.text_area("背景プロンプト", key="sb")
+    st.text_area("画質プロンプト", key="sq")
+    st.text_area("背景プロンプト", key="sb")
     if st.button("➕ キャラ追加") and len(st.session_state.schars) < 3:
-        st.session_state.schars.append(""); st.rerun()
+        st.session_state.schars.append("")
+        st.session_state[f"scarea_{len(st.session_state.schars)-1}"] = ""
+        st.rerun()
     for i in range(len(st.session_state.schars)):
         a, b = st.columns([5, 1])
         with a:
-            st.session_state.schars[i] = st.text_area(f"キャラクタープロンプト{i+1}", key=f"scarea_{i}")
+            st.text_area(f"キャラクタープロンプト{i+1}", key=f"scarea_{i}")
+            st.session_state.schars[i] = st.session_state.get(f"scarea_{i}", "")
         with b:
             if i > 0 and st.button("消す", key=f"scdel_{i}"):
                 st.session_state.schars.pop(i); st.rerun()
-    st.session_state.so = st.text_area("その他プロンプト", key="so")
-    st.session_state.sn = st.text_area("除外プロンプト", key="sn")
+    st.text_area("その他プロンプト", key="so")
+    st.text_area("除外プロンプト", key="sn")
     size_opts = [k for k, v in SIMPLE_SIZES.items() if (is_premium() or is_owner() or not v["paid"])]
     size_name = st.radio("サイズ", size_opts, horizontal=True)
     spec = SIMPLE_SIZES[size_name]
