@@ -454,9 +454,10 @@ def board_image_uri(post):
 def add_library(uri, label="", extra=None):
     if not uri:
         return
-    item = {"id": str(uuid.uuid4())[:8], "url": uri, "label": label or "保存画像", "time": datetime.now().strftime("%m/%d %H:%M")}
+    item = {"id": str(uuid.uuid4())[:8], "url": uri, "label": label or "保存画像"}
     if extra:
         item.update(extra)
+    item["time"] = datetime.now().strftime("%Y/%m/%d %H:%M")
     st.session_state.library.append(item)
     save_user_state()
 
@@ -511,7 +512,13 @@ def nai_request(prompt, width, height, model, steps=23, scale=5.0, negative="", 
         "v4_prompt": {"caption": {"base_caption": prompt or "", "char_captions": char_captions}, "use_coords": True, "use_order": True},
         "v4_negative_prompt": {"caption": {"base_caption": negative or "", "char_captions": []}, "legacy_uc": False},
     }
-    if model.startswith("nai-diffusion-4-5"):
+    base_input = (prompt or "").strip()
+    if not base_input and char_texts:
+        base_input = char_texts[0]
+    if not base_input:
+        raise Exception("プロンプトを入れてください")
+    parameters["v4_prompt"]["caption"]["base_caption"] = base_input
+    if model.startswith("nai-diffusion-4-5") or model.startswith("nai-diffusion-5"):
         refs, kinds = [], []
         if char_refs and style_refs:
             refs.append(pad_ref(char_refs[0]["uri"])); kinds.append("character&style")
@@ -525,10 +532,12 @@ def nai_request(prompt, width, height, model, steps=23, scale=5.0, negative="", 
             parameters["director_reference_information_extracted"] = [1]
             parameters["director_reference_strength_values"] = [1]
             parameters["director_reference_secondary_strength_values"] = [0.75]
-    models = ["nai-diffusion-4-5-full", "nai-diffusion-4-5-curated"] if model == "nai-diffusion-4-5-full" else [model]
+    models = [model]
+    if model.startswith("nai-diffusion-5"):
+        parameters["params_version"] = 4
     last_err = None
     for mdl in models:
-        payload = {"input": prompt or "", "model": mdl, "action": "generate", "parameters": parameters}
+        payload = {"input": base_input, "model": mdl, "action": "generate", "parameters": parameters}
         for url in NAI_URLS:
             res = requests.post(url, headers={"Authorization": f"Bearer {NAI_KEY}", "Content-Type": "application/json"}, json=payload, timeout=180)
             if res.status_code == 200:
@@ -1057,7 +1066,6 @@ if st.session_state.page == "help":
     <h2>セット</h2><p>絵柄の登録<br>キャラの登録<br>登録したら4コマ画像生成の時、絵柄、キャラが反映される</p>
     <h2>4コマ</h2><p>セット絵柄、キャラを使えて画像生成して、会話、吹き出しをつけれるよ！<br>最後に合体させて4コマ完成！</p>
     <h2>動画生成モード</h2><p>ポイントで動画生成<br>秒数が長いほどポイントが増える<br>4コマ動画も1コマずつポイント消費<br>自分のmp4（10秒以下）を入れてまとめることもできる<br>まとめは20ポイント</p>
-    <h2>掲示板</h2><p>このサイトで作った画像だけ投稿<br>コメントできる<br>プロンプトの表示／非表示は画像生成モードの作品だけ<br>表示なら「プロンプトを使う」で画像生成に反映</p>
     <h2>月額登録</h2><p>セット機能開放<br>サイズの変更開放<br>{MONTHLY_POINTS}ポイント付与</p></div>""", unsafe_allow_html=True)
     if st.button("登録して始めよう！", type="primary", use_container_width=True):
         go("register" if not st.session_state.logged_in else "simple"); st.rerun()
@@ -1460,7 +1468,6 @@ elif st.session_state.page == "simple":
 
 elif st.session_state.page == "board":
     st.subheader("掲示板")
-    st.caption("掲示板に置けるのは、このサイトで作った画像だけです。4コマやセット、アイコンのアップロードはそのまま使えます。")
     board = load_board()
     posts = list(reversed(board.get("posts", [])))
     view_id = str(st.session_state.get("board_id") or "")
@@ -1596,20 +1603,25 @@ elif st.session_state.page == "board":
                         go("board"); st.rerun()
         else:
             st.caption("投稿にはログインが必要です")
+        q = st.text_input("検索", key="board_q", placeholder="タイトル・名前")
+        if q and q.strip():
+            w = q.strip().lower()
+            posts = [p for p in posts if w in str(p.get("title") or "").lower() or w in str(p.get("user") or "").lower()]
         if not posts:
             st.write("まだ投稿はありません")
-        for p in posts:
-            c1, c2 = st.columns([1, 2])
-            with c1:
-                img = board_image_uri(p)
-                if img:
-                    st.image(img, width=140)
-            with c2:
-                st.write(f"**{p.get('title') or '無題'}**")
-                st.caption(f"{p.get('user','')}　{p.get('time','')}　コメント {len(p.get('comments') or [])}")
-                if st.button("見る", key=f"bsee_{p.get('id')}"):
-                    st.session_state.board_id = p.get("id")
-                    go("board"); st.rerun()
+        else:
+            for i in range(0, len(posts), 3):
+                row = st.columns(3)
+                for j, p in enumerate(posts[i:i + 3]):
+                    with row[j]:
+                        img = board_image_uri(p)
+                        if img:
+                            st.image(img, width=110)
+                        st.caption((p.get("title") or "無題")[:16])
+                        st.caption(f"{p.get('user','')} {p.get('time','')}")
+                        if st.button("見る", key=f"bsee_{p.get('id')}"):
+                            st.session_state.board_id = p.get("id")
+                            go("board"); st.rerun()
 
 else:
     st.subheader("4コマ")
