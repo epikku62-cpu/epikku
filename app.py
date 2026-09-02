@@ -1,4 +1,5 @@
 import streamlit as st
+import html as html_lib
 import os
 import json
 import uuid
@@ -979,8 +980,14 @@ if not st.session_state._booted:
     st.session_state._booted = True
     if st.query_params.get("p"):
         st.session_state.page = st.query_params.get("p")
+    if st.query_params.get("bid"):
+        st.session_state.board_id = str(st.query_params.get("bid"))
+        st.session_state.page = "board"
 
 qs = st.query_params
+if qs.get("bid"):
+    st.session_state.board_id = str(qs.get("bid"))
+    st.session_state.page = "board"
 if st.session_state.logged_in and qs.get("checkout") == "success":
     st.session_state.premium_until = (datetime.now() + timedelta(days=30)).isoformat()
     st.session_state.points = int(st.session_state.points) + MONTHLY_POINTS
@@ -1433,7 +1440,7 @@ elif st.session_state.page == "simple":
     if st.button("生成する", type="primary"):
         st.session_state.error = ""; st.session_state.simple_busy = True; st.rerun()
     if st.session_state.simple_busy:
-        st.session_state.simple_busy = False
+        st.markdown('<div style="margin:8px 0;padding:14px;border-radius:14px;background:#fff0f6;color:#ff4d88;font-weight:800;text-align:center;">生成中…</div>', unsafe_allow_html=True)
         chars = [x.strip() for x in st.session_state.schars if x.strip()]
         parts = [x.strip() for x in [st.session_state.sq, st.session_state.sb, st.session_state.so] if x.strip()]
         if not parts and not chars:
@@ -1442,13 +1449,15 @@ elif st.session_state.page == "simple":
             st.session_state.error = "このサイズはVIPだけです"
         else:
             try:
-                take_points(spec["cost"])
-                img = nai_request(", ".join(parts), spec["gen"][0], spec["gen"][1], "nai-diffusion-5-full", steps=20, scale=scale, negative=st.session_state.sn.strip(), char_texts=chars)
+                with st.spinner("生成中…"):
+                    take_points(spec["cost"])
+                    img = nai_request(", ".join(parts), spec["gen"][0], spec["gen"][1], "nai-diffusion-5-full", steps=20, scale=scale, negative=st.session_state.sn.strip(), char_texts=chars)
                 st.session_state.simple_image = img
                 st.session_state.simple_history.append({"url": img, "quality": st.session_state.sq, "background": st.session_state.sb, "chars": list(st.session_state.schars), "other": st.session_state.so, "negative": st.session_state.sn, "size": size_name, "scale": scale})
                 save_user_state(); st.session_state.error = ""
             except Exception as e:
                 st.session_state.error = str(e)
+        st.session_state.simple_busy = False
         go("simple"); st.rerun()
     if st.session_state.simple_image:
         st.image(st.session_state.simple_image, use_container_width=True)
@@ -1474,7 +1483,11 @@ elif st.session_state.page == "board":
     if view_id:
         post = next((p for p in board.get("posts", []) if p.get("id") == view_id), None)
         if st.button("一覧へ戻る"):
-            st.session_state.board_id = ""; go("board"); st.rerun()
+            st.session_state.board_id = ""
+            st.query_params["p"] = "board"
+            if "bid" in st.query_params:
+                del st.query_params["bid"]
+            go("board"); st.rerun()
         if not post:
             st.warning("この投稿はありません")
         else:
@@ -1610,18 +1623,30 @@ elif st.session_state.page == "board":
         if not posts:
             st.write("まだ投稿はありません")
         else:
-            for i in range(0, len(posts), 3):
-                row = st.columns(3)
-                for j, p in enumerate(posts[i:i + 3]):
-                    with row[j]:
-                        img = board_image_uri(p)
-                        if img:
-                            st.image(img, width=110)
-                        st.caption((p.get("title") or "無題")[:16])
-                        st.caption(f"{p.get('user','')} {p.get('time','')}")
-                        if st.button("見る", key=f"bsee_{p.get('id')}"):
-                            st.session_state.board_id = p.get("id")
-                            go("board"); st.rerun()
+            cards = []
+            for p in posts:
+                img = board_image_uri(p)
+                title = html_lib.escape((p.get("title") or "無題")[:16])
+                user = html_lib.escape(str(p.get("user") or ""))
+                tm = html_lib.escape(str(p.get("time") or ""))
+                pid = html_lib.escape(str(p.get("id") or ""))
+                src = img if img else ""
+                cards.append(
+                    f'<a class="bcard" href="?p=board&bid={pid}">'
+                    f'<img src="{src}" alt="">'
+                    f'<div class="bt">{title}</div>'
+                    f'<div class="bm">{user} {tm}</div></a>'
+                )
+            st.markdown(
+                "<style>.bgrid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;}"
+                ".bcard{display:block;text-decoration:none;color:inherit;background:#fff;border:2px solid #111;border-radius:12px;padding:6px;}"
+                ".bcard img{width:100%;height:96px;object-fit:cover;border-radius:8px;display:block;}"
+                ".bt{font-size:12px;font-weight:700;margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}"
+                ".bm{font-size:10px;opacity:.75;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}"
+                "@media (max-width:700px){.bgrid{grid-template-columns:repeat(2,minmax(0,1fr));}.bcard img{height:88px;}}</style>"
+                f'<div class="bgrid">{"".join(cards)}</div>',
+                unsafe_allow_html=True,
+            )
 
 else:
     st.subheader("4コマ")
