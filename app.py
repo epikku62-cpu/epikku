@@ -73,6 +73,11 @@ DATA_DIR = os.environ.get("DATA_DIR", os.path.abspath("data"))
 os.makedirs(DATA_DIR, exist_ok=True)
 DATA_FILE = os.path.join(DATA_DIR, "studio_data.json")
 USERS_FILE = os.path.join(DATA_DIR, "users_data.json")
+BOARD_FILE = os.path.join(DATA_DIR, "board_data.json")
+BOARD_DIR = os.path.join(DATA_DIR, "board")
+os.makedirs(BOARD_DIR, exist_ok=True)
+BOARD_MAX_POSTS = 80
+BOARD_MAX_COMMENTS = 40
 HOME_IMG = "IMG_1106.jpeg"
 HEADER_IMG = "IMG_1107.jpeg"
 VID_DIR = os.path.join(DATA_DIR, "video_tmp")
@@ -418,11 +423,59 @@ def save_user_state():
     save_json(USERS_FILE, users)
     save_json(DATA_FILE, {"characters": st.session_state.characters})
 
-def add_library(uri, label=""):
+def load_board():
+    data = load_json(BOARD_FILE, {"posts": []})
+    if not isinstance(data, dict):
+        data = {"posts": []}
+    data["posts"] = [p for p in data.get("posts", []) if isinstance(p, dict)]
+    return data
+
+def save_board(data):
+    posts = data.get("posts", [])[-BOARD_MAX_POSTS:]
+    save_json(BOARD_FILE, {"posts": posts})
+
+def board_image_path(pid):
+    return os.path.join(BOARD_DIR, f"{pid}.jpg")
+
+def save_board_image(uri, pid):
+    img = uri_to_image(uri).convert("RGB")
+    img.thumbnail((1280, 1280))
+    path = board_image_path(pid)
+    img.save(path, format="JPEG", quality=82)
+    return path
+
+def board_image_uri(post):
+    path = post.get("image") or ""
+    if path and os.path.exists(path):
+        with open(path, "rb") as f:
+            return "data:image/jpeg;base64," + base64.b64encode(f.read()).decode()
+    return post.get("url") or ""
+
+def add_library(uri, label="", extra=None):
     if not uri:
         return
-    st.session_state.library.append({"id": str(uuid.uuid4())[:8], "url": uri, "label": label or "保存画像", "time": datetime.now().strftime("%m/%d %H:%M")})
+    item = {"id": str(uuid.uuid4())[:8], "url": uri, "label": label or "保存画像", "time": datetime.now().strftime("%m/%d %H:%M")}
+    if extra:
+        item.update(extra)
+    st.session_state.library.append(item)
     save_user_state()
+
+def site_work_kind(item):
+    label = str((item or {}).get("label") or "")
+    if label.startswith("画像生成") or (item or {}).get("kind") == "simple":
+        return "simple"
+    if "4コマ" in label:
+        return "yonkoma"
+    return ""
+
+def prompt_from_history(url):
+    for item in reversed(st.session_state.get("simple_history") or []):
+        if item.get("url") == url:
+            return item
+    for item in reversed(st.session_state.get("library") or []):
+        if item.get("url") == url and site_work_kind(item) == "simple":
+            return item
+    return {}
 
 def take_points(cost):
     if is_owner() or int(cost) <= 0:
@@ -887,7 +940,7 @@ def render_top_menu():
             go("register"); st.rerun()
     st.write(f"ポイント {st.session_state.points}")
     st.write(f"会員 {member_label() if st.session_state.logged_in else '未登録'}")
-    for label, page in [("画像生成モード", "simple"), ("セット", "chars"), ("4コマ", "make"), ("保存庫", "lib"), ("動画生成", "video"), ("4コマ動画", "v4"), ("ポイント購入", "shop"), ("説明書", "help"), ("月額登録", "plan"), ("お問い合わせ", "contact")]:
+    for label, page in [("画像生成モード", "simple"), ("セット", "chars"), ("4コマ", "make"), ("保存庫", "lib"), ("動画生成", "video"), ("4コマ動画", "v4"), ("掲示板", "board"), ("ポイント購入", "shop"), ("説明書", "help"), ("月額登録", "plan"), ("お問い合わせ", "contact")]:
         if st.button(label, use_container_width=True, key=f"m_{page}"):
             go(page); st.rerun()
     st.markdown("</div>", unsafe_allow_html=True)
@@ -905,7 +958,7 @@ defaults = {
     "icon": random.choice(ANIMALS), "email": "", "pending": None, "library": [],
     "video_src": None, "video_out": None, "v4_clips": [None] * 4, "v4_prompts": ["", "", "", ""],
     "v4_durs": [5, 5, 5, 5], "v4_count": 4, "v4_layout": "2×2", "v4_play": "同時に動く",
-    "v4_joined": None, "vjob": None, "v4_joining": False, "do_join": False, "v4_audio": "音声を消す", "wait_until": 0, "_booted": False,
+    "v4_joined": None, "vjob": None, "v4_joining": False, "do_join": False, "v4_audio": "音声を消す", "board_id": "", "wait_until": 0, "_booted": False,
     "menu_open": False, "need_top": True, "act_busy": False, "password_hash": "",
 }
 for k, v in defaults.items():
@@ -1004,6 +1057,7 @@ if st.session_state.page == "help":
     <h2>セット</h2><p>絵柄の登録<br>キャラの登録<br>登録したら4コマ画像生成の時、絵柄、キャラが反映される</p>
     <h2>4コマ</h2><p>セット絵柄、キャラを使えて画像生成して、会話、吹き出しをつけれるよ！<br>最後に合体させて4コマ完成！</p>
     <h2>動画生成モード</h2><p>ポイントで動画生成<br>秒数が長いほどポイントが増える<br>4コマ動画も1コマずつポイント消費<br>自分のmp4（10秒以下）を入れてまとめることもできる<br>まとめは20ポイント</p>
+    <h2>掲示板</h2><p>このサイトで作った画像だけ投稿<br>コメントできる<br>プロンプトの表示／非表示は画像生成モードの作品だけ<br>表示なら「プロンプトを使う」で画像生成に反映</p>
     <h2>月額登録</h2><p>セット機能開放<br>サイズの変更開放<br>{MONTHLY_POINTS}ポイント付与</p></div>""", unsafe_allow_html=True)
     if st.button("登録して始めよう！", type="primary", use_container_width=True):
         go("register" if not st.session_state.logged_in else "simple"); st.rerun()
@@ -1393,9 +1447,169 @@ elif st.session_state.page == "simple":
         raw = uri_to_image(st.session_state.simple_image)
         st.download_button("PNG保存", data=image_to_bytes(raw), file_name="simple.png", mime="image/png")
         if st.button("保存庫に入れる"):
-            add_library(st.session_state.simple_image, "画像生成"); st.success("入れました")
+            add_library(st.session_state.simple_image, "画像生成", {
+                "kind": "simple",
+                "quality": st.session_state.sq,
+                "background": st.session_state.sb,
+                "chars": list(st.session_state.schars),
+                "other": st.session_state.so,
+                "negative": st.session_state.sn,
+            }); st.success("入れました")
         if st.button("この画像を動画にする"):
             st.session_state.video_src = st.session_state.simple_image; go("video"); st.rerun()
+
+elif st.session_state.page == "board":
+    st.subheader("掲示板")
+    st.caption("掲示板に置けるのは、このサイトで作った画像だけです。4コマやセット、アイコンのアップロードはそのまま使えます。")
+    board = load_board()
+    posts = list(reversed(board.get("posts", [])))
+    view_id = str(st.session_state.get("board_id") or "")
+    if view_id:
+        post = next((p for p in board.get("posts", []) if p.get("id") == view_id), None)
+        if st.button("一覧へ戻る"):
+            st.session_state.board_id = ""; go("board"); st.rerun()
+        if not post:
+            st.warning("この投稿はありません")
+        else:
+            img = board_image_uri(post)
+            if img:
+                st.image(img, use_container_width=True)
+            st.write(f"**{post.get('title') or '無題'}**")
+            st.caption(f"{post.get('user','')}　{post.get('time','')}")
+            if post.get("kind") == "simple" and post.get("show_prompt"):
+                st.write("画質: " + (post.get("quality") or "なし"))
+                st.write("背景: " + (post.get("background") or "なし"))
+                chars = post.get("chars") or []
+                for i, c in enumerate(chars):
+                    if str(c).strip():
+                        st.write(f"キャラ{i+1}: {c}")
+                st.write("その他: " + (post.get("other") or "なし"))
+                st.write("除外: " + (post.get("negative") or "なし"))
+                if st.button("プロンプトを使う", type="primary"):
+                    st.session_state.sq = post.get("quality") or ""
+                    st.session_state.sb = post.get("background") or ""
+                    st.session_state.so = post.get("other") or ""
+                    st.session_state.sn = post.get("negative") or ""
+                    ch = [x for x in (post.get("chars") or []) if str(x).strip()] or [""]
+                    st.session_state.schars = ch[:3]
+                    go("simple"); st.rerun()
+            elif post.get("kind") == "simple":
+                st.caption("プロンプトは非表示です")
+            else:
+                st.caption("この作品に使えるプロンプトはありません")
+            st.write("コメント")
+            for c in post.get("comments") or []:
+                st.markdown(f"**{c.get('user','')}**　{c.get('time','')}")
+                st.write(c.get("text", ""))
+            if st.session_state.logged_in:
+                msg = st.text_area("コメント", key="board_cmt", max_chars=300)
+                if st.button("コメントする"):
+                    if not msg.strip():
+                        st.session_state.error = "コメントを書いてください"
+                    elif len(post.get("comments") or []) >= BOARD_MAX_COMMENTS:
+                        st.session_state.error = "コメントがいっぱいです"
+                    else:
+                        post.setdefault("comments", []).append({
+                            "user": st.session_state.get("username") or "名無し",
+                            "text": msg.strip()[:300],
+                            "time": datetime.now().strftime("%m/%d %H:%M"),
+                        })
+                        save_board(board)
+                        st.session_state.error = ""
+                    go("board"); st.rerun()
+            else:
+                st.caption("コメントにはログインが必要です")
+            if st.session_state.logged_in and (st.session_state.get("username") == post.get("user") or is_owner()):
+                if st.button("この投稿を消す"):
+                    path = post.get("image") or ""
+                    board["posts"] = [p for p in board.get("posts", []) if p.get("id") != view_id]
+                    if path and os.path.exists(path):
+                        try:
+                            os.remove(path)
+                        except Exception:
+                            pass
+                    save_board(board)
+                    st.session_state.board_id = ""
+                    go("board"); st.rerun()
+    else:
+        if st.session_state.logged_in:
+            with st.expander("作品を投稿する", expanded=False):
+                title = st.text_input("タイトル", max_chars=40)
+                choices = []
+                if st.session_state.simple_image:
+                    choices.append({"label": "今の画像生成", "url": st.session_state.simple_image, "kind": "simple"})
+                for item in reversed(st.session_state.get("simple_history") or []):
+                    if item.get("url"):
+                        choices.append({"label": f"履歴 {item.get('size','')} {item.get('quality','')[:12]}", "url": item["url"], "kind": "simple", "meta": item})
+                for item in reversed(st.session_state.get("library") or []):
+                    kind = site_work_kind(item)
+                    if kind and item.get("url"):
+                        choices.append({"label": f"保存庫 {item.get('time','')} {item.get('label','')}", "url": item["url"], "kind": kind, "meta": item})
+                seen, uniq = set(), []
+                for c in choices:
+                    if c["url"] in seen:
+                        continue
+                    seen.add(c["url"])
+                    uniq.append(c)
+                if not uniq:
+                    st.write("サイトで作った画像がまだありません")
+                else:
+                    names = [c["label"] for c in uniq]
+                    pick = st.selectbox("サイト内の作品", names)
+                    chosen = uniq[names.index(pick)]
+                    src = chosen["url"]
+                    kind = chosen["kind"]
+                    st.image(src, width=220)
+                    show_p = "非表示"
+                    if kind == "simple":
+                        show_p = st.radio("プロンプト", ["表示する", "非表示"], horizontal=True)
+                    else:
+                        st.caption("画像生成モード以外はプロンプトを出せません")
+                    if st.button("投稿する", type="primary"):
+                        if len(board.get("posts", [])) >= BOARD_MAX_POSTS:
+                            st.session_state.error = "掲示板がいっぱいです"
+                        else:
+                            pid = uuid.uuid4().hex[:10]
+                            meta = chosen.get("meta") or prompt_from_history(src)
+                            try:
+                                path = save_board_image(src, pid)
+                                board.setdefault("posts", []).append({
+                                    "id": pid,
+                                    "user": st.session_state.get("username") or "名無し",
+                                    "title": (title or "無題").strip()[:40],
+                                    "image": path,
+                                    "kind": kind,
+                                    "show_prompt": kind == "simple" and show_p == "表示する",
+                                    "quality": meta.get("quality", "") if kind == "simple" else "",
+                                    "background": meta.get("background", "") if kind == "simple" else "",
+                                    "other": meta.get("other", "") if kind == "simple" else "",
+                                    "negative": meta.get("negative", "") if kind == "simple" else "",
+                                    "chars": list(meta.get("chars") or [])[:3] if kind == "simple" else [],
+                                    "comments": [],
+                                    "time": datetime.now().strftime("%m/%d %H:%M"),
+                                })
+                                save_board(board)
+                                st.session_state.error = ""
+                                st.session_state.board_id = pid
+                            except Exception as e:
+                                st.session_state.error = str(e)
+                        go("board"); st.rerun()
+        else:
+            st.caption("投稿にはログインが必要です")
+        if not posts:
+            st.write("まだ投稿はありません")
+        for p in posts:
+            c1, c2 = st.columns([1, 2])
+            with c1:
+                img = board_image_uri(p)
+                if img:
+                    st.image(img, width=140)
+            with c2:
+                st.write(f"**{p.get('title') or '無題'}**")
+                st.caption(f"{p.get('user','')}　{p.get('time','')}　コメント {len(p.get('comments') or [])}")
+                if st.button("見る", key=f"bsee_{p.get('id')}"):
+                    st.session_state.board_id = p.get("id")
+                    go("board"); st.rerun()
 
 else:
     st.subheader("4コマ")
