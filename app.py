@@ -1551,7 +1551,7 @@ elif st.session_state.page == "simple":
         with a:
             st.text_area(f"キャラクタープロンプト{i+1}", key=f"scarea_{i}")
             st.session_state.schars[i] = st.session_state.get(f"scarea_{i}", "")
-            st.text_input(f'キャラ{i+1} 吹き出し（speech bubble,"内容"）', key=f"sbb_{i}")
+            st.text_input(f"キャラ{i+1} 吹き出し（吹き出しの中の言葉）", key=f"sbb_{i}")
             st.session_state.sbubbles[i] = st.session_state.get(f"sbb_{i}", "")
             shown = (st.session_state.sbubbles[i] or "").strip()
             if shown:
