@@ -74,6 +74,7 @@ DATA_DIR = os.environ.get("DATA_DIR", os.path.abspath("data"))
 os.makedirs(DATA_DIR, exist_ok=True)
 DATA_FILE = os.path.join(DATA_DIR, "studio_data.json")
 USERS_FILE = os.path.join(DATA_DIR, "users_data.json")
+TOKENS_FILE = os.path.join(DATA_DIR, "login_tokens.json")
 BOARD_FILE = os.path.join(DATA_DIR, "board_data.json")
 BOARD_DIR = os.path.join(DATA_DIR, "board")
 os.makedirs(BOARD_DIR, exist_ok=True)
@@ -146,6 +147,49 @@ def go(page):
     st.session_state.menu_open = False
     st.session_state.need_top = True
     st.query_params["p"] = page
+    tok = str(st.session_state.get("auth_token") or "")
+    if tok:
+        st.query_params["auth"] = tok
+
+def load_tokens():
+    data = load_json(TOKENS_FILE, {})
+    return data if isinstance(data, dict) else {}
+
+def save_tokens(data):
+    save_json(TOKENS_FILE, data)
+
+def issue_login_token(name):
+    tokens = {k: v for k, v in load_tokens().items() if v != name}
+    token = uuid.uuid4().hex
+    tokens[token] = name
+    save_tokens(tokens)
+    st.session_state.auth_token = token
+    st.query_params["auth"] = token
+    return token
+
+def clear_login_token(name=""):
+    tok = str(st.session_state.get("auth_token") or st.query_params.get("auth") or "")
+    tokens = load_tokens()
+    if tok in tokens:
+        tokens.pop(tok, None)
+    if name:
+        tokens = {k: v for k, v in tokens.items() if v != name}
+    save_tokens(tokens)
+    st.session_state.auth_token = ""
+    if "auth" in st.query_params:
+        del st.query_params["auth"]
+
+def restore_login():
+    if st.session_state.get("logged_in") and st.session_state.get("username"):
+        return
+    token = str(st.query_params.get("auth") or st.session_state.get("auth_token") or "")
+    if not token:
+        return
+    name = load_tokens().get(token)
+    users = load_json(USERS_FILE, {})
+    if name and name in users:
+        st.session_state.auth_token = token
+        apply_login(name, users[name])
 
 def start_wait():
     st.session_state.wait_until = time.time() + WAIT_SEC
@@ -919,6 +963,8 @@ def apply_login(name, data):
     st.session_state.premium_until = data.get("premium_until", "")
     st.session_state.simple_history = data.get("history", [])
     st.session_state.library = data.get("library", [])
+    if not st.session_state.get("auth_token"):
+        issue_login_token(name)
     save_user_state()
 
 def render_top_menu():
@@ -942,7 +988,10 @@ def render_top_menu():
         if st.button("アイコン変更", use_container_width=True):
             go("icon"); st.rerun()
         if st.button("ログアウト", use_container_width=True):
-            st.session_state.logged_in = False; go("home"); st.rerun()
+            clear_login_token(st.session_state.get("username") or "")
+            st.session_state.logged_in = False
+            st.session_state.username = ""
+            go("home"); st.rerun()
     else:
         if st.button("登録", use_container_width=True):
             go("register"); st.rerun()
@@ -958,7 +1007,7 @@ def render_top_menu():
 prepare_fonts()
 usable_fonts = [k for k, ok in prepare_fonts().items() if ok] or ["ゴシック"]
 defaults = {
-    "logged_in": False, "page": "home", "layout": "縦4", "scenes": ["", "", "", ""],
+    "logged_in": False, "page": "home", "auth_token": "", "layout": "縦4", "scenes": ["", "", "", ""],
     "scene_chars": ["セットなし"] * 4, "panel_images": [None] * 4, "panel_upload": [False] * 4,
     "panel_sizes": [SIZES["横長"]["wh"]] * 4, "panel_shape": ["横長"] * 4,
     "panel_bubbles": [[], [], [], []], "drafts": [empty_bubble() for _ in range(4)],
@@ -985,6 +1034,7 @@ if not st.session_state._booted:
         st.session_state.page = "board"
 
 qs = st.query_params
+restore_login()
 if qs.get("bid"):
     st.session_state.board_id = str(qs.get("bid"))
     st.session_state.page = "board"
@@ -992,7 +1042,8 @@ if st.session_state.logged_in and qs.get("checkout") == "success":
     st.session_state.premium_until = (datetime.now() + timedelta(days=30)).isoformat()
     st.session_state.points = int(st.session_state.points) + MONTHLY_POINTS
     save_user_state()
-    st.query_params.clear()
+    if "checkout" in st.query_params:
+        del st.query_params["checkout"]
     go("plan")
 if st.session_state.logged_in and qs.get("buypoints"):
     try:
@@ -1002,7 +1053,8 @@ if st.session_state.logged_in and qs.get("buypoints"):
             save_user_state()
     except Exception:
         pass
-    st.query_params.clear()
+    if "buypoints" in st.query_params:
+        del st.query_params["buypoints"]
     go("shop")
 
 st.markdown("""
@@ -1036,6 +1088,36 @@ section.main div[data-testid="stHorizontalBlock"]:first-of-type div[data-testid=
   box-shadow: 0 5px 0 #ff4d88 !important;
 }
 </style>
+<div id="now-loading" style="position:fixed;inset:0;z-index:999999;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.45);color:#fff;font-weight:800;font-size:22px;letter-spacing:.04em;">now loading</div>
+<script>
+(function(){
+  const doc = (window.parent && window.parent.document) ? window.parent.document : document;
+  function box(){
+    let el = doc.getElementById("now-loading-global");
+    if(!el){
+      el = doc.createElement("div");
+      el.id = "now-loading-global";
+      el.textContent = "now loading";
+      el.style.cssText = "display:none;position:fixed;inset:0;z-index:999999;align-items:center;justify-content:center;background:rgba(0,0,0,.45);color:#fff;font-weight:800;font-size:22px;";
+      doc.body.appendChild(el);
+    }
+    return el;
+  }
+  function show(){ const el=box(); el.style.display="flex"; }
+  function hide(){
+    const el = doc.getElementById("now-loading-global");
+    if(el) el.style.display="none";
+    const local = document.getElementById("now-loading");
+    if(local) local.style.display="none";
+  }
+  doc.addEventListener("click", function(e){
+    const t = e.target;
+    if(!t || !t.closest) return;
+    if(t.closest("button") || t.closest("a") || t.closest("[data-testid='stButton']")) show();
+  }, true);
+  setTimeout(hide, 80);
+})();
+</script>
 """, unsafe_allow_html=True)
 
 render_top_menu()
