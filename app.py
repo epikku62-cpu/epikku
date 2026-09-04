@@ -1088,7 +1088,6 @@ section.main div[data-testid="stHorizontalBlock"]:first-of-type div[data-testid=
   box-shadow: 0 5px 0 #ff4d88 !important;
 }
 </style>
-<div id="now-loading" style="position:fixed;inset:0;z-index:999999;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.45);color:#fff;font-weight:800;font-size:22px;letter-spacing:.04em;">now loading</div>
 <script>
 (function(){
   const doc = (window.parent && window.parent.document) ? window.parent.document : document;
@@ -1103,19 +1102,24 @@ section.main div[data-testid="stHorizontalBlock"]:first-of-type div[data-testid=
     }
     return el;
   }
-  function show(){ const el=box(); el.style.display="flex"; }
-  function hide(){
-    const el = doc.getElementById("now-loading-global");
-    if(el) el.style.display="none";
-    const local = document.getElementById("now-loading");
-    if(local) local.style.display="none";
+  function running(){
+    const roots = [doc.documentElement, document.documentElement, doc.querySelector("[data-testid='stApp']"), document.querySelector("[data-testid='stApp']")];
+    for (const r of roots){
+      if(!r || !r.getAttribute) continue;
+      const st = r.getAttribute("data-test-script-state");
+      if(st === "running") return true;
+      if(st === "notRunning") return false;
+    }
+    return false;
   }
-  doc.addEventListener("click", function(e){
-    const t = e.target;
-    if(!t || !t.closest) return;
-    if(t.closest("button") || t.closest("a") || t.closest("[data-testid='stButton']")) show();
-  }, true);
-  setTimeout(hide, 80);
+  function sync(){
+    box().style.display = running() ? "flex" : "none";
+  }
+  if(!doc._nowLoadWatch){
+    doc._nowLoadWatch = true;
+    new MutationObserver(sync).observe(doc.documentElement, {attributes:true, subtree:true, childList:true});
+  }
+  sync();
 })();
 </script>
 """, unsafe_allow_html=True)
