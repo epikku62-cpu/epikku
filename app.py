@@ -103,14 +103,14 @@ SIZES = {
     "壁紙・縦 1088×1920": {"wh": (1088, 1920), "gen": (1088, 1920), "cost": 68, "paid": True},
 }
 SIMPLE_SIZES = {
-    "横長 1216×832": {"gen": (1216, 832), "cost": 20, "paid": False},
-    "縦長 832×1216": {"gen": (832, 1216), "cost": 20, "paid": False},
-    "正方形 1024×1024": {"gen": (1024, 1024), "cost": 20, "paid": False},
-    "大・横 1536×1024": {"gen": (1536, 1024), "cost": 70, "paid": True},
-    "大・縦 1024×1536": {"gen": (1024, 1536), "cost": 70, "paid": True},
-    "大・正 1472×1472": {"gen": (1472, 1472), "cost": 96, "paid": True},
-    "壁紙・横 1920×1088": {"gen": (1920, 1088), "cost": 94, "paid": True},
-    "壁紙・縦 1088×1920": {"gen": (1088, 1920), "cost": 94, "paid": True},
+    "横長 1216×832": {"gen": (1216, 832), "cost": 10, "paid": False},
+    "縦長 832×1216": {"gen": (832, 1216), "cost": 10, "paid": False},
+    "正方形 1024×1024": {"gen": (1024, 1024), "cost": 10, "paid": False},
+    "大・横 1536×1024": {"gen": (1536, 1024), "cost": 60, "paid": True},
+    "大・縦 1024×1536": {"gen": (1024, 1536), "cost": 60, "paid": True},
+    "大・正 1472×1472": {"gen": (1472, 1472), "cost": 86, "paid": True},
+    "壁紙・横 1920×1088": {"gen": (1920, 1088), "cost": 84, "paid": True},
+    "壁紙・縦 1088×1920": {"gen": (1088, 1920), "cost": 84, "paid": True},
 }
 BUBBLE_TYPES = ["ふきだし", "叫び", "考え", "文字だけ"]
 TAILS = ["下", "下左", "下右", "左", "右"]
@@ -1013,7 +1013,7 @@ defaults = {
     "panel_bubbles": [[], [], [], []], "drafts": [empty_bubble() for _ in range(4)],
     "error": "", "busy_index": None, "combined": None, "points": 0, "premium_until": "",
     "simple_image": None, "simple_busy": False, "simple_history": [], "show_history": False,
-    "hist_pick": None, "sq": "", "sb": "", "so": "", "sn": "", "schars": [""],
+    "hist_pick": None, "sq": "", "sb": "", "so": "", "sn": "", "schars": [""], "sbubbles": [""],
     "icon": random.choice(ANIMALS), "email": "", "pending": None, "library": [],
     "video_src": None, "video_out": None, "v4_clips": [None] * 4, "v4_prompts": ["", "", "", ""],
     "v4_durs": [5, 5, 5, 5], "v4_count": 4, "v4_layout": "2×2", "v4_play": "同時に動く",
@@ -1493,6 +1493,9 @@ elif st.session_state.page == "simple":
             for i, c in enumerate(pick.get("chars") or []):
                 if str(c).strip():
                     st.write(f"キャラ{i+1}: {c}")
+            for i, btxt in enumerate(pick.get("bubbles") or []):
+                if str(btxt).strip():
+                    st.write(f'キャラ{i+1}吹き出し: speech bubble,"{str(btxt).strip()}"')
             st.write("その他: " + (pick.get("other") or "なし"))
             st.write("除外: " + (pick.get("negative") or "なし"))
             a, b = st.columns(2)
@@ -1504,9 +1507,15 @@ elif st.session_state.page == "simple":
                     st.session_state.so = pick.get("other") or ""
                     st.session_state.sn = pick.get("negative") or ""
                     st.session_state.schars = chars[:3]
+                    bubbles = list(pick.get("bubbles") or [""] * len(st.session_state.schars))
+                    while len(bubbles) < len(st.session_state.schars):
+                        bubbles.append("")
+                    st.session_state.sbubbles = bubbles[:len(st.session_state.schars)]
                     st.session_state.simple_image = pick.get("url")
                     for i, c in enumerate(st.session_state.schars):
                         st.session_state[f"scarea_{i}"] = c
+                    for i, btxt in enumerate(st.session_state.sbubbles):
+                        st.session_state[f"sbb_{i}"] = btxt
                     st.session_state.hist_pick = None
                     st.session_state.show_history = False
                     st.rerun()
@@ -1530,16 +1539,29 @@ elif st.session_state.page == "simple":
     st.text_area("背景プロンプト", key="sb")
     if st.button("➕ キャラ追加") and len(st.session_state.schars) < 3:
         st.session_state.schars.append("")
-        st.session_state[f"scarea_{len(st.session_state.schars)-1}"] = ""
+        st.session_state.sbubbles.append("")
+        idx = len(st.session_state.schars) - 1
+        st.session_state[f"scarea_{idx}"] = ""
+        st.session_state[f"sbb_{idx}"] = ""
         st.rerun()
+    if len(st.session_state.get("sbubbles") or []) < len(st.session_state.schars):
+        st.session_state.sbubbles = list(st.session_state.get("sbubbles") or []) + [""] * (len(st.session_state.schars) - len(st.session_state.get("sbubbles") or []))
     for i in range(len(st.session_state.schars)):
         a, b = st.columns([5, 1])
         with a:
             st.text_area(f"キャラクタープロンプト{i+1}", key=f"scarea_{i}")
             st.session_state.schars[i] = st.session_state.get(f"scarea_{i}", "")
+            st.text_input(f'キャラ{i+1} 吹き出し（speech bubble,"内容"）', key=f"sbb_{i}")
+            st.session_state.sbubbles[i] = st.session_state.get(f"sbb_{i}", "")
+            shown = (st.session_state.sbubbles[i] or "").strip()
+            if shown:
+                st.caption(f'speech bubble,"{shown}"')
         with b:
             if i > 0 and st.button("消す", key=f"scdel_{i}"):
-                st.session_state.schars.pop(i); st.rerun()
+                st.session_state.schars.pop(i)
+                if i < len(st.session_state.sbubbles):
+                    st.session_state.sbubbles.pop(i)
+                st.rerun()
     st.text_area("その他プロンプト", key="so")
     st.text_area("除外プロンプト", key="sn")
     size_opts = [k for k, v in SIMPLE_SIZES.items() if (is_premium() or is_owner() or not v["paid"])]
@@ -1551,7 +1573,20 @@ elif st.session_state.page == "simple":
         st.session_state.error = ""; st.session_state.simple_busy = True; st.rerun()
     if st.session_state.simple_busy:
         st.markdown('<div style="margin:8px 0;padding:14px;border-radius:14px;background:#fff0f6;color:#ff4d88;font-weight:800;text-align:center;">生成中…</div>', unsafe_allow_html=True)
-        chars = [x.strip() for x in st.session_state.schars if x.strip()]
+        char_texts = []
+        bubbles = list(st.session_state.get("sbubbles") or [])
+        for i, raw in enumerate(st.session_state.schars):
+            body = (raw or "").strip()
+            bub = (bubbles[i] if i < len(bubbles) else "").strip()
+            if bub.startswith('speech bubble,"') and bub.endswith('"'):
+                bub = bub[len('speech bubble,"'):-1]
+            elif bub.startswith("speech bubble,"):
+                bub = bub.split(",", 1)[-1].strip().strip('"')
+            extra = f'speech bubble,"{bub}"' if bub else ""
+            line = ", ".join([x for x in [body, extra] if x])
+            if line:
+                char_texts.append(line)
+        chars = char_texts
         parts = [x.strip() for x in [st.session_state.sq, st.session_state.sb, st.session_state.so] if x.strip()]
         if not parts and not chars:
             st.session_state.error = "プロンプトを入れてください"
@@ -1563,7 +1598,7 @@ elif st.session_state.page == "simple":
                     take_points(spec["cost"])
                     img = nai_request(", ".join(parts), spec["gen"][0], spec["gen"][1], "nai-diffusion-5-full", steps=20, scale=scale, negative=st.session_state.sn.strip(), char_texts=chars)
                 st.session_state.simple_image = img
-                st.session_state.simple_history.append({"url": img, "quality": st.session_state.sq, "background": st.session_state.sb, "chars": list(st.session_state.schars), "other": st.session_state.so, "negative": st.session_state.sn, "size": size_name, "scale": scale})
+                st.session_state.simple_history.append({"url": img, "quality": st.session_state.sq, "background": st.session_state.sb, "chars": list(st.session_state.schars), "bubbles": list(st.session_state.get("sbubbles") or []), "other": st.session_state.so, "negative": st.session_state.sn, "size": size_name, "scale": scale})
                 save_user_state(); st.session_state.error = ""
             except Exception as e:
                 st.session_state.error = str(e)
