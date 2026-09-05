@@ -1,4 +1,5 @@
 import streamlit as st
+import streamlit.components.v1 as components
 import html as html_lib
 import os
 import json
@@ -1127,11 +1128,11 @@ section.main div[data-testid="stHorizontalBlock"]:first-of-type div[data-testid=
   filter: none !important;
 }
 </style>
+""", unsafe_allow_html=True)
+components.html("""
 <script>
 (function(){
-  const root = (window.parent && window.parent.document) ? window.parent.document : document;
-  const old = root.getElementById("now-loading-global");
-  if(old) old.remove();
+  const root = window.parent ? window.parent.document : document;
   function hide(){
     const el = root.getElementById("load-under-btn");
     if(el) el.style.display = "none";
@@ -1142,13 +1143,14 @@ section.main div[data-testid="stHorizontalBlock"]:first-of-type div[data-testid=
       el = root.createElement("div");
       el.id = "load-under-btn";
       el.textContent = "読み込み中…";
-      el.style.cssText = "position:fixed;z-index:2147483647;display:none;font-size:14px;font-weight:800;color:#ff4d88;background:#fff;border:2px solid #111;border-radius:999px;padding:4px 10px;";
+      el.style.cssText = "position:fixed;z-index:2147483647;font-size:14px;font-weight:800;color:#ff4d88;background:#ffffff;border:2px solid #111111;border-radius:999px;padding:4px 10px;";
       root.body.appendChild(el);
     }
     const r = btn.getBoundingClientRect();
     el.style.left = Math.max(8, r.left) + "px";
     el.style.top = (r.bottom + 8) + "px";
     el.style.display = "block";
+    root.__loadShown = Date.now();
   }
   function bind(d){
     if(!d || d._loadUnderBtn) return;
@@ -1160,12 +1162,17 @@ section.main div[data-testid="stHorizontalBlock"]:first-of-type div[data-testid=
       if(btn) show(btn);
     }, true);
   }
-  bind(document);
   bind(root);
-  setTimeout(hide, 120);
+  root.querySelectorAll("iframe").forEach(function(f){
+    try { bind(f.contentDocument); } catch(e) {}
+  });
+  bind(document);
+  if(!root.__loadShown || Date.now() - root.__loadShown > 400){
+    hide();
+  }
 })();
 </script>
-""", unsafe_allow_html=True)
+""", height=0)
 
 render_top_menu()
 if st.session_state.get("need_top"):
