@@ -75,6 +75,7 @@ os.makedirs(DATA_DIR, exist_ok=True)
 DATA_FILE = os.path.join(DATA_DIR, "studio_data.json")
 USERS_FILE = os.path.join(DATA_DIR, "users_data.json")
 TOKENS_FILE = os.path.join(DATA_DIR, "login_tokens.json")
+STATS_FILE = os.path.join(DATA_DIR, "visit_stats.json")
 BOARD_FILE = os.path.join(DATA_DIR, "board_data.json")
 BOARD_DIR = os.path.join(DATA_DIR, "board")
 os.makedirs(BOARD_DIR, exist_ok=True)
@@ -130,6 +131,35 @@ def is_owner():
     u = str(st.session_state.get("username") or "").strip().lower()
     e = norm_mail(st.session_state.get("email"))
     return bool(OWNER_ACCOUNTS) and (u in OWNER_ACCOUNTS or e in OWNER_ACCOUNTS)
+
+def mark_visit():
+    now = datetime.now()
+    last = float(st.session_state.get("_visit_at") or 0)
+    if now.timestamp() - last < 600:
+        if st.session_state.get("logged_in") and st.session_state.get("username"):
+            touch_user_seen(st.session_state.get("username"))
+        return
+    st.session_state._visit_at = now.timestamp()
+    data = load_json(STATS_FILE, {"total": 0, "days": {}, "last": ""})
+    if not isinstance(data, dict):
+        data = {"total": 0, "days": {}, "last": ""}
+    day = now.strftime("%Y/%m/%d")
+    days = data.get("days") if isinstance(data.get("days"), dict) else {}
+    days[day] = int(days.get(day, 0)) + 1
+    if len(days) > 60:
+        days = dict(sorted(days.items())[-60:])
+    data["days"] = days
+    data["total"] = int(data.get("total", 0)) + 1
+    data["last"] = now.strftime("%Y/%m/%d %H:%M")
+    save_json(STATS_FILE, data)
+    if st.session_state.get("logged_in") and st.session_state.get("username"):
+        touch_user_seen(st.session_state.get("username"))
+
+def touch_user_seen(name):
+    users = load_json(USERS_FILE, {})
+    if name in users and isinstance(users[name], dict):
+        users[name]["last_seen"] = datetime.now().strftime("%Y/%m/%d %H:%M")
+        save_json(USERS_FILE, users)
 
 def scroll_top():
     st.markdown("""
@@ -460,6 +490,7 @@ def save_user_state():
         "rank": "vip" if is_premium() else "ブロンズ",
         "history": st.session_state.get("simple_history", prev.get("history", []))[-30:],
         "library": st.session_state.get("library", prev.get("library", []))[-40:],
+        "last_seen": datetime.now().strftime("%Y/%m/%d %H:%M") if st.session_state.get("logged_in") else prev.get("last_seen", ""),
     }
     if not users[name]["password"] and prev.get("password"):
         users[name]["password"] = prev["password"]
@@ -999,7 +1030,10 @@ def render_top_menu():
             go("register"); st.rerun()
     st.write(f"ポイント {st.session_state.points}")
     st.write(f"会員 {member_label() if st.session_state.logged_in else '未登録'}")
-    for label, page in [("画像生成モード", "simple"), ("セット", "chars"), ("4コマ", "make"), ("保存庫", "lib"), ("動画生成", "video"), ("4コマ動画", "v4"), ("掲示板", "board"), ("ポイント購入", "shop"), ("説明書", "help"), ("月額登録", "plan"), ("お問い合わせ", "contact")]:
+    menu_items = [("画像生成モード", "simple"), ("セット", "chars"), ("4コマ", "make"), ("保存庫", "lib"), ("動画生成", "video"), ("4コマ動画", "v4"), ("掲示板", "board"), ("ポイント購入", "shop"), ("説明書", "help"), ("月額登録", "plan"), ("お問い合わせ", "contact")]
+    if is_owner():
+        menu_items.append(("来場", "stats"))
+    for label, page in menu_items:
         if st.button(label, use_container_width=True, key=f"m_{page}"):
             go(page); st.rerun()
     st.markdown("</div>", unsafe_allow_html=True)
@@ -1035,6 +1069,7 @@ if not st.session_state._booted:
 
 qs = st.query_params
 restore_login()
+mark_visit()
 if qs.get("bid"):
     st.session_state.board_id = str(qs.get("bid"))
     st.session_state.page = "board"
@@ -1427,6 +1462,49 @@ elif st.session_state.page == "contact":
         else:
             ok, err = send_mail(CONTACT_TO, f"[panel AI] お問い合わせ {cname}", f"名前: {cname}\n返信先: {cmail}\nユーザー: {st.session_state.get('username','未ログイン')}\n\n{cbody}")
             st.success("送りました") if ok else st.error(f"送れませんでした: {err}")
+
+elif st.session_state.page == "stats":
+    st.subheader("来場")
+    if not is_owner():
+        st.warning("管理者だけです")
+        st.stop()
+    data = load_json(STATS_FILE, {"total": 0, "days": {}, "last": ""})
+    days = data.get("days") if isinstance(data.get("days"), dict) else {}
+    today = datetime.now().strftime("%Y/%m/%d")
+    yday = (datetime.now() - timedelta(days=1)).strftime("%Y/%m/%d")
+    st.write(f"累計 {int(data.get('total', 0))}")
+    st.write(f"今日 {int(days.get(today, 0))}")
+    st.write(f"昨日 {int(days.get(yday, 0))}")
+    st.write(f"最後 {data.get('last') or 'なし'}")
+    users = load_json(USERS_FILE, {})
+    st.write(f"登録 {len(users)}人")
+    now = datetime.now()
+    online = []
+    recent = []
+    for name, u in users.items():
+        if not isinstance(u, dict):
+            continue
+        seen = str(u.get("last_seen") or "")
+        if not seen:
+            continue
+        try:
+            t = datetime.strptime(seen, "%Y/%m/%d %H:%M")
+        except Exception:
+            continue
+        mins = (now - t).total_seconds() / 60
+        row = f"{name}　{seen}"
+        if mins <= 30:
+            online.append(row)
+        recent.append((t, row))
+    st.write("ログイン中（30分以内）")
+    if online:
+        for row in online:
+            st.write(row)
+    else:
+        st.write("いまはいません")
+    st.write("最近ログインした人")
+    for _, row in sorted(recent, key=lambda x: x[0], reverse=True)[:30]:
+        st.write(row)
 
 elif st.session_state.page == "plan":
     st.subheader("月額登録")
