@@ -1122,35 +1122,47 @@ section.main div[data-testid="stHorizontalBlock"]:first-of-type div[data-testid=
   border: 3px solid #ffffff !important;
   box-shadow: 0 5px 0 #ff4d88 !important;
 }
+.stApp, [data-testid="stAppViewContainer"], section.main {
+  opacity: 1 !important;
+  filter: none !important;
+}
 </style>
 <script>
 (function(){
-  const doc = (window.parent && window.parent.document) ? window.parent.document : document;
-  const old = doc.getElementById("now-loading-global");
+  const root = (window.parent && window.parent.document) ? window.parent.document : document;
+  const old = root.getElementById("now-loading-global");
   if(old) old.remove();
-  function clearMarks(){
-    doc.querySelectorAll(".load-under-btn").forEach(function(n){ n.remove(); });
+  function hide(){
+    const el = root.getElementById("load-under-btn");
+    if(el) el.style.display = "none";
   }
-  function mark(btn){
-    clearMarks();
-    const el = doc.createElement("div");
-    el.className = "load-under-btn";
-    el.textContent = "読み込み中…";
-    el.style.cssText = "margin:6px 0 0;font-size:13px;font-weight:700;color:#ff4d88;";
-    const wrap = btn.closest("[data-testid='stButton']") || btn.parentNode;
-    if(wrap && wrap.parentNode) wrap.parentNode.insertBefore(el, wrap.nextSibling);
-    else btn.insertAdjacentElement("afterend", el);
+  function show(btn){
+    let el = root.getElementById("load-under-btn");
+    if(!el){
+      el = root.createElement("div");
+      el.id = "load-under-btn";
+      el.textContent = "読み込み中…";
+      el.style.cssText = "position:fixed;z-index:2147483647;display:none;font-size:14px;font-weight:800;color:#ff4d88;background:#fff;border:2px solid #111;border-radius:999px;padding:4px 10px;";
+      root.body.appendChild(el);
+    }
+    const r = btn.getBoundingClientRect();
+    el.style.left = Math.max(8, r.left) + "px";
+    el.style.top = (r.bottom + 8) + "px";
+    el.style.display = "block";
   }
-  if(!doc._loadUnderBtn){
-    doc._loadUnderBtn = true;
-    doc.addEventListener("click", function(e){
+  function bind(d){
+    if(!d || d._loadUnderBtn) return;
+    d._loadUnderBtn = true;
+    d.addEventListener("click", function(e){
       const t = e.target;
       if(!t || !t.closest) return;
       const btn = t.closest("button");
-      if(btn) mark(btn);
+      if(btn) show(btn);
     }, true);
   }
-  setTimeout(clearMarks, 80);
+  bind(document);
+  bind(root);
+  setTimeout(hide, 120);
 })();
 </script>
 """, unsafe_allow_html=True)
