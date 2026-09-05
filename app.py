@@ -1597,9 +1597,6 @@ elif st.session_state.page == "simple":
             st.session_state.schars[i] = st.session_state.get(f"scarea_{i}", "")
             st.text_input(f"キャラ{i+1} 吹き出し（吹き出しの中の言葉）", key=f"sbb_{i}")
             st.session_state.sbubbles[i] = st.session_state.get(f"sbb_{i}", "")
-            shown = (st.session_state.sbubbles[i] or "").strip()
-            if shown:
-                st.caption(f'speech bubble,"{shown}"')
         with b:
             if i > 0 and st.button("消す", key=f"scdel_{i}"):
                 st.session_state.schars.pop(i)
