@@ -1126,35 +1126,31 @@ section.main div[data-testid="stHorizontalBlock"]:first-of-type div[data-testid=
 <script>
 (function(){
   const doc = (window.parent && window.parent.document) ? window.parent.document : document;
-  function box(){
-    let el = doc.getElementById("now-loading-global");
-    if(!el){
-      el = doc.createElement("div");
-      el.id = "now-loading-global";
-      el.textContent = "now loading";
-      el.style.cssText = "display:none;position:fixed;inset:0;z-index:999999;align-items:center;justify-content:center;background:rgba(0,0,0,.45);color:#fff;font-weight:800;font-size:22px;";
-      doc.body.appendChild(el);
-    }
-    return el;
+  const old = doc.getElementById("now-loading-global");
+  if(old) old.remove();
+  function clearMarks(){
+    doc.querySelectorAll(".load-under-btn").forEach(function(n){ n.remove(); });
   }
-  function running(){
-    const roots = [doc.documentElement, document.documentElement, doc.querySelector("[data-testid='stApp']"), document.querySelector("[data-testid='stApp']")];
-    for (const r of roots){
-      if(!r || !r.getAttribute) continue;
-      const st = r.getAttribute("data-test-script-state");
-      if(st === "running") return true;
-      if(st === "notRunning") return false;
-    }
-    return false;
+  function mark(btn){
+    clearMarks();
+    const el = doc.createElement("div");
+    el.className = "load-under-btn";
+    el.textContent = "読み込み中…";
+    el.style.cssText = "margin:6px 0 0;font-size:13px;font-weight:700;color:#ff4d88;";
+    const wrap = btn.closest("[data-testid='stButton']") || btn.parentNode;
+    if(wrap && wrap.parentNode) wrap.parentNode.insertBefore(el, wrap.nextSibling);
+    else btn.insertAdjacentElement("afterend", el);
   }
-  function sync(){
-    box().style.display = running() ? "flex" : "none";
+  if(!doc._loadUnderBtn){
+    doc._loadUnderBtn = true;
+    doc.addEventListener("click", function(e){
+      const t = e.target;
+      if(!t || !t.closest) return;
+      const btn = t.closest("button");
+      if(btn) mark(btn);
+    }, true);
   }
-  if(!doc._nowLoadWatch){
-    doc._nowLoadWatch = true;
-    new MutationObserver(sync).observe(doc.documentElement, {attributes:true, subtree:true, childList:true});
-  }
-  sync();
+  setTimeout(clearMarks, 80);
 })();
 </script>
 """, unsafe_allow_html=True)
