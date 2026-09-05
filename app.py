@@ -1167,9 +1167,7 @@ components.html("""
     try { bind(f.contentDocument); } catch(e) {}
   });
   bind(document);
-  if(!root.__loadShown || Date.now() - root.__loadShown > 400){
-    hide();
-  }
+  setTimeout(hide, 300);
 })();
 </script>
 """, height=0)
