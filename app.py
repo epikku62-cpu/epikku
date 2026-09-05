@@ -1150,7 +1150,6 @@ components.html("""
     el.style.left = Math.max(8, r.left) + "px";
     el.style.top = (r.bottom + 8) + "px";
     el.style.display = "block";
-    root.__loadShown = Date.now();
   }
   function bind(d){
     if(!d || d._loadUnderBtn) return;
@@ -1167,7 +1166,21 @@ components.html("""
     try { bind(f.contentDocument); } catch(e) {}
   });
   bind(document);
-  setTimeout(hide, 300);
+  function running(){
+    const nodes = root.querySelectorAll("[data-test-script-state], [data-testid='stApp']");
+    for (const n of nodes){
+      const st = n.getAttribute("data-test-script-state");
+      if(st === "running") return true;
+    }
+    return false;
+  }
+  if(!root._loadStateWatch){
+    root._loadStateWatch = true;
+    new MutationObserver(function(){
+      if(!running()) hide();
+    }).observe(root.documentElement, {attributes:true, subtree:true, childList:true});
+  }
+  if(!running()) hide();
 })();
 </script>
 """, height=0)
