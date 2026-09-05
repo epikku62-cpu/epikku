@@ -1,5 +1,4 @@
 import streamlit as st
-import streamlit.components.v1 as components
 import html as html_lib
 import os
 import json
@@ -1123,67 +1122,8 @@ section.main div[data-testid="stHorizontalBlock"]:first-of-type div[data-testid=
   border: 3px solid #ffffff !important;
   box-shadow: 0 5px 0 #ff4d88 !important;
 }
-.stApp, [data-testid="stAppViewContainer"], section.main {
-  opacity: 1 !important;
-  filter: none !important;
-}
 </style>
 """, unsafe_allow_html=True)
-components.html("""
-<script>
-(function(){
-  const root = window.parent ? window.parent.document : document;
-  function hide(){
-    const el = root.getElementById("load-under-btn");
-    if(el) el.style.display = "none";
-  }
-  function show(btn){
-    let el = root.getElementById("load-under-btn");
-    if(!el){
-      el = root.createElement("div");
-      el.id = "load-under-btn";
-      el.textContent = "読み込み中…";
-      el.style.cssText = "position:fixed;z-index:2147483647;font-size:14px;font-weight:800;color:#ff4d88;background:#ffffff;border:2px solid #111111;border-radius:999px;padding:4px 10px;";
-      root.body.appendChild(el);
-    }
-    const r = btn.getBoundingClientRect();
-    el.style.left = Math.max(8, r.left) + "px";
-    el.style.top = (r.bottom + 8) + "px";
-    el.style.display = "block";
-  }
-  function bind(d){
-    if(!d || d._loadUnderBtn) return;
-    d._loadUnderBtn = true;
-    d.addEventListener("click", function(e){
-      const t = e.target;
-      if(!t || !t.closest) return;
-      const btn = t.closest("button");
-      if(btn) show(btn);
-    }, true);
-  }
-  bind(root);
-  root.querySelectorAll("iframe").forEach(function(f){
-    try { bind(f.contentDocument); } catch(e) {}
-  });
-  bind(document);
-  function running(){
-    const nodes = root.querySelectorAll("[data-test-script-state], [data-testid='stApp']");
-    for (const n of nodes){
-      const st = n.getAttribute("data-test-script-state");
-      if(st === "running") return true;
-    }
-    return false;
-  }
-  if(!root._loadStateWatch){
-    root._loadStateWatch = true;
-    new MutationObserver(function(){
-      if(!running()) hide();
-    }).observe(root.documentElement, {attributes:true, subtree:true, childList:true});
-  }
-  if(!running()) hide();
-})();
-</script>
-""", height=0)
 
 render_top_menu()
 if st.session_state.get("need_top"):
