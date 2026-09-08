@@ -72,6 +72,16 @@ def stripe_checkout(mode, line_items, success_url, cancel_url, metadata=None):
         payload["metadata"] = {str(k): str(v) for k, v in metadata.items()}
     return stripe.checkout.Session.create(**payload)
 
+def sget(obj, key, default=""):
+    if obj is None:
+        return default
+    if isinstance(obj, dict):
+        return obj.get(key, default)
+    try:
+        return obj[key]
+    except Exception:
+        return getattr(obj, key, default)
+
 def mark_paid_session(session_id):
     paid = load_json(PAID_FILE, {})
     if not isinstance(paid, dict):
@@ -114,6 +124,36 @@ def sync_subscription():
     else:
         save_user_state()
 
+def credit_pending_checkouts():
+    if stripe is None or not st.session_state.get("logged_in"):
+        return
+    name = str(st.session_state.get("username") or "").strip()
+    mail = str(st.session_state.get("email") or "").strip()
+    if not name:
+        return
+    try:
+        listed = stripe.checkout.Session.list(limit=40)
+        rows = listed.data if hasattr(listed, "data") else []
+    except Exception:
+        return
+    for ses in rows:
+        meta = sget(ses, "metadata") or {}
+        if not isinstance(meta, dict):
+            meta = {}
+        ref = str(sget(ses, "client_reference_id") or "")
+        user = str(meta.get("user") or "")
+        details = sget(ses, "customer_details") or {}
+        det_mail = str(sget(details, "email") or "")
+        if name not in (ref, user) and mail not in (ref, user, det_mail):
+            continue
+        pay = str(sget(ses, "payment_status") or "")
+        stt = str(sget(ses, "status") or "")
+        if pay != "paid" and stt != "complete":
+            continue
+        sid = str(sget(ses, "id") or "")
+        if sid:
+            apply_checkout_session(sid)
+
 def apply_checkout_session(session_id):
     if not session_id or stripe is None:
         return "決済を確認できません"
@@ -121,17 +161,19 @@ def apply_checkout_session(session_id):
         ses = stripe.checkout.Session.retrieve(session_id)
     except Exception as e:
         return str(e)
-    if str(ses.get("payment_status") or "") not in ("paid", "no_payment_required") and str(ses.get("status") or "") != "complete":
-        if str(ses.get("status") or "") != "complete":
-            return "まだ支払いが完了していません"
+    pay = str(sget(ses, "payment_status") or "")
+    stt = str(sget(ses, "status") or "")
+    if pay not in ("paid", "no_payment_required") and stt != "complete":
+        return "まだ支払いが完了していません"
     if not mark_paid_session(session_id):
         return "この決済は反映済みです"
-    meta = ses.get("metadata") or {}
-    mode = str(ses.get("mode") or meta.get("kind") or "")
-    name = st.session_state.get("username") or meta.get("user") or ""
+    meta = sget(ses, "metadata") or {}
+    if not isinstance(meta, dict):
+        meta = {}
+    mode = str(sget(ses, "mode") or meta.get("kind") or "")
     if mode == "subscription" or str(meta.get("kind") or "") == "plan":
-        st.session_state.stripe_sub = str(ses.get("subscription") or "")
-        st.session_state.stripe_customer = str(ses.get("customer") or "")
+        st.session_state.stripe_sub = str(sget(ses, "subscription") or "")
+        st.session_state.stripe_customer = str(sget(ses, "customer") or "")
         st.session_state.premium_until = (datetime.now() + timedelta(days=30)).isoformat()
         period = datetime.now().strftime("%Y-%m")
         if st.session_state.get("stripe_period") != period:
@@ -146,7 +188,7 @@ def apply_checkout_session(session_id):
     except Exception:
         pts = 0
     if pts <= 0:
-        amt = int(ses.get("amount_total") or 0)
+        amt = int(sget(ses, "amount_total") or 0)
         for pack in POINT_PACKS:
             if pack["yen"] == amt:
                 pts = pack["points"]
@@ -1175,6 +1217,7 @@ def apply_login(name, data):
         issue_login_token(name)
     save_user_state()
     sync_subscription()
+    credit_pending_checkouts()
 
 def render_top_menu():
     left, _ = st.columns([1, 3])
@@ -1247,6 +1290,9 @@ if not st.session_state._booted:
 
 qs = st.query_params
 restore_login()
+if st.session_state.get("logged_in"):
+    credit_pending_checkouts()
+    sync_subscription()
 mark_visit()
 if qs.get("bid"):
     st.session_state.board_id = str(qs.get("bid"))
@@ -1582,6 +1628,8 @@ elif st.session_state.page == "icon":
         st.session_state.icon = random.choice(ANIMALS); save_user_state(); st.rerun()
 
 elif st.session_state.page == "shop":
+    if st.session_state.logged_in:
+        credit_pending_checkouts()
     st.subheader("ポイント購入")
     if not st.session_state.logged_in:
         st.warning("購入にはログインが必要です。")
@@ -1598,8 +1646,8 @@ elif st.session_state.page == "shop":
                         session = stripe_checkout(
                             "payment",
                             [{"price_data": {"currency": "jpy", "unit_amount": pack["yen"], "product_data": {"name": f"{pack['points']}ポイント"}}, "quantity": 1}],
-                            f"{SITE_URL}/?p=shop&session_id={{CHECKOUT_SESSION_ID}}",
-                            f"{SITE_URL}/?p=shop",
+                            f"{SITE_URL}/",
+                            f"{SITE_URL}/",
                             {"kind": "points", "points": pack["points"], "user": st.session_state.get("username") or ""},
                         )
                         st.markdown(f"[決済ページへ進む]({session.url})")
@@ -1731,6 +1779,9 @@ elif st.session_state.page == "stats":
         st.write(row)
 
 elif st.session_state.page == "plan":
+    if st.session_state.logged_in:
+        credit_pending_checkouts()
+        sync_subscription()
     st.subheader("月額登録")
     st.write(f"**{MONTHLY_PRICE}円 / 30日**")
     st.write(f"- {MONTHLY_POINTS}ポイント付与")
@@ -1747,8 +1798,8 @@ elif st.session_state.page == "plan":
             session = stripe_checkout(
                 "subscription",
                 [{"price": STRIPE_PRICE_ID, "quantity": 1}],
-                f"{SITE_URL}/?p=plan&session_id={{CHECKOUT_SESSION_ID}}",
-                f"{SITE_URL}/?p=plan",
+                f"{SITE_URL}/",
+                f"{SITE_URL}/",
                 {"kind": "plan", "user": st.session_state.get("username") or ""},
             )
             st.markdown(f"[決済ページへ進む]({session.url})")
