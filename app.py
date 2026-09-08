@@ -58,19 +58,43 @@ if stripe is not None and STRIPE_SECRET_KEY:
 def stripe_ref():
     return str(st.session_state.get("username") or st.session_state.get("email") or "").strip()
 
-def stripe_checkout(mode, line_items, success_url, cancel_url, metadata=None):
+def stripe_checkout(mode, line_items, success_url=None, cancel_url=None, metadata=None):
+    # Payment Linkの「hosted_confirmation」を使い、決済後にPanelAIへ戻さない。
+    # 1回の購入につき1つのPayment Linkを作り、1回だけ利用可能にする。
+    if stripe is None:
+        raise Exception("Stripeが設定されていません")
+
+    items = []
+    for item in line_items or []:
+        row = dict(item)
+        price_data = row.pop("price_data", None)
+        if price_data:
+            # Payment Linkのprice_dataはStripe APIバージョンによって利用できない場合があるため、
+            # 互換性を優先してPriceを先に作成してからPayment Linkへ渡す。
+            price = stripe.Price.create(**price_data)
+            row["price"] = str(sget(price, "id") or "")
+        if not row.get("price"):
+            raise Exception("Stripeの価格情報を作成できませんでした")
+        items.append(row)
+
     payload = {
-        "mode": mode,
-        "line_items": line_items,
-        "success_url": success_url,
-        "cancel_url": cancel_url,
+        "line_items": items,
+        "after_completion": {
+            "type": "hosted_confirmation",
+            "hosted_confirmation": {
+                "custom_message": "決済が完了しました。\nこの画面を閉じて、元のpanel AI.の画面に戻ってください。",
+            },
+        },
+        "restrictions": {
+            "completed_sessions": {"limit": 1},
+        },
+        "inactive_message": "この決済リンクは使用済みです。元のpanel AI.の画面に戻ってください。",
     }
-    ref = stripe_ref()
-    if ref:
-        payload["client_reference_id"] = ref[:200]
     if metadata:
         payload["metadata"] = {str(k): str(v) for k, v in metadata.items()}
-    return stripe.checkout.Session.create(**payload)
+    if mode not in ("payment", "subscription"):
+        raise Exception(f"未対応の決済モードです: {mode}")
+    return stripe.PaymentLink.create(**payload)
 
 def sget(obj, key, default=""):
     if obj is None:
@@ -1649,8 +1673,8 @@ elif st.session_state.page == "shop":
                         session = stripe_checkout(
                             "payment",
                             [{"price_data": {"currency": "jpy", "unit_amount": pack["yen"], "product_data": {"name": f"{pack['points']}ポイント"}}, "quantity": 1}],
-                            f"{SITE_URL}/?p=shop&session_id={{CHECKOUT_SESSION_ID}}",
-                            f"{SITE_URL}/?p=shop",
+                            None,
+                            None,
                             {"kind": "points", "points": pack["points"], "user": st.session_state.get("username") or ""},
                         )
                         st.markdown(f"[決済ページへ進む]({session.url})")
@@ -1801,8 +1825,8 @@ elif st.session_state.page == "plan":
             session = stripe_checkout(
                 "subscription",
                 [{"price": STRIPE_PRICE_ID, "quantity": 1}],
-                f"{SITE_URL}/?p=plan&session_id={{CHECKOUT_SESSION_ID}}",
-                f"{SITE_URL}/?p=plan",
+                None,
+                None,
                 {"kind": "plan", "user": st.session_state.get("username") or ""},
             )
             st.markdown(f"[決済ページへ進む]({session.url})")
