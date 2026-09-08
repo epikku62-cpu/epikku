@@ -234,33 +234,18 @@ def lock_other_buttons():
     """, unsafe_allow_html=True)
 
 def show_countdown_wait(label, key):
-    lock_other_buttons()
     left = int(math.ceil(st.session_state.get("wait_until", 0) - time.time()))
-    st.markdown('<div class="wait-ok">', unsafe_allow_html=True)
     if st.session_state.get("act_busy"):
-        st.markdown(f'<div style="margin:8px 0;padding:12px;border-radius:14px;background:#fff0f6;color:#ff4d88;font-weight:800;">{label}… 処理が止まっています。解除してください</div>', unsafe_allow_html=True)
-        if st.button("解除する", key=f"unlock_{key}"):
-            st.session_state.act_busy = False
-            st.markdown("</div>", unsafe_allow_html=True)
-            return "cancel"
-        st.markdown("</div>", unsafe_allow_html=True)
+        st.markdown(f'<div style="margin:8px 0;padding:12px;border-radius:14px;background:#fff0f6;color:#ff4d88;font-weight:800;">{label}… 処理中です。触らないでください</div>', unsafe_allow_html=True)
         return None
     if left > 0:
         st.markdown(f'<div style="margin:8px 0;padding:12px;border-radius:14px;background:#fff0f6;color:#ff4d88;font-weight:800;">{label}… {left}</div>', unsafe_allow_html=True)
         if st.button("キャンセル", key=f"can_{key}"):
-            st.markdown("</div>", unsafe_allow_html=True)
             return "cancel"
         time.sleep(1)
         st.rerun()
-    st.write("0になりました。確認を押してください")
-    if st.button("確認する", key=f"ok_{key}"):
-        st.markdown("</div>", unsafe_allow_html=True)
-        return "confirm"
-    if st.button("キャンセル", key=f"can2_{key}"):
-        st.markdown("</div>", unsafe_allow_html=True)
-        return "cancel"
-    st.markdown("</div>", unsafe_allow_html=True)
-    return None
+    st.markdown(f'<div style="margin:8px 0;padding:12px;border-radius:14px;background:#fff0f6;color:#ff4d88;font-weight:800;">{label}… 結果を確認しています</div>', unsafe_allow_html=True)
+    return "confirm"
 
 def file_b64(path):
     if not os.path.exists(path):
