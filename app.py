@@ -90,7 +90,7 @@ MONTHLY_PRICE, MONTHLY_POINTS, REF_SITE, SIGNUP_POINTS = 980, 1200, 10, 20
 VIDEO_PT_PER_SEC = 30
 JOIN_COST = 20
 MAX_UPLOAD_SEC = 10
-WAIT_SEC = 20
+WAIT_SEC = 60
 POINT_PACKS = [{"points": 300, "yen": 300}, {"points": 900, "yen": 900}, {"points": 1500, "yen": 1500}, {"points": 3000, "yen": 3000}]
 ANIMALS = ["🐱", "🐶", "🐰", "🐻", "🦊", "🐼", "🐸", "🦉", "🐧", "🐯"]
 LAYOUTS = {"縦4": {"cols": 1, "count": 4}, "縦3": {"cols": 1, "count": 3}, "縦2": {"cols": 1, "count": 2}, "横4": {"cols": 4, "count": 4}, "横3": {"cols": 3, "count": 3}, "横2": {"cols": 2, "count": 2}, "2×2": {"cols": 2, "count": 4}}
@@ -734,6 +734,16 @@ def grok_poll_video(request_id):
         return "error", str(task.get("error") or d)[:400]
     return "wait", status or "pending"
 
+def grok_wait_video(request_id, tries=24, gap=5):
+    last = "wait"
+    for _ in range(int(tries)):
+        state, val = grok_poll_video(request_id)
+        if state in ("done", "error"):
+            return state, val
+        last = val
+        time.sleep(int(gap))
+    return "wait", last
+
 def probe_duration(path):
     r = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", path], capture_output=True, text=True)
     try:
@@ -1266,13 +1276,13 @@ elif st.session_state.page == "video":
             finish_action(); st.session_state.vjob = None; go("video"); st.rerun()
         if act == "confirm":
             try:
-                state, val = grok_poll_video(job["id"])
+                state, val = grok_wait_video(job["id"])
                 if state == "done":
                     st.session_state.video_out = val; st.session_state.vjob = None
                 elif state == "error":
                     st.session_state.error = val; st.session_state.vjob = None
                 else:
-                    start_wait(); st.session_state.error = "まだ生成中です。もう一度確認してください"
+                    st.session_state.error = "まだ生成中です。確認をもう一度押してください"
             except Exception as e:
                 st.session_state.error = str(e)
                 start_wait()
@@ -1342,13 +1352,13 @@ elif st.session_state.page == "vmove":
             finish_action(); st.session_state.vjob = None; go("vmove"); st.rerun()
         if act == "confirm":
             try:
-                state, val = grok_poll_video(job["id"])
+                state, val = grok_wait_video(job["id"])
                 if state == "done":
                     st.session_state.vmove_out = val; st.session_state.vjob = None
                 elif state == "error":
                     st.session_state.error = val; st.session_state.vjob = None
                 else:
-                    start_wait(); st.session_state.error = "まだ生成中です。もう一度確認してください"
+                    st.session_state.error = "まだ生成中です。確認をもう一度押してください"
             except Exception as e:
                 st.session_state.error = str(e)
                 start_wait()
@@ -1415,7 +1425,7 @@ elif st.session_state.page == "v4":
                     finish_action(); st.session_state.vjob = None; go("v4"); st.rerun()
                 if act == "confirm":
                     try:
-                        state, val = grok_poll_video(job["id"])
+                        state, val = grok_wait_video(job["id"])
                         if state == "done":
                             st.session_state.v4_clips[i] = val; st.session_state.vjob = None
                         elif state == "error":
