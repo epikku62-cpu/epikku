@@ -1649,8 +1649,8 @@ elif st.session_state.page == "shop":
                         session = stripe_checkout(
                             "payment",
                             [{"price_data": {"currency": "jpy", "unit_amount": pack["yen"], "product_data": {"name": f"{pack['points']}ポイント"}}, "quantity": 1}],
-                            f"{SITE_URL}/",
-                            f"{SITE_URL}/",
+                            f"{SITE_URL}/?p=shop&session_id={{CHECKOUT_SESSION_ID}}",
+                            f"{SITE_URL}/?p=shop",
                             {"kind": "points", "points": pack["points"], "user": st.session_state.get("username") or ""},
                         )
                         st.markdown(f"[決済ページへ進む]({session.url})")
@@ -1801,8 +1801,8 @@ elif st.session_state.page == "plan":
             session = stripe_checkout(
                 "subscription",
                 [{"price": STRIPE_PRICE_ID, "quantity": 1}],
-                f"{SITE_URL}/",
-                f"{SITE_URL}/",
+                f"{SITE_URL}/?p=plan&session_id={{CHECKOUT_SESSION_ID}}",
+                f"{SITE_URL}/?p=plan",
                 {"kind": "plan", "user": st.session_state.get("username") or ""},
             )
             st.markdown(f"[決済ページへ進む]({session.url})")
