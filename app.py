@@ -82,7 +82,7 @@ def stripe_checkout(mode, line_items, success_url=None, cancel_url=None, metadat
         "after_completion": {
             "type": "hosted_confirmation",
             "hosted_confirmation": {
-                "custom_message": "決済が完了しました。\nこの画面を閉じて、元のpanel AI.の画面に戻ってください。",
+                "custom_message": "決済が完了しました。\nこの画面を閉じて、元のpanel AI.の画面に戻ってください。戻るボタンは押さなくて大丈夫です。",
             },
         },
         "restrictions": {
@@ -116,6 +116,33 @@ def mark_paid_session(session_id):
     save_json(PAID_FILE, paid)
     return True
 
+def _subscription_value(sub, key, default=""):
+    value = getattr(sub, key, None)
+    if value is None and isinstance(sub, dict):
+        value = sub.get(key)
+    return value if value is not None else default
+
+def _latest_invoice_paid(sub):
+    """現在の請求書が実際にpaidかをStripeで確認する。確認できない場合はFalse。"""
+    invoice_ref = _subscription_value(sub, "latest_invoice", "")
+    if not invoice_ref:
+        return False
+    try:
+        if isinstance(invoice_ref, dict):
+            invoice = invoice_ref
+        else:
+            invoice = stripe.Invoice.retrieve(str(invoice_ref))
+    except Exception:
+        return False
+    status = str(sget(invoice, "status") or "").lower()
+    paid = sget(invoice, "paid", False)
+    return status == "paid" or paid is True
+
+def _clear_vip_state():
+    """Stripe上で契約継続を確認できない場合、VIPを即時終了する。"""
+    st.session_state.premium_until = ""
+    save_user_state()
+
 def sync_subscription():
     if stripe is None or not st.session_state.get("logged_in"):
         return
@@ -126,27 +153,59 @@ def sync_subscription():
         sub = stripe.Subscription.retrieve(sub_id)
     except Exception:
         return
-    status = str(getattr(sub, "status", None) or (sub.get("status") if isinstance(sub, dict) else "") or "")
+
+    status = str(_subscription_value(sub, "status", "")).lower()
+    # 解約・支払い失敗など、継続を確認できない状態ならVIPを続けない。
     if status not in ("active", "trialing"):
+        _clear_vip_state()
         return
-    end_ts = getattr(sub, "current_period_end", None)
-    if end_ts is None and isinstance(sub, dict):
-        end_ts = sub.get("current_period_end")
-    start_ts = getattr(sub, "current_period_start", None)
-    if start_ts is None and isinstance(sub, dict):
-        start_ts = sub.get("current_period_start")
+
+    # 「自動決済が確認できた場合だけ」次の1200ポイントを付与する。
+    # 初回決済もCheckout Session側でpaid確認済みだが、ここでも最新Invoiceを確認する。
+    if not _latest_invoice_paid(sub):
+        _clear_vip_state()
+        return
+
+    end_ts = _subscription_value(sub, "current_period_end", None)
+    start_ts = _subscription_value(sub, "current_period_start", None)
     try:
         if end_ts:
             st.session_state.premium_until = datetime.fromtimestamp(int(end_ts)).isoformat()
-        period = datetime.fromtimestamp(int(start_ts)).strftime("%Y-%m-%d") if start_ts else datetime.now().strftime("%Y-%m")
+        # 初回と自動更新で同じキーを使い、二重付与を防止する。
+        period = str(int(start_ts)) if start_ts else ""
     except Exception:
-        period = datetime.now().strftime("%Y-%m")
+        period = ""
+    if not period:
+        _clear_vip_state()
+        return
+
     if st.session_state.get("stripe_period") != period:
         st.session_state.points = int(st.session_state.points or 0) + MONTHLY_POINTS
         st.session_state.stripe_period = period
-        save_user_state()
-    else:
-        save_user_state()
+    save_user_state()
+
+def cancel_subscription_now():
+    """Stripe上の月額契約を即時解約し、同時にPanel AI.のVIPも終了する。"""
+    if stripe is None:
+        return False, "Stripeが設定されていません"
+    sub_id = str(st.session_state.get("stripe_sub") or "").strip()
+    if not sub_id:
+        return False, "月額契約情報がありません"
+    try:
+        # cancel_at_period_endではなく即時解約。途中解約なら、その時点でVIPを終了する。
+        stripe.Subscription.cancel(sub_id)
+    except AttributeError:
+        try:
+            stripe.Subscription.delete(sub_id)
+        except Exception as e:
+            return False, str(e)
+    except Exception as e:
+        return False, str(e)
+    st.session_state.premium_until = ""
+    st.session_state.stripe_sub = ""
+    st.session_state.stripe_customer = ""
+    save_user_state()
+    return True, "月額VIPを解約しました。VIPはここで終了しました。"
 
 def credit_pending_checkouts():
     if stripe is None or not st.session_state.get("logged_in"):
@@ -192,23 +251,36 @@ def apply_checkout_session(session_id):
     stt = str(sget(ses, "status") or "")
     if pay not in ("paid", "no_payment_required") and stt != "complete":
         return "まだ支払いが完了していません"
-    if not mark_paid_session(session_id):
-        return "この決済は反映済みです"
     meta = sget(ses, "metadata") or {}
     if not isinstance(meta, dict):
         meta = {}
     mode = str(sget(ses, "mode") or meta.get("kind") or "")
+
+    # 月額VIPはCheckout Sessionのsubscriptionを保存し、
+    # 実際のcurrent_period_startを基準にsync_subscription()だけで
+    # 1200ポイントを1回だけ付与する。
+    # apply側とsync側で判定形式を変えないのが重要。
     if mode == "subscription" or str(meta.get("kind") or "") == "plan":
-        st.session_state.stripe_sub = str(sget(ses, "subscription") or "")
+        sub_id = str(sget(ses, "subscription") or "").strip()
+        if not sub_id:
+            return "月額契約情報を取得できませんでした。少し待ってから再読み込みしてください"
+        st.session_state.stripe_sub = sub_id
         st.session_state.stripe_customer = str(sget(ses, "customer") or "")
-        st.session_state.premium_until = (datetime.now() + timedelta(days=30)).isoformat()
-        period = datetime.now().strftime("%Y-%m")
-        if st.session_state.get("stripe_period") != period:
-            st.session_state.points = int(st.session_state.points) + MONTHLY_POINTS
-            st.session_state.stripe_period = period
         save_user_state()
+        before = int(st.session_state.get("points") or 0)
+        old_period = str(st.session_state.get("stripe_period") or "")
         sync_subscription()
-        return f"月額を反映しました。+{MONTHLY_POINTS}ポイント"
+        after = int(st.session_state.get("points") or 0)
+        if after > before:
+            return f"月額を反映しました。+{after - before}ポイント"
+        if str(st.session_state.get("stripe_period") or "") == old_period and old_period:
+            return "月額VIPはすでに反映済みです"
+        return "月額VIPを確認しました"
+
+    # ポイント購入
+    sid = str(sget(ses, "id") or session_id)
+    if not mark_paid_session(sid):
+        return "この決済は反映済みです"
     pts = 0
     try:
         pts = int(meta.get("points") or 0)
@@ -1816,6 +1888,15 @@ elif st.session_state.page == "plan":
     st.write("- サイズの変更開放")
     if is_premium():
         st.success(f"VIPです。期限 {str(st.session_state.premium_until)[:10]}")
+        if st.session_state.get("stripe_sub"):
+            st.warning("途中で解約すると、その時点でVIPが終了し、次回分の1200ポイントは付与されません。")
+            if st.button("月額VIPを解約する", key="cancel_vip", type="secondary"):
+                ok, msg = cancel_subscription_now()
+                if ok:
+                    st.success(msg)
+                    st.rerun()
+                else:
+                    st.error(msg)
     elif not st.session_state.logged_in:
         st.warning("月額登録にはログインが必要です。")
     elif stripe is None or not STRIPE_SECRET_KEY or not STRIPE_PRICE_ID:
