@@ -43,7 +43,7 @@ XAI_KEY = os.environ.get("XAI_API_KEY", "")
 MINIMAX_KEY = os.environ.get("MINIMAX_API_KEY", "")
 STRIPE_SECRET_KEY = os.environ.get("STRIPE_SECRET_KEY", "")
 STRIPE_PRICE_ID = os.environ.get("STRIPE_PRICE_ID", "")
-SITE_URL = os.environ.get("SITE_URL", "https://aistation.onrender.com")
+SITE_URL = os.environ.get("SITE_URL", "https://panelai.jp")
 RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "")
 MAIL_FROM = os.environ.get("MAIL_FROM", os.environ.get("SMTP_FROM", ""))
 SMTP_HOST = os.environ.get("SMTP_HOST", "")
@@ -58,7 +58,7 @@ if stripe is not None and STRIPE_SECRET_KEY:
 def stripe_ref():
     return str(st.session_state.get("username") or st.session_state.get("email") or "").strip()
 
-def stripe_checkout(mode, line_items, success_url, cancel_url):
+def stripe_checkout(mode, line_items, success_url, cancel_url, metadata=None):
     payload = {
         "mode": mode,
         "line_items": line_items,
@@ -68,7 +68,94 @@ def stripe_checkout(mode, line_items, success_url, cancel_url):
     ref = stripe_ref()
     if ref:
         payload["client_reference_id"] = ref[:200]
+    if metadata:
+        payload["metadata"] = {str(k): str(v) for k, v in metadata.items()}
     return stripe.checkout.Session.create(**payload)
+
+def mark_paid_session(session_id):
+    paid = load_json(PAID_FILE, {})
+    if not isinstance(paid, dict):
+        paid = {}
+    if session_id in paid:
+        return False
+    paid[session_id] = datetime.now().isoformat()
+    save_json(PAID_FILE, paid)
+    return True
+
+def sync_subscription():
+    if stripe is None or not st.session_state.get("logged_in"):
+        return
+    sub_id = str(st.session_state.get("stripe_sub") or "").strip()
+    if not sub_id:
+        return
+    try:
+        sub = stripe.Subscription.retrieve(sub_id)
+    except Exception:
+        return
+    status = str(getattr(sub, "status", None) or (sub.get("status") if isinstance(sub, dict) else "") or "")
+    if status not in ("active", "trialing"):
+        return
+    end_ts = getattr(sub, "current_period_end", None)
+    if end_ts is None and isinstance(sub, dict):
+        end_ts = sub.get("current_period_end")
+    start_ts = getattr(sub, "current_period_start", None)
+    if start_ts is None and isinstance(sub, dict):
+        start_ts = sub.get("current_period_start")
+    try:
+        if end_ts:
+            st.session_state.premium_until = datetime.fromtimestamp(int(end_ts)).isoformat()
+        period = datetime.fromtimestamp(int(start_ts)).strftime("%Y-%m-%d") if start_ts else datetime.now().strftime("%Y-%m")
+    except Exception:
+        period = datetime.now().strftime("%Y-%m")
+    if st.session_state.get("stripe_period") != period:
+        st.session_state.points = int(st.session_state.points or 0) + MONTHLY_POINTS
+        st.session_state.stripe_period = period
+        save_user_state()
+    else:
+        save_user_state()
+
+def apply_checkout_session(session_id):
+    if not session_id or stripe is None:
+        return "決済を確認できません"
+    try:
+        ses = stripe.checkout.Session.retrieve(session_id)
+    except Exception as e:
+        return str(e)
+    if str(ses.get("payment_status") or "") not in ("paid", "no_payment_required") and str(ses.get("status") or "") != "complete":
+        if str(ses.get("status") or "") != "complete":
+            return "まだ支払いが完了していません"
+    if not mark_paid_session(session_id):
+        return "この決済は反映済みです"
+    meta = ses.get("metadata") or {}
+    mode = str(ses.get("mode") or meta.get("kind") or "")
+    name = st.session_state.get("username") or meta.get("user") or ""
+    if mode == "subscription" or str(meta.get("kind") or "") == "plan":
+        st.session_state.stripe_sub = str(ses.get("subscription") or "")
+        st.session_state.stripe_customer = str(ses.get("customer") or "")
+        st.session_state.premium_until = (datetime.now() + timedelta(days=30)).isoformat()
+        period = datetime.now().strftime("%Y-%m")
+        if st.session_state.get("stripe_period") != period:
+            st.session_state.points = int(st.session_state.points) + MONTHLY_POINTS
+            st.session_state.stripe_period = period
+        save_user_state()
+        sync_subscription()
+        return f"月額を反映しました。+{MONTHLY_POINTS}ポイント"
+    pts = 0
+    try:
+        pts = int(meta.get("points") or 0)
+    except Exception:
+        pts = 0
+    if pts <= 0:
+        amt = int(ses.get("amount_total") or 0)
+        for pack in POINT_PACKS:
+            if pack["yen"] == amt:
+                pts = pack["points"]
+                break
+    if pts <= 0:
+        return "ポイント数を判別できませんでした。管理者に連絡してください"
+    st.session_state.points = int(st.session_state.points) + pts
+    save_user_state()
+    return f"{pts}ポイントを追加しました"
 
 NAI_URLS = ["https://image.novelai.net/ai/generate-image", "https://api.novelai.net/ai/generate-image"]
 DATA_DIR = os.environ.get("DATA_DIR", os.path.abspath("data"))
@@ -76,6 +163,7 @@ os.makedirs(DATA_DIR, exist_ok=True)
 DATA_FILE = os.path.join(DATA_DIR, "studio_data.json")
 USERS_FILE = os.path.join(DATA_DIR, "users_data.json")
 TOKENS_FILE = os.path.join(DATA_DIR, "login_tokens.json")
+PAID_FILE = os.path.join(DATA_DIR, "paid_sessions.json")
 STATS_FILE = os.path.join(DATA_DIR, "visit_stats.json")
 BOARD_FILE = os.path.join(DATA_DIR, "board_data.json")
 BOARD_DIR = os.path.join(DATA_DIR, "board")
@@ -484,6 +572,9 @@ def save_user_state():
         "history": st.session_state.get("simple_history", prev.get("history", []))[-30:],
         "library": st.session_state.get("library", prev.get("library", []))[-40:],
         "last_seen": datetime.now().strftime("%Y/%m/%d %H:%M") if st.session_state.get("logged_in") else prev.get("last_seen", ""),
+        "stripe_sub": st.session_state.get("stripe_sub") or prev.get("stripe_sub", ""),
+        "stripe_customer": st.session_state.get("stripe_customer") or prev.get("stripe_customer", ""),
+        "stripe_period": st.session_state.get("stripe_period") or prev.get("stripe_period", ""),
     }
     if not users[name]["password"] and prev.get("password"):
         users[name]["password"] = prev["password"]
@@ -1077,9 +1168,13 @@ def apply_login(name, data):
     st.session_state.premium_until = data.get("premium_until", "")
     st.session_state.simple_history = data.get("history", [])
     st.session_state.library = data.get("library", [])
+    st.session_state.stripe_sub = data.get("stripe_sub", "")
+    st.session_state.stripe_customer = data.get("stripe_customer", "")
+    st.session_state.stripe_period = data.get("stripe_period", "")
     if not st.session_state.get("auth_token"):
         issue_login_token(name)
     save_user_state()
+    sync_subscription()
 
 def render_top_menu():
     left, _ = st.columns([1, 3])
@@ -1156,24 +1251,20 @@ mark_visit()
 if qs.get("bid"):
     st.session_state.board_id = str(qs.get("bid"))
     st.session_state.page = "board"
-if st.session_state.logged_in and qs.get("checkout") == "success":
-    st.session_state.premium_until = (datetime.now() + timedelta(days=30)).isoformat()
-    st.session_state.points = int(st.session_state.points) + MONTHLY_POINTS
-    save_user_state()
+if qs.get("session_id"):
+    if st.session_state.logged_in:
+        st.session_state.error = apply_checkout_session(str(qs.get("session_id")))
+    else:
+        st.session_state.error = "ログインしてから同じ決済ページを開き直してください"
+    if "session_id" in st.query_params:
+        del st.query_params["session_id"]
+    go("shop")
+if "checkout" in qs:
     if "checkout" in st.query_params:
         del st.query_params["checkout"]
-    go("plan")
-if st.session_state.logged_in and qs.get("buypoints"):
-    try:
-        add = int(str(qs.get("buypoints")))
-        if add in [p["points"] for p in POINT_PACKS]:
-            st.session_state.points = int(st.session_state.points) + add
-            save_user_state()
-    except Exception:
-        pass
+if "buypoints" in qs:
     if "buypoints" in st.query_params:
         del st.query_params["buypoints"]
-    go("shop")
 
 st.markdown("""
 <style>
@@ -1504,7 +1595,13 @@ elif st.session_state.page == "shop":
             with c2:
                 if st.button(f"{pack['yen']}円で買う", key=f"buy_{pack['points']}"):
                     try:
-                        session = stripe_checkout("payment", [{"price_data": {"currency": "jpy", "unit_amount": pack["yen"], "product_data": {"name": f"{pack['points']}ポイント"}}, "quantity": 1}], f"{SITE_URL}/?buypoints={pack['points']}", f"{SITE_URL}/?buypoints=cancel")
+                        session = stripe_checkout(
+                            "payment",
+                            [{"price_data": {"currency": "jpy", "unit_amount": pack["yen"], "product_data": {"name": f"{pack['points']}ポイント"}}, "quantity": 1}],
+                            f"{SITE_URL}/?p=shop&session_id={{CHECKOUT_SESSION_ID}}",
+                            f"{SITE_URL}/?p=shop",
+                            {"kind": "points", "points": pack["points"], "user": st.session_state.get("username") or ""},
+                        )
                         st.markdown(f"[決済ページへ進む]({session.url})")
                     except Exception as e:
                         st.error(str(e))
@@ -1593,6 +1690,18 @@ elif st.session_state.page == "stats":
     st.write(f"最後 {data.get('last') or 'なし'}")
     users = load_json(USERS_FILE, {})
     st.write(f"登録 {len(users)}人")
+    grant_name = st.text_input("ポイントを足す相手", value=str(st.session_state.get("username") or ""))
+    grant_pts = st.number_input("追加ポイント", min_value=1, max_value=10000, value=300, step=1)
+    if st.button("ポイントを手動で足す"):
+        users2 = load_json(USERS_FILE, {})
+        if grant_name not in users2:
+            st.error("そのユーザーはいません")
+        else:
+            users2[grant_name]["points"] = int(users2[grant_name].get("points") or 0) + int(grant_pts)
+            save_json(USERS_FILE, users2)
+            if grant_name == st.session_state.get("username"):
+                st.session_state.points = int(users2[grant_name]["points"])
+            st.success(f"{grant_name} に {int(grant_pts)} ポイント足しました")
     now = datetime.now()
     online = []
     recent = []
@@ -1635,7 +1744,13 @@ elif st.session_state.page == "plan":
         st.error("決済設定がまだです。")
     elif st.button(f"{MONTHLY_PRICE}円で登録する", type="primary"):
         try:
-            session = stripe_checkout("subscription", [{"price": STRIPE_PRICE_ID, "quantity": 1}], f"{SITE_URL}/?checkout=success", f"{SITE_URL}/?checkout=cancel")
+            session = stripe_checkout(
+                "subscription",
+                [{"price": STRIPE_PRICE_ID, "quantity": 1}],
+                f"{SITE_URL}/?p=plan&session_id={{CHECKOUT_SESSION_ID}}",
+                f"{SITE_URL}/?p=plan",
+                {"kind": "plan", "user": st.session_state.get("username") or ""},
+            )
             st.markdown(f"[決済ページへ進む]({session.url})")
         except Exception as e:
             st.error(str(e))
