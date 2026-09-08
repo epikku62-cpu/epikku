@@ -635,6 +635,44 @@ def mm_headers():
         raise Exception("MINIMAX_API_KEY がありません")
     return {"Authorization": f"Bearer {MINIMAX_KEY}", "Content-Type": "application/json"}
 
+def mm_upload_path(path, filename):
+    if not MINIMAX_KEY:
+        raise Exception("MINIMAX_API_KEY がありません")
+    with open(path, "rb") as f:
+        res = requests.post(
+            "https://api.minimax.io/v1/files/upload",
+            headers={"Authorization": f"Bearer {MINIMAX_KEY}"},
+            data={"purpose": "video_generation_input"},
+            files={"file": (filename, f)},
+            timeout=120,
+        )
+    if res.status_code not in (200, 201):
+        raise Exception(f"アップロード失敗 {res.status_code}: {res.text[:400]}")
+    data = res.json()
+    fid = (data.get("file") or {}).get("file_id") or data.get("file_id")
+    if fid is None:
+        raise Exception(f"file_idがありません: {str(data)[:400]}")
+    return f"mm_file://{fid}"
+
+def mm_upload_image_uri(image_uri):
+    raw = image_uri
+    if "," in raw and str(raw).startswith("data:"):
+        raw = raw.split(",", 1)[1]
+    try:
+        blob = base64.b64decode(raw)
+    except Exception:
+        raise Exception("画像を送れません")
+    path = os.path.join(VID_DIR, f"mm_{uuid.uuid4().hex}.jpg")
+    with open(path, "wb") as f:
+        f.write(blob)
+    try:
+        return mm_upload_path(path, "ref.jpg")
+    finally:
+        try:
+            os.remove(path)
+        except Exception:
+            pass
+
 def mm_create_video(payload):
     res = requests.post("https://api.minimax.io/v2/video_generation", headers=mm_headers(), json=payload, timeout=60)
     if res.status_code not in (200, 201, 202):
@@ -646,28 +684,29 @@ def mm_create_video(payload):
     return task_id
 
 def grok_start_video(image_uri, prompt, duration=6):
-    image_uri = shrink_for_video(image_uri)
+    img = mm_upload_image_uri(shrink_for_video(image_uri))
     dur = max(5, min(15, int(duration)))
     payload = {
         "model": "MiniMax-H3-Max",
         "content": [
             {"type": "text", "text": prompt or "subtle natural motion, keep the same character and style"},
-            {"type": "image_url", "image_url": {"url": image_uri}, "role": "first_frame"},
+            {"type": "image_url", "image_url": {"url": img}, "role": "first_frame"},
         ],
         "resolution": "768P",
         "duration": dur,
     }
     return mm_create_video(payload)
 
-def mm_start_move(image_uri, video_uri, prompt, duration=6):
-    image_uri = shrink_for_video(image_uri)
+def mm_start_move(image_uri, video_path, prompt, duration=6):
+    img = mm_upload_image_uri(shrink_for_video(image_uri))
+    vid = mm_upload_path(video_path, "ref.mp4")
     dur = max(4, min(15, int(duration)))
     payload = {
         "model": "MiniMax-H3",
         "content": [
             {"type": "text", "text": prompt or "The character from the reference image performs the same motion as the reference video."},
-            {"type": "image_url", "image_url": {"url": image_uri}, "role": "reference_image"},
-            {"type": "video_url", "video_url": {"url": video_uri}, "role": "reference_video"},
+            {"type": "image_url", "image_url": {"url": img}, "role": "reference_image"},
+            {"type": "video_url", "video_url": {"url": vid}, "role": "reference_video"},
         ],
         "resolution": "768P",
         "duration": dur,
@@ -1272,25 +1311,6 @@ elif st.session_state.page == "video":
 elif st.session_state.page == "vmove":
     st.subheader("動画を移す")
     job = st.session_state.get("vjob") if isinstance(st.session_state.get("vjob"), dict) else None
-    if job and job.get("kind") == "vmove":
-        act = show_countdown_wait("生成中", "vmove")
-        if act == "cancel":
-            finish_action(); st.session_state.vjob = None; go("vmove"); st.rerun()
-        if act == "confirm":
-            try:
-                state, val = grok_poll_video(job["id"])
-                if state == "done":
-                    st.session_state.vmove_out = val; st.session_state.vjob = None
-                elif state == "error":
-                    st.session_state.error = val; st.session_state.vjob = None
-                else:
-                    start_wait(); st.session_state.error = "まだ生成中です。もう一度確認してください"
-            except Exception as e:
-                st.session_state.error = str(e)
-                start_wait()
-            finally:
-                finish_action()
-            go("vmove"); st.rerun()
     vup = st.file_uploader("動きの動画", type=["mp4", "mov"])
     if vup is not None and st.button("この動画を使う"):
         try:
@@ -1316,7 +1336,26 @@ elif st.session_state.page == "vmove":
     ref_sec = probe_duration(st.session_state.vmove_vid) if st.session_state.get("vmove_vid") and os.path.exists(st.session_state.vmove_vid) else 0
     cost = video_cost(dur) + video_cost(max(1, int(round(ref_sec)))) if ref_sec else video_cost(dur)
     st.caption(f"消費ポイント {cost}")
-    if st.button("動画を移す", type="primary"):
+    if job and job.get("kind") == "vmove":
+        act = show_countdown_wait("生成中", "vmove")
+        if act == "cancel":
+            finish_action(); st.session_state.vjob = None; go("vmove"); st.rerun()
+        if act == "confirm":
+            try:
+                state, val = grok_poll_video(job["id"])
+                if state == "done":
+                    st.session_state.vmove_out = val; st.session_state.vjob = None
+                elif state == "error":
+                    st.session_state.error = val; st.session_state.vjob = None
+                else:
+                    start_wait(); st.session_state.error = "まだ生成中です。もう一度確認してください"
+            except Exception as e:
+                st.session_state.error = str(e)
+                start_wait()
+            finally:
+                finish_action()
+            go("vmove"); st.rerun()
+    elif st.button("動画を移す", type="primary"):
         if not st.session_state.get("vmove_vid") or not os.path.exists(st.session_state.vmove_vid):
             st.session_state.error = "動きの動画を入れてください"
         elif not st.session_state.get("vmove_img"):
@@ -1324,8 +1363,7 @@ elif st.session_state.page == "vmove":
         else:
             try:
                 take_points(cost)
-                vid_uri = file_to_data_uri(st.session_state.vmove_vid)
-                st.session_state.vjob = {"kind": "vmove", "id": mm_start_move(st.session_state.vmove_img, vid_uri, motion, dur)}
+                st.session_state.vjob = {"kind": "vmove", "id": mm_start_move(st.session_state.vmove_img, st.session_state.vmove_vid, motion, dur)}
                 start_wait(); st.session_state.error = ""
             except Exception as e:
                 st.session_state.error = str(e)
