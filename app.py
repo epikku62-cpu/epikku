@@ -1315,28 +1315,8 @@ elif st.session_state.page == "video":
 
 elif st.session_state.page == "vmove":
     st.subheader("動画を移す")
-    st.markdown("＊確認が押せないように見えますが押せています。生成には10分以上かかる場合があります。気長に待ってください。再読み込みなど、画面を変えると生成できなくて、ポイントだけ失う可能性があります。そのままの状態で待ってください。失敗しても保証はいたしません。")
+    st.markdown("＊確認が押せないように見えますが押せています。生成には10分以上かかる場合があります。気長に待ってください。再読み込みなど、画面を変えると生成できなくて、ポイントだけ失う可能性があります。そのままの状態で待ってください。失敗しても保証はいたしません。NSFWはできません。")
     job = st.session_state.get("vjob") if isinstance(st.session_state.get("vjob"), dict) else None
-    if job and job.get("kind") == "vmove":
-        act = show_countdown_wait("生成中", "vmove")
-        if act == "cancel":
-            finish_action(); st.session_state.vjob = None; go("vmove"); st.rerun()
-        if act == "confirm":
-            try:
-                state, val = grok_wait_video(job["id"])
-                if state == "done":
-                    st.session_state.vmove_out = val; st.session_state.vjob = None
-                elif state == "error":
-                    st.session_state.error = val; st.session_state.vjob = None
-                else:
-                    time.sleep(5)
-            except Exception as e:
-                st.session_state.error = str(e)
-                st.session_state.vjob = None
-            finally:
-                finish_action()
-            go("vmove"); st.rerun()
-        st.stop()
     vup = st.file_uploader("動きの動画", type=["mp4", "mov"])
     if vup is not None and st.button("この動画を使う"):
         try:
@@ -1362,7 +1342,26 @@ elif st.session_state.page == "vmove":
     ref_sec = probe_duration(st.session_state.vmove_vid) if st.session_state.get("vmove_vid") and os.path.exists(st.session_state.vmove_vid) else 0
     cost = video_cost(dur) + video_cost(max(1, int(round(ref_sec)))) if ref_sec else video_cost(dur)
     st.caption(f"消費ポイント {cost}")
-    if st.button("動画を移す", type="primary"):
+    if job and job.get("kind") == "vmove":
+        act = show_countdown_wait("生成中", "vmove")
+        if act == "cancel":
+            finish_action(); st.session_state.vjob = None; go("vmove"); st.rerun()
+        if act == "confirm":
+            try:
+                state, val = grok_wait_video(job["id"])
+                if state == "done":
+                    st.session_state.vmove_out = val; st.session_state.vjob = None
+                elif state == "error":
+                    st.session_state.error = val; st.session_state.vjob = None
+                else:
+                    time.sleep(5)
+            except Exception as e:
+                st.session_state.error = str(e)
+                st.session_state.vjob = None
+            finally:
+                finish_action()
+            go("vmove"); st.rerun()
+    elif st.button("動画を移す", type="primary"):
         if not st.session_state.get("vmove_vid") or not os.path.exists(st.session_state.vmove_vid):
             st.session_state.error = "動きの動画を入れてください"
         elif not st.session_state.get("vmove_img"):
