@@ -144,7 +144,10 @@ def credit_pending_checkouts():
         user = str(meta.get("user") or "")
         details = sget(ses, "customer_details") or {}
         det_mail = str(sget(details, "email") or "")
-        if name not in (ref, user) and mail not in (ref, user, det_mail):
+        keys = [x.strip() for x in (ref, user, det_mail) if str(x).strip()]
+        if not keys:
+            continue
+        if name not in keys and mail not in keys:
             continue
         pay = str(sget(ses, "payment_status") or "")
         stt = str(sget(ses, "status") or "")
