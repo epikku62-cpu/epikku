@@ -40,6 +40,7 @@ if GSC:
 
 NAI_KEY = os.environ.get("NOVELAI_API_KEY", "")
 XAI_KEY = os.environ.get("XAI_API_KEY", "")
+MINIMAX_KEY = os.environ.get("MINIMAX_API_KEY", "")
 STRIPE_SECRET_KEY = os.environ.get("STRIPE_SECRET_KEY", "")
 STRIPE_PRICE_ID = os.environ.get("STRIPE_PRICE_ID", "")
 SITE_URL = os.environ.get("SITE_URL", "https://aistation.onrender.com")
@@ -454,6 +455,13 @@ def save_upload_mp4(uploaded):
         raise Exception(f"10秒以下のmp4だけ使えます。今は {sec:.1f}秒です")
     return path
 
+def file_to_data_uri(path, mime="video/mp4"):
+    with open(path, "rb") as f:
+        raw = f.read()
+    if len(raw) > 45 * 1024 * 1024:
+        raise Exception("ファイルが大きすぎます")
+    return f"data:{mime};base64," + base64.b64encode(raw).decode()
+
 def pad_ref(uri):
     img = uri_to_image(uri).convert("RGB")
     tw, th = 1024, 1536
@@ -622,38 +630,69 @@ def nai_request(prompt, width, height, model, steps=23, scale=5.0, negative="", 
             last_err = f"{res.status_code}: {res.text[:400]}"
     raise Exception(last_err or "NovelAIの生成に失敗しました")
 
-def grok_start_video(image_uri, prompt, duration=6):
-    if not XAI_KEY:
-        raise Exception("XAI_API_KEY がありません")
-    image_uri = shrink_for_video(image_uri)
-    headers = {"Authorization": f"Bearer {XAI_KEY}", "Content-Type": "application/json"}
-    payload = {"model": "grok-imagine-video-1.5", "prompt": prompt or "subtle natural motion, keep the same character and style", "image": {"url": image_uri}, "duration": int(duration), "resolution": "720p"}
-    res = requests.post("https://api.x.ai/v1/videos/generations", headers=headers, json=payload, timeout=30)
+def mm_headers():
+    if not MINIMAX_KEY:
+        raise Exception("MINIMAX_API_KEY がありません")
+    return {"Authorization": f"Bearer {MINIMAX_KEY}", "Content-Type": "application/json"}
+
+def mm_create_video(payload):
+    res = requests.post("https://api.minimax.io/v2/video_generation", headers=mm_headers(), json=payload, timeout=60)
     if res.status_code not in (200, 201, 202):
         raise Exception(f"{res.status_code}: {res.text[:500]}")
     data = res.json()
-    request_id = data.get("request_id") or data.get("id")
-    if not request_id:
-        raise Exception(f"request_idがありません: {str(data)[:400]}")
-    return request_id
+    task_id = data.get("task_id") or (data.get("task") or {}).get("id")
+    if not task_id:
+        raise Exception(f"task_idがありません: {str(data)[:400]}")
+    return task_id
+
+def grok_start_video(image_uri, prompt, duration=6):
+    image_uri = shrink_for_video(image_uri)
+    dur = max(5, min(15, int(duration)))
+    payload = {
+        "model": "MiniMax-H3-Max",
+        "content": [
+            {"type": "text", "text": prompt or "subtle natural motion, keep the same character and style"},
+            {"type": "image_url", "image_url": {"url": image_uri}, "role": "first_frame"},
+        ],
+        "resolution": "768P",
+        "duration": dur,
+    }
+    return mm_create_video(payload)
+
+def mm_start_move(image_uri, video_uri, prompt, duration=6):
+    image_uri = shrink_for_video(image_uri)
+    dur = max(4, min(15, int(duration)))
+    payload = {
+        "model": "MiniMax-H3",
+        "content": [
+            {"type": "text", "text": prompt or "The character from the reference image performs the same motion as the reference video."},
+            {"type": "image_url", "image_url": {"url": image_uri}, "role": "reference_image"},
+            {"type": "video_url", "video_url": {"url": video_uri}, "role": "reference_video"},
+        ],
+        "resolution": "768P",
+        "duration": dur,
+    }
+    return mm_create_video(payload)
 
 def grok_poll_video(request_id):
-    headers = {"Authorization": f"Bearer {XAI_KEY}"}
-    chk = requests.get(f"https://api.x.ai/v1/videos/{request_id}", headers=headers, timeout=20)
+    chk = requests.get(f"https://api.minimax.io/v2/query/video_generation/{request_id}", headers=mm_headers(), timeout=20)
     if chk.status_code != 200:
         return "wait", chk.text[:200]
     d = chk.json()
-    status = d.get("status")
-    if status == "done":
-        video_url = (d.get("video") or {}).get("url") or d.get("url")
-        raw = requests.get(video_url, timeout=60)
+    task = d.get("task") if isinstance(d.get("task"), dict) else d
+    status = str(task.get("status") or "")
+    if status == "succeeded":
+        video_url = ((task.get("content") or {}).get("url") if isinstance(task.get("content"), dict) else None) or task.get("url")
+        if not video_url:
+            return "error", str(d)[:400]
+        raw = requests.get(video_url, timeout=90)
         raw.raise_for_status()
         path = os.path.join(VID_DIR, f"{uuid.uuid4().hex}.mp4")
         with open(path, "wb") as f:
             f.write(raw.content)
         return "done", path
-    if status in ("failed", "expired"):
-        return "error", str(d)[:400]
+    if status in ("failed", "cancelled"):
+        return "error", str(task.get("error") or d)[:400]
     return "wait", status or "pending"
 
 def probe_duration(path):
@@ -1030,7 +1069,7 @@ def render_top_menu():
             go("register"); st.rerun()
     st.write(f"ポイント {st.session_state.points}")
     st.write(f"会員 {member_label() if st.session_state.logged_in else '未登録'}")
-    menu_items = [("画像生成モード", "simple"), ("セット", "chars"), ("4コマ", "make"), ("保存庫", "lib"), ("動画生成", "video"), ("4コマ動画", "v4"), ("掲示板", "board"), ("ポイント購入", "shop"), ("説明書", "help"), ("月額登録", "plan"), ("お問い合わせ", "contact")]
+    menu_items = [("画像生成モード", "simple"), ("セット", "chars"), ("4コマ", "make"), ("保存庫", "lib"), ("動画生成", "video"), ("4コマ動画", "v4"), ("動画を移す", "vmove"), ("掲示板", "board"), ("ポイント購入", "shop"), ("説明書", "help"), ("月額登録", "plan"), ("お問い合わせ", "contact")]
     if is_owner():
         menu_items.append(("来場", "stats"))
     for label, page in menu_items:
@@ -1212,7 +1251,7 @@ elif st.session_state.page == "video":
     if st.session_state.video_src:
         st.image(st.session_state.video_src, width=240)
     motion = st.text_area("動きの内容", placeholder="ゆっくり瞬きする")
-    dur = st.slider("秒数", 3, 10, 6)
+    dur = st.slider("秒数", 5, 10, 6)
     st.caption(f"消費ポイント {video_cost(dur)}")
     if st.button("動画にする", type="primary"):
         if not st.session_state.video_src:
@@ -1229,6 +1268,72 @@ elif st.session_state.page == "video":
         st.video(st.session_state.video_out)
         with open(st.session_state.video_out, "rb") as f:
             st.download_button("動画を保存", data=f.read(), file_name="video.mp4", mime="video/mp4")
+
+elif st.session_state.page == "vmove":
+    st.subheader("動画を移す")
+    job = st.session_state.get("vjob") if isinstance(st.session_state.get("vjob"), dict) else None
+    if job and job.get("kind") == "vmove":
+        act = show_countdown_wait("生成中", "vmove")
+        if act == "cancel":
+            finish_action(); st.session_state.vjob = None; go("vmove"); st.rerun()
+        if act == "confirm":
+            try:
+                state, val = grok_poll_video(job["id"])
+                if state == "done":
+                    st.session_state.vmove_out = val; st.session_state.vjob = None
+                elif state == "error":
+                    st.session_state.error = val; st.session_state.vjob = None
+                else:
+                    start_wait(); st.session_state.error = "まだ生成中です。もう一度確認してください"
+            except Exception as e:
+                st.session_state.error = str(e)
+                start_wait()
+            finally:
+                finish_action()
+            go("vmove"); st.rerun()
+    vup = st.file_uploader("動きの動画", type=["mp4", "mov"])
+    if vup is not None and st.button("この動画を使う"):
+        try:
+            st.session_state.vmove_vid = save_upload_mp4(vup)
+            st.session_state.error = ""
+        except Exception as e:
+            st.session_state.error = str(e)
+        go("vmove"); st.rerun()
+    if st.session_state.get("vmove_vid") and os.path.exists(st.session_state.vmove_vid):
+        st.video(st.session_state.vmove_vid)
+    iup = st.file_uploader("キャラの画像", type=["png", "jpg", "jpeg"])
+    if iup:
+        st.session_state.vmove_img = uploaded_to_uri(iup)
+    if st.session_state.library:
+        picks = [f"{x.get('time','')} {x.get('label','')}" for x in st.session_state.library]
+        sel = st.selectbox("保存庫から選ぶ", ["選ばない"] + picks, key="vmove_lib")
+        if sel != "選ばない":
+            st.session_state.vmove_img = st.session_state.library[picks.index(sel)]["url"]
+    if st.session_state.get("vmove_img"):
+        st.image(st.session_state.vmove_img, width=240)
+    motion = st.text_area("動きの内容", placeholder="参考動画と同じ動きをする", key="vmove_txt")
+    dur = st.slider("秒数", 5, 10, 6, key="vmove_dur")
+    ref_sec = probe_duration(st.session_state.vmove_vid) if st.session_state.get("vmove_vid") and os.path.exists(st.session_state.vmove_vid) else 0
+    cost = video_cost(dur) + video_cost(max(1, int(round(ref_sec)))) if ref_sec else video_cost(dur)
+    st.caption(f"消費ポイント {cost}")
+    if st.button("動画を移す", type="primary"):
+        if not st.session_state.get("vmove_vid") or not os.path.exists(st.session_state.vmove_vid):
+            st.session_state.error = "動きの動画を入れてください"
+        elif not st.session_state.get("vmove_img"):
+            st.session_state.error = "キャラの画像を選んでください"
+        else:
+            try:
+                take_points(cost)
+                vid_uri = file_to_data_uri(st.session_state.vmove_vid)
+                st.session_state.vjob = {"kind": "vmove", "id": mm_start_move(st.session_state.vmove_img, vid_uri, motion, dur)}
+                start_wait(); st.session_state.error = ""
+            except Exception as e:
+                st.session_state.error = str(e)
+        go("vmove"); st.rerun()
+    if st.session_state.get("vmove_out") and os.path.exists(st.session_state.vmove_out):
+        st.video(st.session_state.vmove_out)
+        with open(st.session_state.vmove_out, "rb") as f:
+            st.download_button("動画を保存", data=f.read(), file_name="move.mp4", mime="video/mp4")
 
 elif st.session_state.page == "v4":
     st.subheader("4コマ動画")
@@ -1265,7 +1370,7 @@ elif st.session_state.page == "v4":
                     st.session_state.error = str(e)
                 go("v4"); st.rerun()
             st.session_state.v4_prompts[i] = st.text_input("動き", value=st.session_state.v4_prompts[i], key=f"v4p_{i}")
-            st.session_state.v4_durs[i] = st.slider("秒数", 3, 10, int(st.session_state.v4_durs[i]), key=f"v4d_{i}")
+            st.session_state.v4_durs[i] = st.slider("秒数", 5, 10, max(5, int(st.session_state.v4_durs[i])), key=f"v4d_{i}")
             if job and job.get("kind") == "v4" and int(job.get("i", -1)) == i:
                 act = show_countdown_wait(f"コマ{i+1} 生成中", f"p{i}")
                 if act == "cancel":
