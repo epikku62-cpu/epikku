@@ -1348,6 +1348,13 @@ def render_top_menu():
             go("register"); st.rerun()
         if st.button("ログイン", use_container_width=True):
             go("register"); st.rerun()
+        st.markdown(
+            '<div style="background:#fff0f6;border:2px solid #ff6ea8;border-radius:16px;padding:10px 12px;margin:10px 0;text-align:center;color:#ff4d88;font-weight:800;line-height:1.5;">'
+            '🎁 新規登録で<strong>20ポイント</strong>プレゼント！<br>'
+            '登録後すぐに画像生成を試せます。'
+            '</div>',
+            unsafe_allow_html=True,
+        )
     st.write(f"ポイント {st.session_state.points}")
     st.write(f"会員 {member_label() if st.session_state.logged_in else '未登録'}")
     menu_items = [("画像生成モード", "simple"), ("セット", "chars"), ("4コマ", "make"), ("保存庫", "lib"), ("動画生成", "video"), ("4コマ動画", "v4"), ("動画を移す", "vmove"), ("掲示板", "board"), ("ポイント購入", "shop"), ("説明書", "help"), ("月額登録", "plan"), ("お問い合わせ", "contact")]
@@ -1368,7 +1375,7 @@ defaults = {
     "error": "", "busy_index": None, "combined": None, "points": 0, "premium_until": "",
     "simple_image": None, "simple_busy": False, "simple_history": [], "show_history": False,
     "hist_pick": None, "sq": "", "sb": "", "so": "", "sn": "", "schars": [""], "sbubbles": [""],
-    "icon": random.choice(ANIMALS), "email": "", "pending": None, "library": [],
+    "icon": random.choice(ANIMALS), "email": "", "pending": None, "library": [], "signup_just_completed": False,
     "video_src": None, "video_out": None, "v4_clips": [None] * 4, "v4_prompts": ["", "", "", ""],
     "v4_durs": [5, 5, 5, 5], "v4_count": 4, "v4_layout": "2×2", "v4_play": "同時に動く",
     "v4_joined": None, "vjob": None, "v4_joining": False, "do_join": False, "v4_audio": "音声を消す", "board_id": "", "wait_until": 0, "_booted": False,
@@ -1460,6 +1467,18 @@ if st.session_state.page == "home":
     panel AIは<br>4コマ画像・4コマ動画<br>画像生成・動画生成<br>作成AIサイト ♡
     </div>
     """, unsafe_allow_html=True)
+    if not st.session_state.logged_in:
+        st.markdown("""
+        <div style="text-align:center;color:#ff4d88;font-size:19px;font-weight:800;line-height:1.6;
+        background:rgba(255,240,246,.96);padding:12px 14px;margin:12px 0 8px;border-radius:18px;border:3px solid #ff6ea8;">
+        🎁 新規登録で<strong>20ポイント</strong>プレゼント！<br>
+        登録後すぐに画像を作れます
+        </div>
+        """, unsafe_allow_html=True)
+        mid_cta = st.columns([1, 2, 1])
+        with mid_cta[1]:
+            if st.button("無料で20ポイントGET", type="primary", use_container_width=True, key="home_signup_cta"):
+                go("register"); st.rerun()
     mid = st.columns([1, 2, 1])
     with mid[1]:
         if st.button("panel", use_container_width=True, key="home_panel"):
@@ -1795,6 +1814,7 @@ elif st.session_state.page == "register":
                 save_json(USERS_FILE, users)
                 apply_login(p["name"], users[p["name"]])
                 st.session_state.pending = None
+                st.session_state.signup_just_completed = True
                 go("simple"); st.rerun()
     st.write("ログイン")
     lu = st.text_input("メールまたはユーザーネーム", key="lu")
@@ -1949,6 +1969,15 @@ elif st.session_state.page == "chars":
 
 elif st.session_state.page == "simple":
     st.subheader("画像生成モード")
+    if st.session_state.get("signup_just_completed"):
+        st.success(f"🎉 登録ありがとうございます！新規登録特典として **{SIGNUP_POINTS}ポイント** プレゼントしました。")
+        st.markdown(
+            '<div style="background:#fff0f6;border:2px solid #ff6ea8;border-radius:16px;padding:10px 12px;margin:8px 0 14px;text-align:center;color:#ff4d88;font-weight:800;">'
+            'このまま下のフォームから、まずは画像を1枚作ってみてください！'
+            '</div>',
+            unsafe_allow_html=True,
+        )
+        st.session_state.signup_just_completed = False
     if st.button("履歴"):
         st.session_state.show_history = True; st.rerun()
     if st.session_state.show_history:
