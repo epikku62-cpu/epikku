@@ -10,6 +10,7 @@ import io
 import zipfile
 import random
 import re
+import secrets
 import socket
 import smtplib
 import subprocess
@@ -793,7 +794,7 @@ def finish_action():
 def nai_wh(w, h):
     return max(64, min(1920, int(round(w / 64) * 64))), max(64, min(1920, int(round(h / 64) * 64)))
 
-def nai_request(prompt, width, height, model, steps=23, scale=5.0, negative="", char_texts=None, char_refs=None, style_refs=None):
+def nai_request(prompt, width, height, model, steps=23, scale=5.0, negative="", char_texts=None, char_refs=None, style_refs=None, sampler="k_euler_ancestral", seed=None):
     if not NAI_KEY:
         raise Exception("NOVELAI_API_KEY がありません")
     gw, gh = nai_wh(width, height)
@@ -807,12 +808,14 @@ def nai_request(prompt, width, height, model, steps=23, scale=5.0, negative="", 
         character_prompts.append({"prompt": txt, "uc": "", "center": {"x": xs[i], "y": ys[i]}, "enabled": True})
     parameters = {
         "params_version": 3, "width": gw, "height": gh, "scale": float(scale),
-        "sampler": "k_euler_ancestral", "steps": int(steps), "n_samples": 1,
+        "sampler": str(sampler or "k_euler_ancestral"), "steps": int(steps), "n_samples": 1,
         "qualityToggle": False, "ucPreset": 0, "negative_prompt": negative or "",
         "noise_schedule": "karras", "use_coords": True, "characterPrompts": character_prompts,
         "v4_prompt": {"caption": {"base_caption": prompt or "", "char_captions": char_captions}, "use_coords": True, "use_order": True},
         "v4_negative_prompt": {"caption": {"base_caption": negative or "", "char_captions": []}, "legacy_uc": False},
     }
+    if seed is not None:
+        parameters["seed"] = int(seed)
     base_input = (prompt or "").strip()
     if not base_input and char_texts:
         base_input = char_texts[0]
@@ -2062,6 +2065,29 @@ elif st.session_state.page == "simple":
     spec = SIMPLE_SIZES[size_name]
     st.caption(f"{spec['gen'][0]} × {spec['gen'][1]}　{spec['cost']}ポイント")
     scale = st.slider("プロンプトガイダンス", 1.0, 10.0, 5.0, 0.1)
+    with st.expander("詳細な生成設定", expanded=False):
+        steps = st.slider("ステップ", 1, 28, 20, 1)
+        sampler_labels = {
+            "Euler Ancestral": "k_euler_ancestral",
+            "Euler": "k_euler",
+            "DPM++ 2M": "k_dpmpp_2m",
+            "DPM++ SDE": "k_dpmpp_sde",
+            "DPM++ 2M SDE": "k_dpmpp_2m_sde",
+            "DPM++ 2S Ancestral": "k_dpmpp_2s_ancestral",
+            "DDIM V3": "ddim_v3",
+        }
+        sampler_name = st.selectbox("サンプラー", list(sampler_labels.keys()), index=0)
+        seed_text = st.text_input("シード値", value="", placeholder="空欄ならランダム")
+        if seed_text.strip():
+            try:
+                seed_value = int(seed_text.strip())
+                if not (0 <= seed_value <= 4294967295):
+                    raise ValueError
+            except ValueError:
+                st.error("シード値は0～4294967295の整数で入力してください")
+                seed_value = None
+        else:
+            seed_value = None
     if st.button("生成する", type="primary"):
         st.session_state.error = ""; st.session_state.simple_busy = True; st.rerun()
     if st.session_state.simple_busy:
@@ -2089,9 +2115,14 @@ elif st.session_state.page == "simple":
             try:
                 with st.spinner("生成中…"):
                     take_points(spec["cost"])
-                    img = nai_request(", ".join(parts), spec["gen"][0], spec["gen"][1], "nai-diffusion-5-full", steps=20, scale=scale, negative=st.session_state.sn.strip(), char_texts=chars)
+                    used_seed = seed_value if seed_value is not None else secrets.randbelow(4294967296)
+                    img = nai_request(
+                        ", ".join(parts), spec["gen"][0], spec["gen"][1], "nai-diffusion-5-full",
+                        steps=steps, scale=scale, negative=st.session_state.sn.strip(), char_texts=chars,
+                        sampler=sampler_labels[sampler_name], seed=used_seed,
+                    )
                 st.session_state.simple_image = img
-                st.session_state.simple_history.append({"url": img, "quality": st.session_state.sq, "background": st.session_state.sb, "chars": list(st.session_state.schars), "bubbles": list(st.session_state.get("sbubbles") or []), "other": st.session_state.so, "negative": st.session_state.sn, "size": size_name, "scale": scale})
+                st.session_state.simple_history.append({"url": img, "quality": st.session_state.sq, "background": st.session_state.sb, "chars": list(st.session_state.schars), "bubbles": list(st.session_state.get("sbubbles") or []), "other": st.session_state.so, "negative": st.session_state.sn, "size": size_name, "scale": scale, "steps": steps, "sampler": sampler_name, "seed": used_seed})
                 save_user_state(); st.session_state.error = ""
             except Exception as e:
                 st.session_state.error = str(e)
@@ -2100,6 +2131,9 @@ elif st.session_state.page == "simple":
     if st.session_state.simple_image:
         st.image(st.session_state.simple_image, use_container_width=True)
         raw = uri_to_image(st.session_state.simple_image)
+        last_simple = (st.session_state.get("simple_history") or [])[-1] if st.session_state.get("simple_history") else {}
+        if last_simple.get("seed") is not None:
+            st.caption(f"シード値: {last_simple.get('seed')}　ステップ: {last_simple.get('steps', 20)}　サンプラー: {last_simple.get('sampler', 'Euler Ancestral')}")
         st.download_button("PNG保存", data=image_to_bytes(raw), file_name="simple.png", mime="image/png")
         if st.button("保存庫に入れる"):
             add_library(st.session_state.simple_image, "画像生成", {
