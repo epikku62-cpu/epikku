@@ -144,12 +144,17 @@ def _clear_vip_state():
     st.session_state.premium_until = ""
     save_user_state()
 
-def sync_subscription():
+def sync_subscription(force=False):
     if stripe is None or not st.session_state.get("logged_in"):
         return
     sub_id = str(st.session_state.get("stripe_sub") or "").strip()
     if not sub_id:
         return
+    now = time.time()
+    last_check = float(st.session_state.get("_stripe_sync_at") or 0)
+    if not force and now - last_check < 30:
+        return
+    st.session_state._stripe_sync_at = now
     try:
         sub = stripe.Subscription.retrieve(sub_id)
     except Exception:
@@ -208,9 +213,14 @@ def cancel_subscription_now():
     save_user_state()
     return True, "月額VIPを解約しました。VIPはここで終了しました。"
 
-def credit_pending_checkouts():
+def credit_pending_checkouts(force=False):
     if stripe is None or not st.session_state.get("logged_in"):
         return
+    now = time.time()
+    last_check = float(st.session_state.get("_stripe_checkout_at") or 0)
+    if not force and now - last_check < 10:
+        return
+    st.session_state._stripe_checkout_at = now
     name = str(st.session_state.get("username") or "").strip()
     mail = str(st.session_state.get("email") or "").strip()
     if not name:
@@ -270,7 +280,7 @@ def apply_checkout_session(session_id):
         save_user_state()
         before = int(st.session_state.get("points") or 0)
         old_period = str(st.session_state.get("stripe_period") or "")
-        sync_subscription()
+        sync_subscription(force=True)
         after = int(st.session_state.get("points") or 0)
         if after > before:
             return f"月額を反映しました。+{after - before}ポイント"
@@ -365,10 +375,9 @@ def is_owner():
 
 def mark_visit():
     now = datetime.now()
+    now_ts = now.timestamp()
     last = float(st.session_state.get("_visit_at") or 0)
-    if now.timestamp() - last < 600:
-        if st.session_state.get("logged_in") and st.session_state.get("username"):
-            touch_user_seen(st.session_state.get("username"))
+    if now_ts - last < 600:
         return
     st.session_state._visit_at = now.timestamp()
     data = load_json(STATS_FILE, {"total": 0, "days": {}, "last": ""})
@@ -477,6 +486,7 @@ def show_countdown_wait(label, key):
     st.markdown(f'<div style="margin:8px 0;padding:12px;border-radius:14px;background:#fff0f6;color:#ff4d88;font-weight:800;">{label}… 結果を確認しています</div>', unsafe_allow_html=True)
     return "confirm"
 
+@st.cache_data(show_spinner=False)
 def file_b64(path):
     if not os.path.exists(path):
         return ""
@@ -553,7 +563,7 @@ def load_json(path, default):
             return data
     return default
 
-def save_json(path, data):
+def save_json(path, data, backup=True):
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     folder = os.path.dirname(path) or "."
     fd, tmp = tempfile.mkstemp(prefix=".tmp_", suffix=".json", dir=folder)
@@ -569,7 +579,7 @@ def save_json(path, data):
             json.dump(data, f, ensure_ascii=False, indent=2)
             f.flush()
             os.fsync(f.fileno())
-        if os.path.exists(path) and os.path.getsize(path) > 2:
+        if backup and os.path.exists(path) and os.path.getsize(path) > 2:
             try:
                 shutil.copy2(path, path + ".bak")
             except Exception:
@@ -722,7 +732,7 @@ def save_user_state():
         users[name]["password"] = prev["password"]
     if prev.get("password") and not users[name]["password"]:
         users[name]["password"] = prev["password"]
-    save_json(USERS_FILE, users)
+    save_json(USERS_FILE, users, backup=False)
     save_json(DATA_FILE, {"characters": st.session_state.characters})
 
 def load_board():
@@ -1368,8 +1378,8 @@ def render_top_menu():
             go(page); st.rerun()
     st.markdown("</div>", unsafe_allow_html=True)
 
-prepare_fonts()
-usable_fonts = [k for k, ok in prepare_fonts().items() if ok] or ["ゴシック"]
+font_status = prepare_fonts()
+usable_fonts = [k for k, ok in font_status.items() if ok] or ["ゴシック"]
 defaults = {
     "logged_in": False, "page": "home", "auth_token": "", "layout": "縦4", "scenes": ["", "", "", ""],
     "scene_chars": ["セットなし"] * 4, "panel_images": [None] * 4, "panel_upload": [False] * 4,
