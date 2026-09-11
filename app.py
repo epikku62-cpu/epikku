@@ -2089,7 +2089,7 @@ elif st.session_state.page == "simple":
             "DDIM V3": "ddim_v3",
         }
         sampler_name = st.selectbox("サンプラー", list(sampler_labels.keys()), index=0)
-        seed_text = st.text_input("シード値", value="", placeholder="空欄ならランダム")
+        seed_text = st.text_input("シード値", key="simple_seed", placeholder="空欄ならランダム")
         if seed_text.strip():
             try:
                 seed_value = int(seed_text.strip())
@@ -2196,6 +2196,12 @@ elif st.session_state.page == "board":
                     st.session_state.sn = post.get("negative") or ""
                     ch = [x for x in (post.get("chars") or []) if str(x).strip()] or [""]
                     st.session_state.schars = ch[:3]
+                    # 掲示板からキャラクタープロンプトを入力欄にも確実に反映
+                    for i in range(3):
+                        st.session_state[f"scarea_{i}"] = st.session_state.schars[i] if i < len(st.session_state.schars) else ""
+                    # 掲示板投稿に保存されたシード値も画像生成画面へ引き継ぐ
+                    board_seed = post.get("seed")
+                    st.session_state.simple_seed = "" if board_seed is None else str(board_seed)
                     go("simple"); st.rerun()
             elif post.get("kind") == "simple":
                 st.caption("プロンプトは非表示です")
@@ -2288,6 +2294,7 @@ elif st.session_state.page == "board":
                                     "background": meta.get("background", "") if kind == "simple" else "",
                                     "other": meta.get("other", "") if kind == "simple" else "",
                                     "negative": meta.get("negative", "") if kind == "simple" else "",
+                                    "seed": meta.get("seed") if kind == "simple" else None,
                                     "chars": list(meta.get("chars") or [])[:3] if kind == "simple" else [],
                                     "comments": [],
                                     "time": datetime.now().strftime("%m/%d %H:%M"),
