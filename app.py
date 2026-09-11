@@ -459,7 +459,8 @@ def restore_login():
     users = load_json(USERS_FILE, {})
     if name and name in users:
         st.session_state.auth_token = token
-        apply_login(name, users[name])
+        # 初期表示時は保存・Stripe確認を行わず、画面表示を優先する。
+        apply_login(name, users[name], persist=False, sync=False, pending=False)
 
 def start_wait():
     st.session_state.wait_until = time.time() + WAIT_SEC
@@ -1311,7 +1312,7 @@ def panel_raw(i):
 def empty_bubble():
     return {"text": "", "x": 8, "y": 8, "angle": 0, "fill": "#ffffff", "color": "#111111", "size": 28, "bold": 0, "tail_size": 28, "kind": "ふきだし", "font": "ゴシック", "dir": "横書き", "tail": "下"}
 
-def apply_login(name, data):
+def apply_login(name, data, persist=True, sync=True, pending=True):
     st.session_state.logged_in = True
     st.session_state.username = name
     st.session_state.email = data.get("email", "")
@@ -1327,9 +1328,12 @@ def apply_login(name, data):
     st.session_state.stripe_period = data.get("stripe_period", "")
     if not st.session_state.get("auth_token"):
         issue_login_token(name)
-    save_user_state()
-    sync_subscription()
-    credit_pending_checkouts()
+    if persist:
+        save_user_state()
+    if sync:
+        sync_subscription()
+    if pending:
+        credit_pending_checkouts()
 
 def render_top_menu():
     left, _ = st.columns([1, 3])
@@ -1378,8 +1382,9 @@ def render_top_menu():
             go(page); st.rerun()
     st.markdown("</div>", unsafe_allow_html=True)
 
-font_status = prepare_fonts()
-usable_fonts = [k for k, ok in font_status.items() if ok] or ["ゴシック"]
+def get_usable_fonts():
+    font_status = prepare_fonts()
+    return [k for k, ok in font_status.items() if ok] or ["ゴシック"]
 defaults = {
     "logged_in": False, "page": "home", "auth_token": "", "layout": "縦4", "scenes": ["", "", "", ""],
     "scene_chars": ["セットなし"] * 4, "panel_images": [None] * 4, "panel_upload": [False] * 4,
@@ -1392,13 +1397,11 @@ defaults = {
     "video_src": None, "video_out": None, "v4_clips": [None] * 4, "v4_prompts": ["", "", "", ""],
     "v4_durs": [5, 5, 5, 5], "v4_count": 4, "v4_layout": "2×2", "v4_play": "同時に動く",
     "v4_joined": None, "vjob": None, "v4_joining": False, "do_join": False, "v4_audio": "音声を消す", "board_id": "", "wait_until": 0, "_booted": False,
-    "menu_open": False, "need_top": True, "act_busy": False, "password_hash": "",
+    "menu_open": False, "need_top": True, "act_busy": False, "password_hash": "", "characters": [],
 }
 for k, v in defaults.items():
     if k not in st.session_state:
         st.session_state[k] = v
-if "characters" not in st.session_state:
-    st.session_state.characters = load_json(DATA_FILE, {"characters": []}).get("characters", [])
 if not st.session_state._booted:
     st.session_state._booted = True
     if st.query_params.get("p"):
@@ -1409,9 +1412,6 @@ if not st.session_state._booted:
 
 qs = st.query_params
 restore_login()
-if st.session_state.get("logged_in"):
-    credit_pending_checkouts()
-    sync_subscription()
 mark_visit()
 if qs.get("bid"):
     st.session_state.board_id = str(qs.get("bid"))
@@ -1760,6 +1760,8 @@ elif st.session_state.page == "icon":
 
 elif st.session_state.page == "shop":
     if st.session_state.logged_in:
+        credit_pending_checkouts(force=True)
+    if st.session_state.logged_in:
         credit_pending_checkouts()
     st.subheader("ポイント購入")
     if not st.session_state.logged_in:
@@ -1912,8 +1914,8 @@ elif st.session_state.page == "stats":
 
 elif st.session_state.page == "plan":
     if st.session_state.logged_in:
-        credit_pending_checkouts()
-        sync_subscription()
+        credit_pending_checkouts(force=True)
+        sync_subscription(force=True)
     st.subheader("月額登録")
     st.write(f"**{MONTHLY_PRICE}円 / 30日**")
     st.write(f"- {MONTHLY_POINTS}ポイント付与")
@@ -2327,6 +2329,7 @@ elif st.session_state.page == "board":
                             st.rerun()
 
 else:
+    usable_fonts = get_usable_fonts()
     st.subheader("4コマ")
     layout = st.radio("並べ方", list(LAYOUTS.keys()), horizontal=True)
     st.session_state.layout = layout
