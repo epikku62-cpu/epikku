@@ -720,6 +720,9 @@ def save_user_state():
         "icon": st.session_state.get("icon", prev.get("icon", "")),
         "characters": st.session_state.get("characters", prev.get("characters", [])),
         "points": int(st.session_state.get("points", prev.get("points", 0))),
+        "signup_points_remaining": (int(st.session_state.get("signup_points_remaining"))
+                                    if "signup_points_remaining" in st.session_state
+                                    else prev.get("signup_points_remaining")),
         "premium_until": st.session_state.get("premium_until") or prev.get("premium_until", ""),
         "rank": "vip" if is_premium() else "ブロンズ",
         "history": st.session_state.get("simple_history", prev.get("history", []))[-30:],
@@ -796,7 +799,11 @@ def take_points(cost):
         return
     if st.session_state.points < cost:
         raise Exception(f"ポイントが足りません。必要 {cost}")
-    st.session_state.points -= int(cost)
+    cost = int(cost)
+    st.session_state.points -= cost
+    # 新規登録特典20ポイントの残量を追跡（既存ユーザーには後付けしない）
+    if "signup_points_remaining" in st.session_state:
+        st.session_state.signup_points_remaining = max(0, int(st.session_state.get("signup_points_remaining") or 0) - cost)
     save_user_state()
 
 def finish_action():
@@ -1320,6 +1327,10 @@ def apply_login(name, data, persist=True, sync=True, pending=True):
     st.session_state.icon = data.get("icon", random.choice(ANIMALS))
     st.session_state.characters = data.get("characters", [])
     st.session_state.points = int(data.get("points", 0))
+    if "signup_points_remaining" in data:
+        st.session_state.signup_points_remaining = int(data.get("signup_points_remaining") or 0)
+    else:
+        st.session_state.pop("signup_points_remaining", None)
     st.session_state.premium_until = data.get("premium_until", "")
     st.session_state.simple_history = data.get("history", [])
     st.session_state.library = data.get("library", [])
@@ -1825,7 +1836,7 @@ elif st.session_state.page == "register":
             elif email_taken(users, p["email"]) or p["name"] in users:
                 st.error("すでに登録されています")
             else:
-                users[p["name"]] = {"password": p["password"], "email": p["email"], "icon": p["icon"], "characters": [], "points": SIGNUP_POINTS, "premium_until": "", "rank": "ブロンズ", "history": [], "library": []}
+                users[p["name"]] = {"password": p["password"], "email": p["email"], "icon": p["icon"], "characters": [], "points": SIGNUP_POINTS, "signup_points_remaining": SIGNUP_POINTS, "premium_until": "", "rank": "ブロンズ", "history": [], "library": []}
                 save_json(USERS_FILE, users)
                 apply_login(p["name"], users[p["name"]])
                 st.session_state.pending = None
@@ -1858,7 +1869,7 @@ elif st.session_state.page == "contact":
             st.success("送りました") if ok else st.error(f"送れませんでした: {err}")
 
 elif st.session_state.page == "stats":
-    st.subheader("来場")
+    st.subheader("来場・利用状況")
     if not is_owner():
         st.warning("管理者だけです")
         st.stop()
@@ -1866,12 +1877,76 @@ elif st.session_state.page == "stats":
     days = data.get("days") if isinstance(data.get("days"), dict) else {}
     today = datetime.now().strftime("%Y/%m/%d")
     yday = (datetime.now() - timedelta(days=1)).strftime("%Y/%m/%d")
-    st.write(f"累計 {int(data.get('total', 0))}")
+    st.write(f"累計来場 {int(data.get('total', 0))}")
     st.write(f"今日 {int(days.get(today, 0))}")
     st.write(f"昨日 {int(days.get(yday, 0))}")
     st.write(f"最後 {data.get('last') or 'なし'}")
+
     users = load_json(USERS_FILE, {})
-    st.write(f"登録 {len(users)}人")
+    valid_users = [(name, u) for name, u in users.items() if isinstance(u, dict)]
+    registered = len(valid_users)
+    image_users = []
+    image_zero = []
+    total_image_generations = 0
+    signup_tracked = 0
+    signup_remaining_zero = 0
+    signup_remaining_positive = 0
+
+    for name, u in valid_users:
+        history = u.get("history") or []
+        if not isinstance(history, list):
+            history = []
+        # historyには画像生成履歴が保存されているため、1件以上あれば画像生成経験あり。
+        gen_count = len(history)
+        total_image_generations += gen_count
+        if gen_count > 0:
+            image_users.append((name, gen_count, u))
+        else:
+            image_zero.append((name, u))
+
+        if "signup_points_remaining" in u:
+            signup_tracked += 1
+            remaining = int(u.get("signup_points_remaining") or 0)
+            if remaining <= 0:
+                signup_remaining_zero += 1
+            else:
+                signup_remaining_positive += 1
+
+    st.markdown("### 登録者の利用状況")
+    st.write(f"登録者 {registered}人")
+    st.write(f"画像生成した人 {len(image_users)}人")
+    st.write(f"画像生成していない人 {len(image_zero)}人")
+    st.write(f"画像生成回数（保存履歴ベース） {total_image_generations}回")
+
+    if registered:
+        st.write(f"登録 → 画像生成率 {len(image_users) / registered * 100:.1f}%")
+    else:
+        st.write("登録 → 画像生成率 -")
+
+    st.markdown("### 新規登録20ポイントの利用状況")
+    if signup_tracked:
+        st.write(f"追跡対象 {signup_tracked}人")
+        st.write(f"新規特典20ポイントを使い切った人 {signup_remaining_zero}人")
+        st.write(f"新規特典ポイントが残っている人 {signup_remaining_positive}人")
+        st.caption("※この項目は追跡機能追加後に登録したユーザーが対象です。購入ポイントなどが混ざるため、既存ユーザーの20ポイント消費状況は推測していません。")
+    else:
+        st.write("まだ追跡対象の登録者はいません")
+
+    with st.expander("画像生成した登録者"):
+        if image_users:
+            for name, gen_count, _u in sorted(image_users, key=lambda x: x[1], reverse=True):
+                st.write(f"{name}　画像生成 {gen_count}回")
+        else:
+            st.write("まだ画像生成した登録者はいません")
+
+    with st.expander("画像生成していない登録者"):
+        if image_zero:
+            for name, _u in image_zero:
+                st.write(name)
+        else:
+            st.write("全員が1回以上画像生成しています")
+
+    st.markdown("### ポイント手動付与")
     grant_name = st.text_input("ポイントを足す相手", value=str(st.session_state.get("username") or ""))
     grant_pts = st.number_input("追加ポイント", min_value=1, max_value=10000, value=300, step=1)
     if st.button("ポイントを手動で足す"):
@@ -1884,12 +1959,11 @@ elif st.session_state.page == "stats":
             if grant_name == st.session_state.get("username"):
                 st.session_state.points = int(users2[grant_name]["points"])
             st.success(f"{grant_name} に {int(grant_pts)} ポイント足しました")
+
     now = datetime.now()
     online = []
     recent = []
-    for name, u in users.items():
-        if not isinstance(u, dict):
-            continue
+    for name, u in valid_users:
         seen = str(u.get("last_seen") or "")
         if not seen:
             continue
@@ -1907,80 +1981,10 @@ elif st.session_state.page == "stats":
         for row in online:
             st.write(row)
     else:
-        st.write("いまはいません")
-    st.write("最近ログインした人")
-    for _, row in sorted(recent, key=lambda x: x[0], reverse=True)[:30]:
+        st.write("なし")
+    st.write("最近ログイン")
+    for _t, row in sorted(recent, reverse=True)[:30]:
         st.write(row)
-
-elif st.session_state.page == "plan":
-    if st.session_state.logged_in:
-        credit_pending_checkouts(force=True)
-        sync_subscription(force=True)
-    st.subheader("月額登録")
-    st.write(f"**{MONTHLY_PRICE}円 / 30日**")
-    st.write(f"- {MONTHLY_POINTS}ポイント付与")
-    st.write("- セット機能開放")
-    st.write("- サイズの変更開放")
-    if is_premium():
-        st.success(f"VIPです。期限 {str(st.session_state.premium_until)[:10]}")
-        if st.session_state.get("stripe_sub"):
-            st.warning("途中で解約すると、その時点でVIPが終了し、次回分の1200ポイントは付与されません。")
-            if st.button("月額VIPを解約する", key="cancel_vip", type="secondary"):
-                ok, msg = cancel_subscription_now()
-                if ok:
-                    st.success(msg)
-                    st.rerun()
-                else:
-                    st.error(msg)
-    elif not st.session_state.logged_in:
-        st.warning("月額登録にはログインが必要です。")
-    elif stripe is None or not STRIPE_SECRET_KEY or not STRIPE_PRICE_ID:
-        st.error("決済設定がまだです。")
-    elif st.button(f"{MONTHLY_PRICE}円で登録する", type="primary"):
-        try:
-            session = stripe_checkout(
-                "subscription",
-                [{"price": STRIPE_PRICE_ID, "quantity": 1}],
-                None,
-                None,
-                {"kind": "plan", "user": st.session_state.get("username") or ""},
-            )
-            st.markdown(f"[決済ページへ進む]({session.url})")
-        except Exception as e:
-            st.error(str(e))
-
-elif st.session_state.page == "chars":
-    st.subheader("セット")
-    if not is_premium() and not is_owner():
-        st.warning("セットはVIPだけです。"); st.stop()
-    save_name = st.text_input("保存名", placeholder="任意")
-    use_type = st.radio("種類", ["キャラだけ", "絵柄だけ", "キャラ＋絵柄"], horizontal=True)
-    char_files, style_files, char_strengths, style_strengths = [], [], [], []
-    if use_type != "絵柄だけ":
-        char_files = st.file_uploader("キャラ（最大3）", type=["png", "jpg", "jpeg"], accept_multiple_files=True, key="char_ups")
-        for i, f in enumerate((char_files or [])[:3]):
-            st.image(f, width=110)
-            char_strengths.append(st.slider(f"キャラ強度{i+1}", 1, 10, 8, key=f"cs_{i}"))
-    if use_type != "キャラだけ":
-        style_files = st.file_uploader("絵柄（最大3）", type=["png", "jpg", "jpeg"], accept_multiple_files=True, key="style_ups")
-        for i, f in enumerate((style_files or [])[:3]):
-            st.image(f, width=110)
-            style_strengths.append(st.slider(f"絵柄強度{i+1}", 1, 10, 8, key=f"ss_{i}"))
-    if st.button("保存", type="primary"):
-        chars = [{"uri": uploaded_to_uri(f), "strength": char_strengths[i]} for i, f in enumerate((char_files or [])[:3])]
-        styles = [{"uri": uploaded_to_uri(f), "strength": style_strengths[i]} for i, f in enumerate((style_files or [])[:3])]
-        if not chars and not styles:
-            st.warning("画像を入れてください")
-        else:
-            st.session_state.characters.append({"id": str(uuid.uuid4())[:8], "save_name": save_name.strip() or f"セット{len(st.session_state.characters)+1}", "kind": use_type, "chars": chars, "styles": styles})
-            save_user_state(); st.rerun()
-    for i, ch in enumerate(st.session_state.characters):
-        c1, c2 = st.columns([4, 1])
-        with c1:
-            st.write(char_label(ch))
-        with c2:
-            if st.button("消去", key=f"delc_{i}"):
-                st.session_state.characters.pop(i); save_user_state(); st.rerun()
 
 elif st.session_state.page == "simple":
     st.subheader("画像生成モード")
@@ -2160,77 +2164,107 @@ elif st.session_state.page == "simple":
             st.session_state.video_src = st.session_state.simple_image; go("video"); st.rerun()
 
 elif st.session_state.page == "board":
-    st.subheader("掲示板")
+    st.subheader("💬 コミュニティ掲示板")
+    st.caption("ユーザー同士・管理者で、質問や相談、要望などを会話できます。")
     board = load_board()
-    posts = list(reversed(board.get("posts", [])))
+    posts_all = list(reversed(board.get("posts", [])))
     view_id = str(st.session_state.get("board_id") or "")
+
     if view_id:
         post = next((p for p in board.get("posts", []) if p.get("id") == view_id), None)
-        if st.button("一覧へ戻る"):
+        if st.button("← 一覧へ戻る", use_container_width=True):
             st.session_state.board_id = ""
             st.query_params["p"] = "board"
             if "bid" in st.query_params:
                 del st.query_params["bid"]
             go("board"); st.rerun()
         if not post:
-            st.warning("この投稿はありません")
+            st.warning("このスレッドはありません")
+            st.session_state.board_id = ""
         else:
+            category = post.get("category") or ("作品" if post.get("image") else "その他")
+            st.caption(f"【{category}】")
+            st.markdown(f"## {post.get('title') or '無題'}")
+            author = post.get("user") or "名無し"
+            author_label = f"{author}　👑管理者" if post.get("is_owner") else author
+            st.caption(f"{author_label}　{post.get('time','')}")
+            body = str(post.get("body") or "").strip()
+            if body:
+                st.markdown(body)
+
             img = board_image_uri(post)
             if img:
                 st.image(img, use_container_width=True)
-            st.write(f"**{post.get('title') or '無題'}**")
-            st.caption(f"{post.get('user','')}　{post.get('time','')}")
+
             if post.get("kind") == "simple" and post.get("show_prompt"):
+                st.divider()
+                st.write("**この作品のプロンプト**")
                 st.write("画質: " + (post.get("quality") or "なし"))
                 st.write("背景: " + (post.get("background") or "なし"))
-                chars = post.get("chars") or []
-                for i, c in enumerate(chars):
+                for i, c in enumerate(post.get("chars") or []):
                     if str(c).strip():
                         st.write(f"キャラ{i+1}: {c}")
                 st.write("その他: " + (post.get("other") or "なし"))
                 st.write("除外: " + (post.get("negative") or "なし"))
-                if st.button("プロンプトを使う", type="primary"):
+                if st.button("このプロンプトを使う", type="primary"):
                     st.session_state.sq = post.get("quality") or ""
                     st.session_state.sb = post.get("background") or ""
                     st.session_state.so = post.get("other") or ""
                     st.session_state.sn = post.get("negative") or ""
                     ch = [x for x in (post.get("chars") or []) if str(x).strip()] or [""]
                     st.session_state.schars = ch[:3]
-                    # 掲示板からキャラクタープロンプトを入力欄にも確実に反映
                     for i in range(3):
                         st.session_state[f"scarea_{i}"] = st.session_state.schars[i] if i < len(st.session_state.schars) else ""
-                    # 掲示板投稿に保存されたシード値も画像生成画面へ引き継ぐ
                     board_seed = post.get("seed")
                     st.session_state.simple_seed = "" if board_seed is None else str(board_seed)
                     go("simple"); st.rerun()
-            elif post.get("kind") == "simple":
+            elif post.get("kind") == "simple" and not body:
                 st.caption("プロンプトは非表示です")
+
+            st.divider()
+            comments = post.get("comments") or []
+            st.markdown(f"### 返信 {len(comments)}")
+            if comments:
+                for idx, c in enumerate(comments):
+                    cu = c.get("user") or "名無し"
+                    badge = " 👑管理者" if c.get("is_owner") else ""
+                    st.markdown(f"**{cu}{badge}**　{c.get('time','')}")
+                    st.write(c.get("text", ""))
+                    if st.session_state.logged_in and (st.session_state.get("username") == c.get("user") or is_owner()):
+                        if st.button("この返信を削除", key=f"delc_{view_id}_{idx}"):
+                            comments.pop(idx)
+                            post["comments"] = comments
+                            save_board(board)
+                            st.rerun()
+                    if idx < len(comments) - 1:
+                        st.markdown("---")
             else:
-                st.caption("この作品に使えるプロンプトはありません")
-            st.write("コメント")
-            for c in post.get("comments") or []:
-                st.markdown(f"**{c.get('user','')}**　{c.get('time','')}")
-                st.write(c.get("text", ""))
+                st.caption("まだ返信はありません。最初の返信を書いてみましょう。")
+
             if st.session_state.logged_in:
-                msg = st.text_area("コメント", key="board_cmt", max_chars=300)
-                if st.button("コメントする"):
+                msg = st.text_area("返信を書く", key="board_cmt", max_chars=500, placeholder="質問への回答、感想、アドバイスなど")
+                if st.button("返信する", type="primary", use_container_width=True):
                     if not msg.strip():
-                        st.session_state.error = "コメントを書いてください"
-                    elif len(post.get("comments") or []) >= BOARD_MAX_COMMENTS:
-                        st.session_state.error = "コメントがいっぱいです"
+                        st.session_state.error = "返信を書いてください"
+                    elif len(comments) >= BOARD_MAX_COMMENTS:
+                        st.session_state.error = "返信がいっぱいです"
                     else:
-                        post.setdefault("comments", []).append({
+                        comments.append({
                             "user": st.session_state.get("username") or "名無し",
-                            "text": msg.strip()[:300],
+                            "is_owner": bool(is_owner()),
+                            "text": msg.strip()[:500],
                             "time": datetime.now().strftime("%m/%d %H:%M"),
                         })
+                        post["comments"] = comments
                         save_board(board)
                         st.session_state.error = ""
                     go("board"); st.rerun()
             else:
-                st.caption("コメントにはログインが必要です")
+                st.caption("返信するにはログインが必要です")
+
             if st.session_state.logged_in and (st.session_state.get("username") == post.get("user") or is_owner()):
-                if st.button("この投稿を消す"):
+                st.divider()
+                if st.button("このスレッドを削除", type="secondary"):
                     path = post.get("image") or ""
                     board["posts"] = [p for p in board.get("posts", []) if p.get("id") != view_id]
                     if path and os.path.exists(path):
@@ -2243,8 +2277,38 @@ elif st.session_state.page == "board":
                     go("board"); st.rerun()
     else:
         if st.session_state.logged_in:
-            with st.expander("作品を投稿する", expanded=False):
-                title = st.text_input("タイトル", max_chars=40)
+            with st.expander("📝 新しいスレッドを作る", expanded=False):
+                st.caption("質問・相談・要望・雑談など、自由に投稿できます。")
+                t_title = st.text_input("タイトル", max_chars=60, key="thread_title", placeholder="例：このプロンプトについて質問です")
+                t_cat = st.selectbox("カテゴリ", ["質問・相談", "要望", "不具合", "雑談", "その他"], key="thread_category")
+                t_body = st.text_area("内容", max_chars=1000, key="thread_body", placeholder="みんなに聞きたいことを書いてください")
+                if st.button("スレッドを作成", type="primary", use_container_width=True):
+                    if len(board.get("posts", [])) >= BOARD_MAX_POSTS:
+                        st.session_state.error = "掲示板がいっぱいです"
+                    elif not t_title.strip() or not t_body.strip():
+                        st.session_state.error = "タイトルと内容を入力してください"
+                    else:
+                        pid = uuid.uuid4().hex[:10]
+                        board.setdefault("posts", []).append({
+                            "id": pid,
+                            "user": st.session_state.get("username") or "名無し",
+                            "is_owner": bool(is_owner()),
+                            "title": t_title.strip()[:60],
+                            "category": t_cat,
+                            "body": t_body.strip()[:1000],
+                            "image": "",
+                            "kind": "thread",
+                            "show_prompt": False,
+                            "comments": [],
+                            "time": datetime.now().strftime("%m/%d %H:%M"),
+                        })
+                        save_board(board)
+                        st.session_state.board_id = pid
+                        st.session_state.error = ""
+                    go("board"); st.rerun()
+
+            with st.expander("🖼️ 作品を投稿する", expanded=False):
+                title = st.text_input("タイトル", max_chars=40, key="board_work_title")
                 choices = []
                 if st.session_state.simple_image:
                     choices.append({"label": "今の画像生成", "url": st.session_state.simple_image, "kind": "simple"})
@@ -2259,43 +2323,43 @@ elif st.session_state.page == "board":
                 for c in choices:
                     if c["url"] in seen:
                         continue
-                    seen.add(c["url"])
-                    uniq.append(c)
+                    seen.add(c["url"]); uniq.append(c)
                 if not uniq:
                     st.write("サイトで作った画像がまだありません")
                 else:
                     names = [c["label"] for c in uniq]
-                    pick = st.selectbox("サイト内の作品", names)
+                    pick = st.selectbox("サイト内の作品", names, key="board_work_pick")
                     chosen = uniq[names.index(pick)]
-                    src = chosen["url"]
-                    kind = chosen["kind"]
-                    st.image(src, width=220)
+                    st.image(chosen["url"], width=220)
                     show_p = "非表示"
-                    if kind == "simple":
-                        show_p = st.radio("プロンプト", ["表示する", "非表示"], horizontal=True)
+                    if chosen["kind"] == "simple":
+                        show_p = st.radio("プロンプト", ["表示する", "非表示"], horizontal=True, key="board_show_prompt")
                     else:
                         st.caption("画像生成モード以外はプロンプトを出せません")
-                    if st.button("投稿する", type="primary"):
+                    if st.button("作品を投稿する", type="primary", use_container_width=True):
                         if len(board.get("posts", [])) >= BOARD_MAX_POSTS:
                             st.session_state.error = "掲示板がいっぱいです"
                         else:
                             pid = uuid.uuid4().hex[:10]
-                            meta = chosen.get("meta") or prompt_from_history(src)
+                            meta = chosen.get("meta") or prompt_from_history(chosen["url"])
                             try:
-                                path = save_board_image(src, pid)
+                                path = save_board_image(chosen["url"], pid)
                                 board.setdefault("posts", []).append({
                                     "id": pid,
                                     "user": st.session_state.get("username") or "名無し",
+                                    "is_owner": bool(is_owner()),
                                     "title": (title or "無題").strip()[:40],
+                                    "category": "作品",
+                                    "body": "",
                                     "image": path,
-                                    "kind": kind,
-                                    "show_prompt": kind == "simple" and show_p == "表示する",
-                                    "quality": meta.get("quality", "") if kind == "simple" else "",
-                                    "background": meta.get("background", "") if kind == "simple" else "",
-                                    "other": meta.get("other", "") if kind == "simple" else "",
-                                    "negative": meta.get("negative", "") if kind == "simple" else "",
-                                    "seed": meta.get("seed") if kind == "simple" else None,
-                                    "chars": list(meta.get("chars") or [])[:3] if kind == "simple" else [],
+                                    "kind": chosen["kind"],
+                                    "show_prompt": chosen["kind"] == "simple" and show_p == "表示する",
+                                    "quality": meta.get("quality", "") if chosen["kind"] == "simple" else "",
+                                    "background": meta.get("background", "") if chosen["kind"] == "simple" else "",
+                                    "other": meta.get("other", "") if chosen["kind"] == "simple" else "",
+                                    "negative": meta.get("negative", "") if chosen["kind"] == "simple" else "",
+                                    "seed": meta.get("seed") if chosen["kind"] == "simple" else None,
+                                    "chars": list(meta.get("chars") or [])[:3] if chosen["kind"] == "simple" else [],
                                     "comments": [],
                                     "time": datetime.now().strftime("%m/%d %H:%M"),
                                 })
@@ -2306,34 +2370,46 @@ elif st.session_state.page == "board":
                                 st.session_state.error = str(e)
                         go("board"); st.rerun()
         else:
-            st.caption("投稿にはログインが必要です")
-        q = st.text_input("検索", key="board_q", placeholder="タイトル・名前")
+            st.caption("投稿・返信にはログインが必要です")
+
+        q = st.text_input("検索", key="board_q", placeholder="タイトル・名前・内容")
+        posts = posts_all
         if q and q.strip():
             w = q.strip().lower()
-            posts = [p for p in posts if w in str(p.get("title") or "").lower() or w in str(p.get("user") or "").lower()]
+            posts = [p for p in posts if w in str(p.get("title") or "").lower() or w in str(p.get("user") or "").lower() or w in str(p.get("body") or "").lower()]
         if not posts:
-            st.write("まだ投稿はありません")
+            st.write("まだスレッドはありません")
         else:
-            st.markdown(
-                "<style>"
-                "div[data-testid='stHorizontalBlock']{display:flex !important;flex-direction:row !important;flex-wrap:wrap !important;gap:8px !important;}"
-                "div[data-testid='stHorizontalBlock'] > div{min-width:47% !important;width:47% !important;flex:0 0 47% !important;}"
-                "</style>",
-                unsafe_allow_html=True,
-            )
-            for i in range(0, len(posts), 2):
-                row = st.columns(2)
-                for j, p in enumerate(posts[i:i + 2]):
-                    with row[j]:
-                        img = board_image_uri(p)
-                        if img:
-                            st.image(img, use_container_width=True)
-                        st.caption((p.get("title") or "無題")[:16])
-                        st.caption(f"{p.get('user','')} {p.get('time','')}")
-                        if st.button("見る", key=f"bsee_{p.get('id')}"):
+            for p in posts:
+                category = p.get("category") or ("作品" if p.get("image") else "その他")
+                title = p.get("title") or "無題"
+                author = p.get("user") or "名無し"
+                badge = " 👑" if p.get("is_owner") else ""
+                reply_count = len(p.get("comments") or [])
+                img = board_image_uri(p)
+                if img:
+                    c1, c2 = st.columns([1, 1.35])
+                    with c1:
+                        st.image(img, use_container_width=True)
+                    with c2:
+                        st.markdown(f"**【{category}】 {title[:40]}**")
+                        st.caption(f"{author}{badge}　{p.get('time','')}")
+                        if p.get("body"):
+                            st.write(str(p.get("body"))[:90] + ("…" if len(str(p.get("body"))) > 90 else ""))
+                        st.caption(f"💬 返信 {reply_count}")
+                        if st.button("スレッドを見る", key=f"bsee_{p.get('id')}", use_container_width=True):
                             st.session_state.board_id = p.get("id")
-                            go("board")
-                            st.rerun()
+                            go("board"); st.rerun()
+                else:
+                    st.markdown(f"### 【{category}】 {title}")
+                    st.caption(f"{author}{badge}　{p.get('time','')}　💬 返信 {reply_count}")
+                    body = str(p.get("body") or "")
+                    if body:
+                        st.write(body[:180] + ("…" if len(body) > 180 else ""))
+                    if st.button("スレッドを見る", key=f"tsee_{p.get('id')}", use_container_width=True):
+                        st.session_state.board_id = p.get("id")
+                        go("board"); st.rerun()
+                st.divider()
 
 else:
     usable_fonts = get_usable_fonts()
