@@ -1931,7 +1931,7 @@ elif st.session_state.page == "register":
         users = load_json(USERS_FILE, {})
         found = find_user(users, lu)
         if found and users[found]["password"] == hash_password(lp):
-            apply_login(found, users[found]); go("simple"); st.rerun()
+            apply_login(found, users[found]); go("board"); st.rerun()
         else:
             st.error("ログインできません")
 
@@ -2424,39 +2424,36 @@ elif st.session_state.page == "board":
             if st.session_state.logged_in:
                 with st.expander("🖼️ 作品を投稿する", expanded=False):
                     title = st.text_input("タイトル", max_chars=40, key="board_work_title")
+                    # 作品投稿は「保存庫」に入っている作品だけを選択できます。
+                    # 履歴や現在表示中の画像は投稿候補に含めません。
                     choices = []
-                    if st.session_state.simple_image:
-                        choices.append({"label": "今の画像生成", "url": st.session_state.simple_image, "kind": "simple"})
-                    for item in reversed(st.session_state.get("simple_history") or []):
-                        if item.get("url"):
-                            choices.append({"label": f"履歴 {item.get('time','')}", "url": item["url"], "kind": "simple", "meta": item})
                     for item in reversed(st.session_state.get("library") or []):
                         if item.get("url"):
                             kind = site_work_kind(item) or item.get("kind") or "library"
-                            choices.append({"label": f"保存庫 {item.get('time','')} {item.get('label','') or '保存画像'}", "url": item["url"], "kind": kind, "meta": item})
-                    seen, uniq = set(), []
-                    for c in choices:
-                        if c["url"] in seen:
-                            continue
-                        seen.add(c["url"]); uniq.append(c)
-                    if not uniq:
-                        st.write("サイトで作った画像がまだありません")
+                            choices.append({
+                                "label": f"{item.get('time','')}　{item.get('label','') or '保存画像'}",
+                                "url": item["url"],
+                                "kind": kind,
+                                "meta": item,
+                            })
+                    if not choices:
+                        st.write("保存庫に作品がありません。先に作品を保存庫へ入れてください。")
                     else:
-                        names = [c["label"] for c in uniq]
-                        pick = st.selectbox("サイト内の作品", names, key="board_work_pick")
-                        chosen = uniq[names.index(pick)]
+                        names = [c["label"] for c in choices]
+                        pick = st.selectbox("保存庫から作品を選択", names, key="board_work_pick")
+                        chosen = choices[names.index(pick)]
                         st.image(chosen["url"], width=220)
                         show_p = "非表示"
                         if chosen["kind"] == "simple":
                             show_p = st.radio("プロンプト", ["表示する", "非表示"], horizontal=True, key="board_show_prompt")
                         else:
-                            st.caption("画像生成モード以外はプロンプトを出せません")
+                            st.caption("この作品には画像生成モードのプロンプト情報がありません")
                         if st.button("作品を投稿する", type="primary", use_container_width=True):
                             if len(board.get("posts", [])) >= BOARD_MAX_POSTS:
                                 st.session_state.error = "掲示板がいっぱいです"
                             else:
                                 pid = uuid.uuid4().hex[:10]
-                                meta = chosen.get("meta") or prompt_from_history(chosen["url"])
+                                meta = chosen.get("meta") or {}
                                 try:
                                     path = save_board_image(chosen["url"], pid)
                                     board.setdefault("posts", []).append({
