@@ -1426,7 +1426,7 @@ def render_top_menu():
     st.write(f"ポイント {st.session_state.points}")
     st.write(f"会員 {member_label() if st.session_state.logged_in else '未登録'}")
     community_badge = " 🔴" if community_unread_count() else ""
-    menu_items = [("画像生成モード", "simple"), ("セット", "chars"), ("4コマ", "make"), ("保存庫", "lib"), ("動画生成", "video"), ("4コマ動画", "v4"), ("動画を移す", "vmove"), (f"👥 コミュニティ{community_badge}", "board"), ("ポイント購入", "shop"), ("説明書", "help"), ("月額登録", "plan"), ("お問い合わせ", "contact")]
+    menu_items = [(f"👥 コミュニティ{community_badge}", "board"), ("画像生成モード", "simple"), ("セット", "chars"), ("4コマ", "make"), ("保存庫", "lib"), ("動画生成", "video"), ("4コマ動画", "v4"), ("動画を移す", "vmove"), ("ポイント購入", "shop"), ("説明書", "help"), ("月額登録", "plan"), ("お問い合わせ", "contact")]
     if is_owner():
         menu_items.append(("来場", "stats"))
     for label, page in menu_items:
