@@ -2372,7 +2372,7 @@ elif st.session_state.page == "board":
 
         with tab_thread:
             if st.session_state.logged_in:
-                with st.expander("📝 新しいスレッドを作る", expanded=False):
+                with st.expander("📝 新しいスレッドを作る", expanded=True):
                     st.caption("質問・相談・要望・雑談など、自由に投稿できます。")
                     t_title = st.text_input("タイトル", max_chars=60, key="thread_title", placeholder="例：このプロンプトについて質問です")
                     t_cat = st.selectbox("カテゴリ", ["質問・相談", "要望", "不具合", "雑談", "その他"], key="thread_category")
@@ -2422,7 +2422,7 @@ elif st.session_state.page == "board":
 
         with tab_work:
             if st.session_state.logged_in:
-                with st.expander("🖼️ 作品を投稿する", expanded=False):
+                with st.expander("🖼️ 作品を投稿する", expanded=True):
                     title = st.text_input("タイトル", max_chars=40, key="board_work_title")
                     # 作品投稿は「保存庫」に入っている作品だけを選択できます。
                     # 履歴や現在表示中の画像は投稿候補に含めません。
