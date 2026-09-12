@@ -723,6 +723,7 @@ def save_user_state():
         "signup_points_remaining": (int(st.session_state.get("signup_points_remaining"))
                                     if "signup_points_remaining" in st.session_state
                                     else prev.get("signup_points_remaining")),
+        "community_seen_at": float(st.session_state.get("community_seen_at", prev.get("community_seen_at", 0)) or 0),
         "premium_until": st.session_state.get("premium_until") or prev.get("premium_until", ""),
         "rank": "vip" if is_premium() else "ブロンズ",
         "history": st.session_state.get("simple_history", prev.get("history", []))[-30:],
@@ -746,9 +747,43 @@ def load_board():
     data["posts"] = [p for p in data.get("posts", []) if isinstance(p, dict)]
     return data
 
+def board_last_activity(data=None):
+    data = data if isinstance(data, dict) else load_board()
+    latest = float(data.get("updated_at") or 0)
+    for post in data.get("posts", []):
+        try:
+            latest = max(latest, float(post.get("updated_at") or post.get("ts") or 0))
+        except Exception:
+            pass
+        for c in post.get("comments") or []:
+            try:
+                latest = max(latest, float(c.get("ts") or 0))
+            except Exception:
+                pass
+    return latest
+
+def community_unread_count():
+    if not st.session_state.get("logged_in"):
+        return 0
+    seen = float(st.session_state.get("community_seen_at") or 0)
+    latest = board_last_activity()
+    return 1 if latest > seen else 0
+
+def mark_community_seen():
+    if not st.session_state.get("logged_in") or not st.session_state.get("username"):
+        return
+    latest = board_last_activity()
+    st.session_state.community_seen_at = latest
+    users = load_json(USERS_FILE, {})
+    name = st.session_state.get("username")
+    if name in users and isinstance(users[name], dict):
+        users[name]["community_seen_at"] = latest
+        save_json(USERS_FILE, users, backup=False)
+
 def save_board(data):
     posts = data.get("posts", [])[-BOARD_MAX_POSTS:]
-    save_json(BOARD_FILE, {"posts": posts})
+    data_out = {"posts": posts, "updated_at": float(data.get("updated_at") or 0)}
+    save_json(BOARD_FILE, data_out)
 
 def board_image_path(pid):
     return os.path.join(BOARD_DIR, f"{pid}.jpg")
@@ -1331,6 +1366,11 @@ def apply_login(name, data, persist=True, sync=True, pending=True):
         st.session_state.signup_points_remaining = int(data.get("signup_points_remaining") or 0)
     else:
         st.session_state.pop("signup_points_remaining", None)
+    # 既存ユーザーは、最初のログイン時点より前の投稿を未読扱いにしない。
+    if "community_seen_at" in data:
+        st.session_state.community_seen_at = float(data.get("community_seen_at") or 0)
+    else:
+        st.session_state.community_seen_at = board_last_activity()
     st.session_state.premium_until = data.get("premium_until", "")
     st.session_state.simple_history = data.get("history", [])
     st.session_state.library = data.get("library", [])
@@ -1385,7 +1425,8 @@ def render_top_menu():
         )
     st.write(f"ポイント {st.session_state.points}")
     st.write(f"会員 {member_label() if st.session_state.logged_in else '未登録'}")
-    menu_items = [("画像生成モード", "simple"), ("セット", "chars"), ("4コマ", "make"), ("保存庫", "lib"), ("動画生成", "video"), ("4コマ動画", "v4"), ("動画を移す", "vmove"), ("掲示板", "board"), ("ポイント購入", "shop"), ("説明書", "help"), ("月額登録", "plan"), ("お問い合わせ", "contact")]
+    community_badge = " 🔴" if community_unread_count() else ""
+    menu_items = [("画像生成モード", "simple"), ("セット", "chars"), ("4コマ", "make"), ("保存庫", "lib"), ("動画生成", "video"), ("4コマ動画", "v4"), ("動画を移す", "vmove"), (f"👥 コミュニティ{community_badge}", "board"), ("ポイント購入", "shop"), ("説明書", "help"), ("月額登録", "plan"), ("お問い合わせ", "contact")]
     if is_owner():
         menu_items.append(("来場", "stats"))
     for label, page in menu_items:
@@ -1407,7 +1448,7 @@ defaults = {
     "icon": random.choice(ANIMALS), "email": "", "pending": None, "library": [], "signup_just_completed": False,
     "video_src": None, "video_out": None, "v4_clips": [None] * 4, "v4_prompts": ["", "", "", ""],
     "v4_durs": [5, 5, 5, 5], "v4_count": 4, "v4_layout": "2×2", "v4_play": "同時に動く",
-    "v4_joined": None, "vjob": None, "v4_joining": False, "do_join": False, "v4_audio": "音声を消す", "board_id": "", "wait_until": 0, "_booted": False,
+    "v4_joined": None, "vjob": None, "v4_joining": False, "do_join": False, "v4_audio": "音声を消す", "board_id": "", "community_seen_at": 0, "wait_until": 0, "_booted": False,
     "menu_open": False, "need_top": True, "act_busy": False, "password_hash": "", "characters": [],
 }
 for k, v in defaults.items():
@@ -1505,6 +1546,8 @@ if st.session_state.page == "home":
                 go("register"); st.rerun()
     mid = st.columns([1, 2, 1])
     with mid[1]:
+        if st.button("👥 コミュニティ", use_container_width=True, key="home_community"):
+            go("board"); st.rerun()
         if st.button("panel", use_container_width=True, key="home_panel"):
             go("help"); st.rerun()
     st.stop()
@@ -1836,7 +1879,7 @@ elif st.session_state.page == "register":
             elif email_taken(users, p["email"]) or p["name"] in users:
                 st.error("すでに登録されています")
             else:
-                users[p["name"]] = {"password": p["password"], "email": p["email"], "icon": p["icon"], "characters": [], "points": SIGNUP_POINTS, "signup_points_remaining": SIGNUP_POINTS, "premium_until": "", "rank": "ブロンズ", "history": [], "library": []}
+                users[p["name"]] = {"password": p["password"], "email": p["email"], "icon": p["icon"], "characters": [], "points": SIGNUP_POINTS, "signup_points_remaining": SIGNUP_POINTS, "community_seen_at": board_last_activity(), "premium_until": "", "rank": "ブロンズ", "history": [], "library": []}
                 save_json(USERS_FILE, users)
                 apply_login(p["name"], users[p["name"]])
                 st.session_state.pending = None
@@ -2164,8 +2207,8 @@ elif st.session_state.page == "simple":
             st.session_state.video_src = st.session_state.simple_image; go("video"); st.rerun()
 
 elif st.session_state.page == "board":
-    st.subheader("💬 コミュニティ掲示板")
-    st.caption("ユーザー同士・管理者で、質問や相談、要望などを会話できます。")
+    st.subheader("👥 コミュニティ")
+    st.caption("質問・相談・要望・作品について、ユーザー同士や管理者で会話できます。")
     board = load_board()
     posts_all = list(reversed(board.get("posts", [])))
     view_id = str(st.session_state.get("board_id") or "")
@@ -2254,6 +2297,7 @@ elif st.session_state.page == "board":
                             "is_owner": bool(is_owner()),
                             "text": msg.strip()[:500],
                             "time": datetime.now().strftime("%m/%d %H:%M"),
+                            "ts": time.time(),
                         })
                         post["comments"] = comments
                         save_board(board)
@@ -2362,6 +2406,8 @@ elif st.session_state.page == "board":
                                     "chars": list(meta.get("chars") or [])[:3] if chosen["kind"] == "simple" else [],
                                     "comments": [],
                                     "time": datetime.now().strftime("%m/%d %H:%M"),
+                                    "ts": time.time(),
+                                    "updated_at": time.time(),
                                 })
                                 save_board(board)
                                 st.session_state.error = ""
@@ -2410,6 +2456,9 @@ elif st.session_state.page == "board":
                         st.session_state.board_id = p.get("id")
                         go("board"); st.rerun()
                 st.divider()
+
+    # コミュニティを開いた時点までを既読にする。
+    mark_community_seen()
 
 else:
     usable_fonts = get_usable_fonts()
