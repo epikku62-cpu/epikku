@@ -405,13 +405,43 @@ def touch_user_seen(name):
         save_json(USERS_FILE, users)
 
 def scroll_top():
+    # Streamlitはスマホでは複数の要素がスクロール領域になることがあるため、
+    # ページ切り替え後に候補となるスクロール領域をすべて先頭へ戻す。
     st.markdown("""
     <script>
-    const d = window.parent ? window.parent.document : document;
-    const main = d.querySelector('section.main') || d.scrollingElement || d.documentElement;
-    if (main) main.scrollTo(0, 0);
-    window.scrollTo(0, 0);
-    if (d.body) d.body.scrollTop = 0;
+    (() => {
+      const w = window.parent || window;
+      const d = w.document || document;
+      const scrollAllToTop = () => {
+        try { w.scrollTo(0, 0); } catch (e) {}
+        try { window.scrollTo(0, 0); } catch (e) {}
+        const selectors = [
+          'section.main',
+          '[data-testid="stAppViewContainer"]',
+          '[data-testid="stAppViewBlockContainer"]',
+          '[data-testid="stVerticalBlockBorderWrapper"]',
+          'main',
+          'section',
+          'body',
+          'html'
+        ];
+        selectors.forEach(sel => {
+          d.querySelectorAll(sel).forEach(el => {
+            try { el.scrollTop = 0; } catch (e) {}
+            try { el.scrollLeft = 0; } catch (e) {}
+            try { el.scrollTo({top: 0, left: 0, behavior: 'auto'}); } catch (e) {}
+          });
+        });
+        try { d.scrollingElement.scrollTop = 0; } catch (e) {}
+        try { d.documentElement.scrollTop = 0; } catch (e) {}
+        try { d.body.scrollTop = 0; } catch (e) {}
+      };
+      scrollAllToTop();
+      requestAnimationFrame(scrollAllToTop);
+      setTimeout(scrollAllToTop, 50);
+      setTimeout(scrollAllToTop, 150);
+      setTimeout(scrollAllToTop, 300);
+    })();
     </script>
     """, unsafe_allow_html=True)
 
