@@ -405,45 +405,49 @@ def touch_user_seen(name):
         save_json(USERS_FILE, users)
 
 def scroll_top():
-    # Streamlitはスマホでは複数の要素がスクロール領域になることがあるため、
-    # ページ切り替え後に候補となるスクロール領域をすべて先頭へ戻す。
-    st.markdown("""
+    # ページ切り替え後のスクロール位置をスマートフォンでも確実に先頭へ戻す。
+    # StreamlitのDOM更新後にも複数回実行し、実際のスクロールコンテナを探して戻す。
+    script = r"""
     <script>
     (() => {
-      const w = window.parent || window;
-      const d = w.document || document;
       const scrollAllToTop = () => {
-        try { w.scrollTo(0, 0); } catch (e) {}
-        try { window.scrollTo(0, 0); } catch (e) {}
-        const selectors = [
-          'section.main',
-          '[data-testid="stAppViewContainer"]',
-          '[data-testid="stAppViewBlockContainer"]',
-          '[data-testid="stVerticalBlockBorderWrapper"]',
-          'main',
-          'section',
-          'body',
-          'html'
-        ];
-        selectors.forEach(sel => {
-          d.querySelectorAll(sel).forEach(el => {
+        try {
+          const doc = document;
+          const targets = [
+            window,
+            doc.scrollingElement,
+            doc.documentElement,
+            doc.body,
+            doc.querySelector('section.main'),
+            doc.querySelector('[data-testid="stAppViewContainer"]'),
+            doc.querySelector('[data-testid="stAppViewBlockContainer"]'),
+            doc.querySelector('main'),
+            ...doc.querySelectorAll('[data-testid="stVerticalBlockBorderWrapper"]')
+          ];
+          targets.filter(Boolean).forEach(el => {
             try { el.scrollTop = 0; } catch (e) {}
             try { el.scrollLeft = 0; } catch (e) {}
-            try { el.scrollTo({top: 0, left: 0, behavior: 'auto'}); } catch (e) {}
+            try { if (el.scrollTo) el.scrollTo(0, 0); } catch (e) {}
           });
-        });
-        try { d.scrollingElement.scrollTop = 0; } catch (e) {}
-        try { d.documentElement.scrollTop = 0; } catch (e) {}
-        try { d.body.scrollTop = 0; } catch (e) {}
+        } catch (e) {}
       };
       scrollAllToTop();
       requestAnimationFrame(scrollAllToTop);
+      requestAnimationFrame(() => requestAnimationFrame(scrollAllToTop));
       setTimeout(scrollAllToTop, 50);
       setTimeout(scrollAllToTop, 150);
       setTimeout(scrollAllToTop, 300);
+      setTimeout(scrollAllToTop, 600);
     })();
     </script>
-    """, unsafe_allow_html=True)
+    """
+    # st.markdown側とコンポーネント側の両方で実行を試みる。
+    st.markdown(script, unsafe_allow_html=True)
+    try:
+        import streamlit.components.v1 as components
+        components.html(script, height=0, scrolling=False)
+    except Exception:
+        pass
 
 def go(page):
     st.session_state.page = page
@@ -2100,6 +2104,14 @@ elif st.session_state.page == "stats":
 
 elif st.session_state.page == "simple":
     st.subheader("画像生成モード")
+    st.markdown(
+        '<div style="margin:4px 0 8px;padding:12px 14px;background:#fff0f6;border:2px solid #ff6ea8;border-radius:16px;text-align:center;color:#ff4d88;font-weight:800;">'
+        '💡 コミュニティからプロンプトを入力'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+    if st.button("👥 コミュニティに移動", use_container_width=True, key="simple_to_community"):
+        go("board"); st.rerun()
     if st.session_state.get("signup_just_completed"):
         st.success(f"🎉 登録ありがとうございます！新規登録特典として **{SIGNUP_POINTS}ポイント** プレゼントしました。")
         st.markdown(
