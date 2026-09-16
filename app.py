@@ -511,17 +511,12 @@ def lock_other_buttons():
     """, unsafe_allow_html=True)
 
 def show_countdown_wait(label, key):
-    left = int(math.ceil(st.session_state.get("wait_until", 0) - time.time()))
+    # 毎秒 st.rerun() していた旧方式をやめ、生成中の表示を1つだけ出す。
+    # 待機中の無駄な再実行を減らし、「生成中」が二重に残る表示も防ぐ。
     if st.session_state.get("act_busy"):
-        st.markdown(f'<div style="margin:8px 0;padding:12px;border-radius:14px;background:#fff0f6;color:#ff4d88;font-weight:800;">{label}… 処理中です。触らないでください</div>', unsafe_allow_html=True)
+        st.markdown(f'<div style="margin:8px 0;padding:12px;border-radius:14px;background:#fff0f6;color:#ff4d88;font-weight:800;">{label}… 処理中です。画面を触らず、そのまま待ってください</div>', unsafe_allow_html=True)
         return None
-    if left > 0:
-        st.markdown(f'<div style="margin:8px 0;padding:12px;border-radius:14px;background:#fff0f6;color:#ff4d88;font-weight:800;">{label}… {left}</div>', unsafe_allow_html=True)
-        if st.button("キャンセル", key=f"can_{key}"):
-            return "cancel"
-        time.sleep(1)
-        st.rerun()
-    st.markdown(f'<div style="margin:8px 0;padding:12px;border-radius:14px;background:#fff0f6;color:#ff4d88;font-weight:800;">{label}… 結果を確認しています</div>', unsafe_allow_html=True)
+    st.markdown(f'<div style="margin:8px 0;padding:12px;border-radius:14px;background:#fff0f6;color:#ff4d88;font-weight:800;">{label}… 結果を確認しています。画面を閉じず、そのまま待ってください</div>', unsafe_allow_html=True)
     return "confirm"
 
 @st.cache_data(show_spinner=False)
@@ -921,76 +916,67 @@ def nai_request(prompt, width, height, model, steps=23, scale=5.0, negative="", 
     char_refs = [x for x in (char_refs or []) if x.get("uri")][:3]
     style_refs = [x for x in (style_refs or []) if x.get("uri")][:3]
 
-    # NovelAI V5の通常のマルチキャラクタープロンプトに合わせる。
-    # 画面上のキャラクター欄・吹き出し欄は変更せず、内部だけを調整する。
-    # 座標を固定するとNovelAI側の自動配置と違うため、V5ではuse_coords=Falseにする。
-    char_captions = [
-        {"char_caption": txt}
-        for txt in char_texts
-    ]
-    character_prompts = [
-        {"prompt": txt, "uc": "", "enabled": True}
-        for txt in char_texts
-    ]
-
     base_input = (prompt or "").strip()
     if not base_input and char_texts:
         base_input = char_texts[0]
     if not base_input:
         raise Exception("プロンプトを入れてください")
 
-    negative_text = negative or ""
+    # NovelAI V5 uses the V4 prompt container internally.  For V5, character
+    # coordinates are not forced: NovelAI itself decides their placement unless
+    # the user explicitly supplies positioning information.
+    char_captions = [{"char_caption": txt, "centers": [{"x": 0.5, "y": 0.5}]} for txt in char_texts]
 
-    # V5のWeb版に近い生成パラメータ構成。
+    is_v5 = model.startswith("nai-diffusion-5")
     parameters = {
-        "params_version": 4,
+        "params_version": 4 if is_v5 else 3,
         "width": gw,
         "height": gh,
         "scale": float(scale),
         "sampler": str(sampler or "k_euler_ancestral"),
         "steps": int(steps),
         "n_samples": 1,
-        "seed": int(seed) if seed is not None else -1,
         "qualityToggle": False,
         "ucPreset": 0,
-        "negative_prompt": negative_text,
+        "negative_prompt": negative or "",
         "noise_schedule": "karras",
-        "use_coords": False,
-        "characterPrompts": character_prompts,
+        "legacy": False,
+        "legacy_v3_extend": False,
+        "cfg_rescale": 0,
+        "uncond_scale": 1,
+        "add_original_image": False,
+        "sm": False,
+        "sm_dyn": False,
+        "dynamic_thresholding": False,
+        "controlnet_strength": 1,
         "v4_prompt": {
             "caption": {
                 "base_caption": base_input,
                 "char_captions": char_captions,
             },
-            "use_coords": False,
-            "use_order": True,
+            "use_coords": False if is_v5 else bool(char_texts),
+            "use_order": False if is_v5 else True,
+            "legacy_uc": False,
         },
         "v4_negative_prompt": {
             "caption": {
-                "base_caption": negative_text,
-                "char_captions": [],
+                "base_caption": negative or "",
+                "char_captions": [{"char_caption": "", "centers": [{"x": 0.5, "y": 0.5}]} for _ in char_texts],
             },
+            "use_coords": False,
+            "use_order": False,
             "legacy_uc": False,
         },
-        # V5 Web版で使われる基本的な互換パラメータ。
-        "cfg_rescale": 0,
-        "skip_cfg_above_sigma": None,
-        "sm": False,
-        "sm_dyn": False,
-        "dynamic_thresholding": False,
-        "controlnet_strength": 1,
-        "legacy": False,
-        "add_original_image": True,
-        "uncond_scale": 1,
-        "legacy_v3_extend": False,
-        "legacy_uc": False,
-        "normalize_reference_strength_multiple": True,
-        "deliberate_euler_ancestral_bug": False,
-        "prefer_brownian": True,
     }
 
-    # 参照画像を使う既存機能はそのまま維持する。
-    if model.startswith("nai-diffusion-4-5") or model.startswith("nai-diffusion-5"):
+    if seed is not None:
+        parameters["seed"] = int(seed)
+        if is_v5:
+            parameters["extra_noise_seed"] = int(seed)
+
+    # V5 does not use the old Precise Reference/Director Reference path.
+    # Keep that path only for older V4.5 models where it is supported.
+    if not is_v5 and (model.startswith("nai-diffusion-4-5") or model.startswith("nai-diffusion-4")):
         refs, kinds = [], []
         if char_refs and style_refs:
             refs.append(pad_ref(char_refs[0]["uri"])); kinds.append("character&style")
@@ -1000,14 +986,11 @@ def nai_request(prompt, width, height, model, steps=23, scale=5.0, negative="", 
             refs.append(pad_ref(style_refs[0]["uri"])); kinds.append("style")
         if refs:
             parameters["director_reference_images"] = refs
-            parameters["director_reference_descriptions"] = [
-                {"caption": {"base_caption": kinds[0], "char_captions": []}, "legacy_uc": False}
-            ]
+            parameters["director_reference_descriptions"] = [{"caption": {"base_caption": kinds[0], "char_captions": []}, "legacy_uc": False}]
             parameters["director_reference_information_extracted"] = [1]
             parameters["director_reference_strength_values"] = [1]
             parameters["director_reference_secondary_strength_values"] = [0.75]
 
-    # V5はNovelAIの画像生成ホストを直接使用する。
     payload = {
         "input": base_input,
         "model": model,
@@ -1015,77 +998,43 @@ def nai_request(prompt, width, height, model, steps=23, scale=5.0, negative="", 
         "parameters": parameters,
     }
 
-    # APIホストを複数回りせず、NovelAI Web版と同じ画像生成エンドポイントを使用。
-    url = "https://image.novelai.net/ai/generate-image"
-    res = requests.post(
-        url,
-        headers={
-            "Authorization": f"Bearer {NAI_KEY}",
-            "Content-Type": "application/json",
-        },
-        json=payload,
-        timeout=180,
-    )
-    if res.status_code == 200:
-        with zipfile.ZipFile(io.BytesIO(res.content)) as zf:
-            names = [n for n in zf.namelist() if not n.endswith("/")]
-            if not names:
-                raise Exception("NovelAIから画像が返されませんでした")
-            return "data:image/png;base64," + base64.b64encode(zf.read(names[0])).decode()
-
-    raise Exception(f"{res.status_code}: {res.text[:400]}")
-
-def mm_headers():
-    if not MINIMAX_KEY:
-        raise Exception("MINIMAX_API_KEY がありません")
-    return {"Authorization": f"Bearer {MINIMAX_KEY}", "Content-Type": "application/json"}
-
-def mm_upload_path(path, filename):
-    if not MINIMAX_KEY:
-        raise Exception("MINIMAX_API_KEY がありません")
-    with open(path, "rb") as f:
-        res = requests.post(
-            "https://api.minimax.io/v1/files/upload",
-            headers={"Authorization": f"Bearer {MINIMAX_KEY}"},
-            data={"purpose": "video_generation_input"},
-            files={"file": (filename, f)},
-            timeout=120,
-        )
-    if res.status_code not in (200, 201):
-        raise Exception(f"アップロード失敗 {res.status_code}: {res.text[:400]}")
-    data = res.json()
-    fid = (data.get("file") or {}).get("file_id") or data.get("file_id")
-    if fid is None:
-        raise Exception(f"file_idがありません: {str(data)[:400]}")
-    return f"mm_file://{fid}"
-
-def mm_upload_image_uri(image_uri):
-    raw = image_uri
-    if "," in raw and str(raw).startswith("data:"):
-        raw = raw.split(",", 1)[1]
-    try:
-        blob = base64.b64decode(raw)
-    except Exception:
-        raise Exception("画像を送れません")
-    path = os.path.join(VID_DIR, f"mm_{uuid.uuid4().hex}.jpg")
-    with open(path, "wb") as f:
-        f.write(blob)
-    try:
-        return mm_upload_path(path, "ref.jpg")
-    finally:
+    last_err = None
+    # V5 generation is only sent to the current image endpoint. The legacy
+    # api.novelai.net endpoint does not accept the V5 model ID.
+    urls = ["https://image.novelai.net/ai/generate-image"] if is_v5 else NAI_URLS
+    for url in urls:
         try:
-            os.remove(path)
-        except Exception:
-            pass
+            res = requests.post(
+                url,
+                headers={"Authorization": f"Bearer {NAI_KEY}", "Content-Type": "application/json"},
+                json=payload,
+                timeout=180,
+            )
+        except requests.RequestException as e:
+            last_err = str(e)
+            continue
+        if res.status_code == 200:
+            with zipfile.ZipFile(io.BytesIO(res.content)) as zf:
+                return "data:image/png;base64," + base64.b64encode(zf.read(zf.namelist()[0])).decode()
+        last_err = f"{res.status_code}: {res.text[:400]}"
+
+    raise Exception(last_err or "NovelAIの生成に失敗しました")
+
 
 def mm_create_video(payload):
     res = requests.post("https://api.minimax.io/v2/video_generation", headers=mm_headers(), json=payload, timeout=60)
     if res.status_code not in (200, 201, 202):
-        raise Exception(f"{res.status_code}: {res.text[:500]}")
-    data = res.json()
+        # 500は自動再送しない（受付済みなのに応答だけ失敗した可能性があり、二重生成を避けるため）。
+        if res.status_code == 500:
+            raise Exception("MiniMax側で一時的なエラーが発生しました。少し待ってから、もう一度お試しください。")
+        raise Exception(f"動画生成APIエラー {res.status_code}: {res.text[:300]}")
+    try:
+        data = res.json()
+    except Exception:
+        raise Exception("動画生成APIから正しい応答を受け取れませんでした。少し待ってから再試行してください。")
     task_id = data.get("task_id") or (data.get("task") or {}).get("id")
     if not task_id:
-        raise Exception(f"task_idがありません: {str(data)[:400]}")
+        raise Exception("動画生成タスクを開始できませんでした。少し待ってから再試行してください。")
     return task_id
 
 def grok_start_video(image_uri, prompt, duration=6):
@@ -1580,7 +1529,7 @@ defaults = {
     "icon": random.choice(ANIMALS), "email": "", "pending": None, "library": [], "signup_just_completed": False,
     "video_src": None, "video_out": None, "v4_clips": [None] * 4, "v4_prompts": ["", "", "", ""],
     "v4_durs": [5, 5, 5, 5], "v4_count": 4, "v4_layout": "2×2", "v4_play": "同時に動く",
-    "v4_joined": None, "vjob": None, "v4_joining": False, "do_join": False, "v4_audio": "音声を消す", "board_id": "", "community_seen_at": 0, "wait_until": 0, "_booted": False,
+    "v4_joined": None, "vjob": None, "v4_joining": False, "do_join": False, "v4_audio": "音声を消す", "board_id": "", "community_seen_at": 0, "wait_until": 0, "video_starting": False, "_booted": False,
     "menu_open": False, "need_top": True, "act_busy": False, "password_hash": "", "characters": [],
 }
 for k, v in defaults.items():
@@ -1760,15 +1709,21 @@ elif st.session_state.page == "video":
     dur = st.slider("秒数", 5, 10, 6)
     st.caption(f"消費ポイント {video_cost(dur)}")
     if st.button("動画にする", type="primary"):
-        if not st.session_state.video_src:
+        if st.session_state.get("vjob") or st.session_state.get("video_starting"):
+            st.session_state.error = "すでに動画を生成中です。完了するまで新しい動画は開始できません。"
+        elif not st.session_state.video_src:
             st.session_state.error = "画像を選んでください"
         else:
+            st.session_state.video_starting = True
             try:
                 take_points(video_cost(dur))
-                st.session_state.vjob = {"kind": "video", "id": grok_start_video(st.session_state.video_src, motion, dur)}
+                task_id = grok_start_video(st.session_state.video_src, motion, dur)
+                st.session_state.vjob = {"kind": "video", "id": task_id}
                 start_wait(); st.session_state.error = ""
             except Exception as e:
                 st.session_state.error = str(e)
+            finally:
+                st.session_state.video_starting = False
         go("video"); st.rerun()
     if st.session_state.video_out and os.path.exists(st.session_state.video_out):
         st.video(st.session_state.video_out)
@@ -1824,17 +1779,23 @@ elif st.session_state.page == "vmove":
                 finish_action()
             go("vmove"); st.rerun()
     elif st.button("動画を移す", type="primary"):
-        if not st.session_state.get("vmove_vid") or not os.path.exists(st.session_state.vmove_vid):
+        if st.session_state.get("vjob") or st.session_state.get("video_starting"):
+            st.session_state.error = "すでに動画を生成中です。完了するまで新しい動画は開始できません。"
+        elif not st.session_state.get("vmove_vid") or not os.path.exists(st.session_state.vmove_vid):
             st.session_state.error = "動きの動画を入れてください"
         elif not st.session_state.get("vmove_img"):
             st.session_state.error = "キャラの画像を選んでください"
         else:
+            st.session_state.video_starting = True
             try:
                 take_points(cost)
-                st.session_state.vjob = {"kind": "vmove", "id": mm_start_move(st.session_state.vmove_img, st.session_state.vmove_vid, motion, dur)}
+                task_id = mm_start_move(st.session_state.vmove_img, st.session_state.vmove_vid, motion, dur)
+                st.session_state.vjob = {"kind": "vmove", "id": task_id}
                 start_wait(); st.session_state.error = ""
             except Exception as e:
                 st.session_state.error = str(e)
+            finally:
+                st.session_state.video_starting = False
         go("vmove"); st.rerun()
     if st.session_state.get("vmove_out") and os.path.exists(st.session_state.vmove_out):
         st.video(st.session_state.vmove_out)
@@ -1897,15 +1858,21 @@ elif st.session_state.page == "v4":
                         finish_action()
                     go("v4"); st.rerun()
             if st.button("このコマを動画にする", key=f"v4g_{i}"):
-                if not src:
+                if st.session_state.get("vjob") or st.session_state.get("video_starting"):
+                    st.session_state.error = "すでに動画を生成中です。完了するまで新しい動画は開始できません。"
+                elif not src:
                     st.session_state.error = "画像がありません"
                 else:
+                    st.session_state.video_starting = True
                     try:
                         take_points(video_cost(st.session_state.v4_durs[i]))
-                        st.session_state.vjob = {"kind": "v4", "i": i, "id": grok_start_video(src, st.session_state.v4_prompts[i], st.session_state.v4_durs[i])}
+                        task_id = grok_start_video(src, st.session_state.v4_prompts[i], st.session_state.v4_durs[i])
+                        st.session_state.vjob = {"kind": "v4", "i": i, "id": task_id}
                         start_wait(); st.session_state.error = ""
                     except Exception as e:
                         st.session_state.error = str(e)
+                    finally:
+                        st.session_state.video_starting = False
                 go("v4"); st.rerun()
             if st.session_state.v4_clips[i] and os.path.exists(st.session_state.v4_clips[i]):
                 st.video(st.session_state.v4_clips[i])
