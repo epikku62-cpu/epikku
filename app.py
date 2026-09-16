@@ -915,31 +915,81 @@ def nai_wh(w, h):
 def nai_request(prompt, width, height, model, steps=23, scale=5.0, negative="", char_texts=None, char_refs=None, style_refs=None, sampler="k_euler_ancestral", seed=None):
     if not NAI_KEY:
         raise Exception("NOVELAI_API_KEY がありません")
+
     gw, gh = nai_wh(width, height)
-    char_texts = [x.strip() for x in (char_texts or []) if x and x.strip()][:3]
+    char_texts = [x.strip() for x in (char_texts or []) if x and x.strip()][:22]
     char_refs = [x for x in (char_refs or []) if x.get("uri")][:3]
     style_refs = [x for x in (style_refs or []) if x.get("uri")][:3]
-    char_captions, character_prompts = [], []
-    xs, ys = [0.3, 0.7, 0.5], [0.5, 0.5, 0.72]
-    for i, txt in enumerate(char_texts):
-        char_captions.append({"char_caption": txt, "centers": [{"x": xs[i], "y": ys[i]}]})
-        character_prompts.append({"prompt": txt, "uc": "", "center": {"x": xs[i], "y": ys[i]}, "enabled": True})
-    parameters = {
-        "params_version": 3, "width": gw, "height": gh, "scale": float(scale),
-        "sampler": str(sampler or "k_euler_ancestral"), "steps": int(steps), "n_samples": 1,
-        "qualityToggle": False, "ucPreset": 0, "negative_prompt": negative or "",
-        "noise_schedule": "karras", "use_coords": True, "characterPrompts": character_prompts,
-        "v4_prompt": {"caption": {"base_caption": prompt or "", "char_captions": char_captions}, "use_coords": True, "use_order": True},
-        "v4_negative_prompt": {"caption": {"base_caption": negative or "", "char_captions": []}, "legacy_uc": False},
-    }
-    if seed is not None:
-        parameters["seed"] = int(seed)
+
+    # NovelAI V5の通常のマルチキャラクタープロンプトに合わせる。
+    # 画面上のキャラクター欄・吹き出し欄は変更せず、内部だけを調整する。
+    # 座標を固定するとNovelAI側の自動配置と違うため、V5ではuse_coords=Falseにする。
+    char_captions = [
+        {"char_caption": txt}
+        for txt in char_texts
+    ]
+    character_prompts = [
+        {"prompt": txt, "uc": "", "enabled": True}
+        for txt in char_texts
+    ]
+
     base_input = (prompt or "").strip()
     if not base_input and char_texts:
         base_input = char_texts[0]
     if not base_input:
         raise Exception("プロンプトを入れてください")
-    parameters["v4_prompt"]["caption"]["base_caption"] = base_input
+
+    negative_text = negative or ""
+
+    # V5のWeb版に近い生成パラメータ構成。
+    parameters = {
+        "params_version": 4,
+        "width": gw,
+        "height": gh,
+        "scale": float(scale),
+        "sampler": str(sampler or "k_euler_ancestral"),
+        "steps": int(steps),
+        "n_samples": 1,
+        "seed": int(seed) if seed is not None else -1,
+        "qualityToggle": False,
+        "ucPreset": 0,
+        "negative_prompt": negative_text,
+        "noise_schedule": "karras",
+        "use_coords": False,
+        "characterPrompts": character_prompts,
+        "v4_prompt": {
+            "caption": {
+                "base_caption": base_input,
+                "char_captions": char_captions,
+            },
+            "use_coords": False,
+            "use_order": True,
+        },
+        "v4_negative_prompt": {
+            "caption": {
+                "base_caption": negative_text,
+                "char_captions": [],
+            },
+            "legacy_uc": False,
+        },
+        # V5 Web版で使われる基本的な互換パラメータ。
+        "cfg_rescale": 0,
+        "skip_cfg_above_sigma": None,
+        "sm": False,
+        "sm_dyn": False,
+        "dynamic_thresholding": False,
+        "controlnet_strength": 1,
+        "legacy": False,
+        "add_original_image": True,
+        "uncond_scale": 1,
+        "legacy_v3_extend": False,
+        "legacy_uc": False,
+        "normalize_reference_strength_multiple": True,
+        "deliberate_euler_ancestral_bug": False,
+        "prefer_brownian": True,
+    }
+
+    # 参照画像を使う既存機能はそのまま維持する。
     if model.startswith("nai-diffusion-4-5") or model.startswith("nai-diffusion-5"):
         refs, kinds = [], []
         if char_refs and style_refs:
@@ -950,23 +1000,40 @@ def nai_request(prompt, width, height, model, steps=23, scale=5.0, negative="", 
             refs.append(pad_ref(style_refs[0]["uri"])); kinds.append("style")
         if refs:
             parameters["director_reference_images"] = refs
-            parameters["director_reference_descriptions"] = [{"caption": {"base_caption": kinds[0], "char_captions": []}, "legacy_uc": False}]
+            parameters["director_reference_descriptions"] = [
+                {"caption": {"base_caption": kinds[0], "char_captions": []}, "legacy_uc": False}
+            ]
             parameters["director_reference_information_extracted"] = [1]
             parameters["director_reference_strength_values"] = [1]
             parameters["director_reference_secondary_strength_values"] = [0.75]
-    models = [model]
-    if model.startswith("nai-diffusion-5"):
-        parameters["params_version"] = 4
-    last_err = None
-    for mdl in models:
-        payload = {"input": base_input, "model": mdl, "action": "generate", "parameters": parameters}
-        for url in NAI_URLS:
-            res = requests.post(url, headers={"Authorization": f"Bearer {NAI_KEY}", "Content-Type": "application/json"}, json=payload, timeout=180)
-            if res.status_code == 200:
-                with zipfile.ZipFile(io.BytesIO(res.content)) as zf:
-                    return "data:image/png;base64," + base64.b64encode(zf.read(zf.namelist()[0])).decode()
-            last_err = f"{res.status_code}: {res.text[:400]}"
-    raise Exception(last_err or "NovelAIの生成に失敗しました")
+
+    # V5はNovelAIの画像生成ホストを直接使用する。
+    payload = {
+        "input": base_input,
+        "model": model,
+        "action": "generate",
+        "parameters": parameters,
+    }
+
+    # APIホストを複数回りせず、NovelAI Web版と同じ画像生成エンドポイントを使用。
+    url = "https://image.novelai.net/ai/generate-image"
+    res = requests.post(
+        url,
+        headers={
+            "Authorization": f"Bearer {NAI_KEY}",
+            "Content-Type": "application/json",
+        },
+        json=payload,
+        timeout=180,
+    )
+    if res.status_code == 200:
+        with zipfile.ZipFile(io.BytesIO(res.content)) as zf:
+            names = [n for n in zf.namelist() if not n.endswith("/")]
+            if not names:
+                raise Exception("NovelAIから画像が返されませんでした")
+            return "data:image/png;base64," + base64.b64encode(zf.read(names[0])).decode()
+
+    raise Exception(f"{res.status_code}: {res.text[:400]}")
 
 def mm_headers():
     if not MINIMAX_KEY:
