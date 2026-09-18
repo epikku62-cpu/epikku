@@ -316,6 +316,7 @@ os.makedirs(DATA_DIR, exist_ok=True)
 DATA_FILE = os.path.join(DATA_DIR, "studio_data.json")
 USERS_FILE = os.path.join(DATA_DIR, "users_data.json")
 TOKENS_FILE = os.path.join(DATA_DIR, "login_tokens.json")
+USER_ACTIVITY_FILE = os.path.join(DATA_DIR, "user_activity.json")
 PAID_FILE = os.path.join(DATA_DIR, "paid_sessions.json")
 STATS_FILE = os.path.join(DATA_DIR, "visit_stats.json")
 BOARD_FILE = os.path.join(DATA_DIR, "board_data.json")
@@ -400,10 +401,23 @@ def mark_visit():
         touch_user_seen(st.session_state.get("username"))
 
 def touch_user_seen(name):
-    users = load_json(USERS_FILE, {})
-    if name in users and isinstance(users[name], dict):
-        users[name]["last_seen"] = datetime.now().strftime("%Y/%m/%d %H:%M")
-        save_json(USERS_FILE, users)
+    # アクセスのたびに巨大なusers_data.json全体を読み書きしない。
+    # 最終アクセス時刻だけを小さな別ファイルへ保存する。
+    if not name:
+        return
+    now_text = datetime.now().strftime("%Y/%m/%d %H:%M")
+    last = st.session_state.get("_last_seen_touch_text", "")
+    if last == now_text:
+        return
+    try:
+        activity = load_json(USER_ACTIVITY_FILE, {})
+        if not isinstance(activity, dict):
+            activity = {}
+        activity[str(name)] = now_text
+        save_json(USER_ACTIVITY_FILE, activity, backup=False)
+        st.session_state._last_seen_touch_text = now_text
+    except Exception:
+        pass
 
 def scroll_top():
     # ページ切り替え後のスクロール位置をスマートフォンでも確実に先頭へ戻す。
@@ -494,11 +508,11 @@ def restore_login():
     if not token:
         return
     name = load_tokens().get(token)
-    users = load_json(USERS_FILE, {})
-    if name and name in users:
+    user = load_user_record(name) if name else None
+    if name and isinstance(user, dict):
         st.session_state.auth_token = token
         # 初期表示時は保存・Stripe確認を行わず、画面表示を優先する。
-        apply_login(name, users[name], persist=False, sync=False, pending=False)
+        apply_login(name, user, persist=False, sync=False, pending=False)
 
 def start_wait():
     st.session_state.wait_until = time.time() + WAIT_SEC
@@ -574,6 +588,160 @@ def _read_json_file(path):
         return data
     except Exception:
         return None
+
+def _iter_json_object_stream(path):
+    """大きなusers_data.jsonを、トップレベルの1ユーザーずつ読み込む。
+    全ユーザー＋画像履歴を一度にPythonオブジェクト化しないための軽量パーサー。
+    """
+    if not path or not os.path.exists(path) or os.path.getsize(path) <= 2:
+        return
+    decoder = json.JSONDecoder()
+    with open(path, "r", encoding="utf-8") as f:
+        buf = ""
+        eof = False
+        pos = 0
+        started = False
+        while True:
+            while True:
+                while pos < len(buf) and buf[pos].isspace():
+                    pos += 1
+                if pos < len(buf):
+                    break
+                if eof:
+                    return
+                chunk = f.read(1024 * 1024)
+                if not chunk:
+                    eof = True
+                else:
+                    buf = buf[pos:] + chunk
+                    pos = 0
+            if not started:
+                if buf[pos] != "{":
+                    return
+                started = True
+                pos += 1
+            while True:
+                while True:
+                    while pos < len(buf) and buf[pos].isspace():
+                        pos += 1
+                    if pos < len(buf):
+                        break
+                    if eof:
+                        return
+                    chunk = f.read(1024 * 1024)
+                    if not chunk:
+                        eof = True
+                    else:
+                        buf = buf[pos:] + chunk
+                        pos = 0
+                if pos >= len(buf):
+                    return
+                if buf[pos] == "}":
+                    return
+                try:
+                    key, end = decoder.raw_decode(buf, pos)
+                except json.JSONDecodeError as e:
+                    if eof:
+                        return
+                    chunk = f.read(1024 * 1024)
+                    if not chunk:
+                        eof = True
+                    else:
+                        buf = buf[pos:] + chunk
+                        pos = 0
+                    continue
+                pos = end
+                while True:
+                    while pos < len(buf) and buf[pos].isspace():
+                        pos += 1
+                    if pos < len(buf):
+                        break
+                    if eof:
+                        return
+                    chunk = f.read(1024 * 1024)
+                    if not chunk:
+                        eof = True
+                    else:
+                        buf = buf[pos:] + chunk
+                        pos = 0
+                if pos >= len(buf) or buf[pos] != ":":
+                    return
+                pos += 1
+                while True:
+                    while pos < len(buf) and buf[pos].isspace():
+                        pos += 1
+                    if pos < len(buf):
+                        break
+                    if eof:
+                        return
+                    chunk = f.read(1024 * 1024)
+                    if not chunk:
+                        eof = True
+                    else:
+                        buf = buf[pos:] + chunk
+                        pos = 0
+                while True:
+                    try:
+                        value, end = decoder.raw_decode(buf, pos)
+                        break
+                    except json.JSONDecodeError:
+                        if eof:
+                            return
+                        chunk = f.read(1024 * 1024)
+                        if not chunk:
+                            eof = True
+                        else:
+                            buf = buf[pos:] + chunk
+                            pos = 0
+                pos = end
+                yield key, value
+                while True:
+                    while pos < len(buf) and buf[pos].isspace():
+                        pos += 1
+                    if pos < len(buf):
+                        break
+                    if eof:
+                        return
+                    chunk = f.read(1024 * 1024)
+                    if not chunk:
+                        eof = True
+                    else:
+                        buf = buf[pos:] + chunk
+                        pos = 0
+                if pos < len(buf) and buf[pos] == ",":
+                    pos += 1
+                    break
+                if pos < len(buf) and buf[pos] == "}":
+                    return
+                return
+
+
+def load_users_for_login():
+    """ログイン判定用。画像履歴・ライブラリをRAMへ保持しない。"""
+    out = {}
+    try:
+        for name, value in _iter_json_object_stream(USERS_FILE) or ():
+            if isinstance(value, dict):
+                out[name] = {
+                    "password": value.get("password", ""),
+                    "email": value.get("email", ""),
+                }
+    except Exception:
+        return {}
+    return out
+
+
+def load_user_record(name):
+    """指定ユーザーだけを読み込む。"""
+    if not name:
+        return None
+    try:
+        for key, value in _iter_json_object_stream(USERS_FILE) or ():
+            if key == name and isinstance(value, dict):
+                return value
+    except Exception:
+        return None
+    return None
 
 def load_json(path, default):
     data = _read_json_file(path)
@@ -2071,10 +2239,16 @@ elif st.session_state.page == "register":
     lu = st.text_input("メールまたはユーザーネーム", key="lu")
     lp = st.text_input("ログイン用パスワード", type="password", key="lp")
     if st.button("ログインする"):
-        users = load_json(USERS_FILE, {})
+        users = load_users_for_login()
         found = find_user(users, lu)
         if found and users[found]["password"] == hash_password(lp):
-            apply_login(found, users[found]); go("board"); st.rerun()
+            # ログイン時に全ユーザーの画像履歴を保存し直さない。
+            user = load_user_record(found)
+            if isinstance(user, dict):
+                apply_login(found, user, persist=False)
+                go("board"); st.rerun()
+            else:
+                st.error("ログインできません")
         else:
             st.error("ログインできません")
 
@@ -2109,6 +2283,9 @@ elif st.session_state.page == "stats":
 
     users = load_json(USERS_FILE, {})
     valid_users = [(name, u) for name, u in users.items() if isinstance(u, dict)]
+    user_activity = load_json(USER_ACTIVITY_FILE, {})
+    if not isinstance(user_activity, dict):
+        user_activity = {}
     registered = len(valid_users)
     image_users = []
     image_zero = []
@@ -2189,7 +2366,7 @@ elif st.session_state.page == "stats":
     online = []
     recent = []
     for name, u in valid_users:
-        seen = str(u.get("last_seen") or "")
+        seen = str(user_activity.get(name) or u.get("last_seen") or "")
         if not seen:
             continue
         try:
