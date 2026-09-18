@@ -317,6 +317,7 @@ DATA_FILE = os.path.join(DATA_DIR, "studio_data.json")
 USERS_FILE = os.path.join(DATA_DIR, "users_data.json")
 TOKENS_FILE = os.path.join(DATA_DIR, "login_tokens.json")
 USER_ACTIVITY_FILE = os.path.join(DATA_DIR, "user_activity.json")
+USERS_SCHEMA_MARKER = os.path.join(DATA_DIR, ".users_schema_v3")
 PAID_FILE = os.path.join(DATA_DIR, "paid_sessions.json")
 STATS_FILE = os.path.join(DATA_DIR, "visit_stats.json")
 BOARD_FILE = os.path.join(DATA_DIR, "board_data.json")
@@ -508,7 +509,7 @@ def restore_login():
     if not token:
         return
     name = load_tokens().get(token)
-    user = load_user_record(name) if name else None
+    user = load_user_core(name) if name else None
     if name and isinstance(user, dict):
         st.session_state.auth_token = token
         # 初期表示時は保存・Stripe確認を行わず、画面表示を優先する。
@@ -716,23 +717,98 @@ def _iter_json_object_stream(path):
                 return
 
 
-def load_users_for_login():
-    """ログイン判定用。画像履歴・ライブラリをRAMへ保持しない。"""
-    out = {}
+def _json_scalar(text_value):
     try:
-        for name, value in _iter_json_object_stream(USERS_FILE) or ():
-            if isinstance(value, dict):
-                out[name] = {
-                    "password": value.get("password", ""),
-                    "email": value.get("email", ""),
-                }
+        return json.loads(text_value.rstrip().rstrip(","))
+    except Exception:
+        return None
+
+def load_users_for_login():
+    """ログイン判定用。巨大なhistory/libraryをJSONデコードしない。"""
+    out = {}
+    if not USERS_FILE or not os.path.exists(USERS_FILE):
+        return out
+    current = None
+    try:
+        with open(USERS_FILE, "r", encoding="utf-8") as f:
+            for line in f:
+                # json.dump(indent=2)で作られたトップレベルのユーザー行だけを見る。
+                m = re.match(r'^  ("(?:\\.|[^"\\])*")\s*:\s*\{\s*$', line)
+                if m:
+                    try:
+                        current = json.loads(m.group(1))
+                    except Exception:
+                        current = None
+                    if current is not None:
+                        out[current] = {"password": "", "email": ""}
+                    continue
+                if current is None:
+                    continue
+                m = re.match(r'^\s{4}"(password|email)"\s*:\s*(.*)$', line.rstrip("\n"))
+                if m:
+                    value = _json_scalar(m.group(2))
+                    if m.group(1) == "password":
+                        out[current]["password"] = str(value or "")
+                    else:
+                        out[current]["email"] = str(value or "")
     except Exception:
         return {}
     return out
 
+def load_user_core(name):
+    """ログイン直後に必要な小さいユーザー情報だけを読み込む。
+    history/libraryは読み込まないので、ログイン時のRAM使用量を抑える。
+    """
+    if not name or not USERS_FILE or not os.path.exists(USERS_FILE):
+        return None
+    wanted = {
+        "password", "email", "icon", "points", "signup_points_remaining",
+        "community_seen_at", "premium_until", "rank", "stripe_sub",
+        "stripe_customer", "stripe_period"
+    }
+    current = None
+    result = {}
+    try:
+        with open(USERS_FILE, "r", encoding="utf-8") as f:
+            for line in f:
+                m = re.match(r'^  ("(?:\\.|[^"\\])*")\s*:\s*\{\s*$', line)
+                if m:
+                    try:
+                        current = json.loads(m.group(1))
+                    except Exception:
+                        current = None
+                    if current == name:
+                        result = {}
+                    elif current is not None and result:
+                        break
+                    continue
+                if current != name:
+                    continue
+                m = re.match(r'^\s{4}"([^"]+)"\s*:\s*(.*)$', line.rstrip("\n"))
+                if not m:
+                    continue
+                field, rest = m.group(1), m.group(2)
+                if field not in wanted:
+                    continue
+                # characters/history/libraryはここでは扱わない。
+                if rest.lstrip().startswith(("[", "{")):
+                    continue
+                value = _json_scalar(rest)
+                if value is not None:
+                    result[field] = value
+        return result or None
+    except Exception:
+        return None
+
+def load_user_media(name):
+    """必要になった時だけ、ログインユーザーのhistory/libraryを読み込む。"""
+    data = load_user_record(name)
+    if not isinstance(data, dict):
+        return [], []
+    return data.get("history", []) or [], data.get("library", []) or []
 
 def load_user_record(name):
-    """指定ユーザーだけを読み込む。"""
+    """互換用。指定ユーザー1人分だけを読み込む。"""
     if not name:
         return None
     try:
@@ -947,11 +1023,156 @@ def is_premium():
 def member_label():
     return "VIP" if is_premium() else "ブロンズ"
 
+def _ensure_users_schema():
+    """既存ユーザーにも基本フィールドを追加する。画像データは一切JSONデコードしない。"""
+    if not os.path.exists(USERS_FILE) or os.path.exists(USERS_SCHEMA_MARKER):
+        return
+    folder = os.path.dirname(USERS_FILE) or "."
+    tmp = None
+    required = {
+        "stripe_sub": "",
+        "stripe_customer": "",
+        "stripe_period": "",
+        "last_seen": "",
+    }
+    try:
+        fd, tmp = tempfile.mkstemp(prefix=".users_schema_", suffix=".json", dir=folder)
+        with os.fdopen(fd, "w", encoding="utf-8") as out:
+            with open(USERS_FILE, "r", encoding="utf-8") as src:
+                current = None
+                seen = set()
+                inserted = False
+                for line in src:
+                    m = re.match(r'^  ("(?:\\.|[^"\\])*")\s*:\s*\{\s*$', line)
+                    if m:
+                        try:
+                            current = json.loads(m.group(1))
+                        except Exception:
+                            current = None
+                        seen = set()
+                        inserted = False
+                        out.write(line)
+                        continue
+
+                    if current is not None:
+                        fm = re.match(r'^\s{4}"([^"]+)"\s*:', line)
+                        if fm:
+                            seen.add(fm.group(1))
+
+                        if (not inserted
+                                and re.match(r'^\s{4}"history"\s*:', line)):
+                            missing = [k for k in required if k not in seen]
+                            for k in missing:
+                                out.write(f'    {json.dumps(k)}: {json.dumps(required[k], ensure_ascii=False)},\n')
+                            inserted = True
+
+                    out.write(line)
+
+        os.replace(tmp, USERS_FILE)
+        tmp = None
+        try:
+            Path(USERS_SCHEMA_MARKER).write_text("ok", encoding="utf-8")
+        except Exception:
+            pass
+    except Exception:
+        pass
+    finally:
+        if tmp and os.path.exists(tmp):
+            try:
+                os.remove(tmp)
+            except Exception:
+                pass
+
+def _save_user_core_only():
+    """history/library/charactersを読み込まず、ログイン中の基本情報だけを更新する。"""
+    name = str(st.session_state.get("username") or "").strip()
+    if not name or not os.path.exists(USERS_FILE):
+        return False
+
+    values = {
+        "password": st.session_state.get("password_hash", ""),
+        "email": st.session_state.get("email", ""),
+        "icon": st.session_state.get("icon", ""),
+        "points": int(st.session_state.get("points", 0)),
+        "signup_points_remaining": (int(st.session_state.get("signup_points_remaining"))
+                                    if "signup_points_remaining" in st.session_state else None),
+        "community_seen_at": float(st.session_state.get("community_seen_at", 0) or 0),
+        "premium_until": st.session_state.get("premium_until", ""),
+        "rank": "vip" if is_premium() else "ブロンズ",
+        "stripe_sub": st.session_state.get("stripe_sub", ""),
+        "stripe_customer": st.session_state.get("stripe_customer", ""),
+        "stripe_period": st.session_state.get("stripe_period", ""),
+    }
+    wanted = set(values)
+    folder = os.path.dirname(USERS_FILE) or "."
+    os.makedirs(folder, exist_ok=True)
+    tmp = None
+    found = False
+    seen_fields = set()
+    current = None
+    try:
+        fd, tmp = tempfile.mkstemp(prefix=".users_core_", suffix=".json", dir=folder)
+        with os.fdopen(fd, "w", encoding="utf-8") as out:
+            with open(USERS_FILE, "r", encoding="utf-8") as src:
+                for line in src:
+                    m = re.match(r'^  ("(?:\\.|[^"\\])*")\s*:\s*\{\s*$', line)
+                    if m:
+                        try:
+                            current = json.loads(m.group(1))
+                        except Exception:
+                            current = None
+                        if current == name:
+                            found = True
+                            seen_fields = set()
+                        out.write(line)
+                        continue
+
+                    if current == name:
+                        m = re.match(r'^(\s{4}"([^"]+)"\s*:\s*)(.*?)(,\s*)?$', line.rstrip("\n"))
+                        if m and m.group(2) in wanted:
+                            field = m.group(2)
+                            if field == "signup_points_remaining" and values[field] is None:
+                                out.write(line)
+                            else:
+                                out.write(m.group(1) + json.dumps(values[field], ensure_ascii=False) + (m.group(4) or "") + "\n")
+                                seen_fields.add(field)
+                            continue
+                    out.write(line)
+
+        if not found or not wanted.issubset(seen_fields - ({"signup_points_remaining"} if values["signup_points_remaining"] is None else set())):
+            if tmp and os.path.exists(tmp):
+                os.remove(tmp)
+            return False
+
+        os.replace(tmp, USERS_FILE)
+        tmp = None
+        return True
+    except Exception:
+        return False
+    finally:
+        if tmp and os.path.exists(tmp):
+            try:
+                os.remove(tmp)
+            except Exception:
+                pass
+
 def save_user_state():
-    users = load_json(USERS_FILE, {})
     name = st.session_state.get("username")
     if not name:
         return
+
+    # ログイン直後や通常のポイント/VIP更新では、巨大な画像履歴をRAMへ戻さない。
+    # history/library/charactersをまだ読み込んでいない間は基本情報だけを更新する。
+    if (not st.session_state.get("_media_loaded", False)
+            and not st.session_state.get("_characters_loaded", False)):
+        if _save_user_core_only():
+            save_json(DATA_FILE, {"characters": st.session_state.get("characters", [])})
+            return
+
+    # 保存庫・履歴・セットを実際に読み込んだ後だけ、従来どおり対象ユーザーの内容を保存する。
+    users = load_json(USERS_FILE, {})
+    if not isinstance(users, dict):
+        users = {}
     prev = users.get(name) if isinstance(users.get(name), dict) else {}
     users[name] = {
         "password": prev.get("password") or st.session_state.get("password_hash", ""),
@@ -967,17 +1188,35 @@ def save_user_state():
         "rank": "vip" if is_premium() else "ブロンズ",
         "history": st.session_state.get("simple_history", prev.get("history", []))[-30:],
         "library": st.session_state.get("library", prev.get("library", []))[-40:],
-        "last_seen": datetime.now().strftime("%Y/%m/%d %H:%M") if st.session_state.get("logged_in") else prev.get("last_seen", ""),
+        "last_seen": prev.get("last_seen", ""),
         "stripe_sub": st.session_state.get("stripe_sub") or prev.get("stripe_sub", ""),
         "stripe_customer": st.session_state.get("stripe_customer") or prev.get("stripe_customer", ""),
         "stripe_period": st.session_state.get("stripe_period") or prev.get("stripe_period", ""),
     }
-    if not users[name]["password"] and prev.get("password"):
-        users[name]["password"] = prev["password"]
     if prev.get("password") and not users[name]["password"]:
         users[name]["password"] = prev["password"]
     save_json(USERS_FILE, users, backup=False)
-    save_json(DATA_FILE, {"characters": st.session_state.characters})
+    save_json(DATA_FILE, {"characters": st.session_state.get("characters", [])})
+
+def ensure_user_media_loaded():
+    if not st.session_state.get("logged_in") or st.session_state.get("_media_loaded"):
+        return
+    name = st.session_state.get("username")
+    history, library = load_user_media(name)
+    st.session_state.simple_history = history
+    st.session_state.library = library
+    st.session_state._media_loaded = True
+
+def ensure_user_characters_loaded():
+    if not st.session_state.get("logged_in") or st.session_state.get("_characters_loaded"):
+        return
+    name = st.session_state.get("username")
+    data = load_user_record(name)
+    if isinstance(data, dict):
+        st.session_state.characters = data.get("characters", []) or []
+    else:
+        st.session_state.characters = []
+    st.session_state._characters_loaded = True
 
 def load_board():
     data = load_json(BOARD_FILE, {"posts": []})
@@ -1696,8 +1935,11 @@ def apply_login(name, data, persist=True, sync=True, pending=True):
     else:
         st.session_state.community_seen_at = board_last_activity()
     st.session_state.premium_until = data.get("premium_until", "")
-    st.session_state.simple_history = data.get("history", [])
-    st.session_state.library = data.get("library", [])
+    # ログイン時は巨大な画像履歴・保存庫を読み込まない。
+    st.session_state.simple_history = []
+    st.session_state.library = []
+    st.session_state._media_loaded = False
+    st.session_state._characters_loaded = False
     st.session_state.stripe_sub = data.get("stripe_sub", "")
     st.session_state.stripe_customer = data.get("stripe_customer", "")
     st.session_state.stripe_period = data.get("stripe_period", "")
@@ -1761,6 +2003,8 @@ def render_top_menu():
 def get_usable_fonts():
     font_status = prepare_fonts()
     return [k for k, ok in font_status.items() if ok] or ["ゴシック"]
+_ensure_users_schema()
+
 defaults = {
     "logged_in": False, "page": "home", "auth_token": "", "layout": "縦4", "scenes": ["", "", "", ""],
     "scene_chars": ["セットなし"] * 4, "panel_images": [None] * 4, "panel_upload": [False] * 4,
@@ -1772,7 +2016,7 @@ defaults = {
     "icon": random.choice(ANIMALS), "email": "", "pending": None, "library": [], "signup_just_completed": False,
     "video_src": None, "video_out": None, "v4_clips": [None] * 4, "v4_prompts": ["", "", "", ""],
     "v4_durs": [5, 5, 5, 5], "v4_count": 4, "v4_layout": "2×2", "v4_play": "同時に動く",
-    "v4_joined": None, "vjob": None, "v4_joining": False, "do_join": False, "v4_audio": "音声を消す", "board_id": "", "community_seen_at": 0, "wait_until": 0, "video_starting": False, "_booted": False,
+    "v4_joined": None, "vjob": None, "v4_joining": False, "do_join": False, "v4_audio": "音声を消す", "board_id": "", "community_seen_at": 0, "wait_until": 0, "video_starting": False, "_media_loaded": False, "_characters_loaded": False, "_booted": False,
     "menu_open": False, "need_top": True, "act_busy": False, "password_hash": "", "characters": [],
 }
 for k, v in defaults.items():
@@ -1902,6 +2146,7 @@ if st.session_state.page == "help":
         go("register" if not st.session_state.logged_in else "simple"); st.rerun()
 
 elif st.session_state.page == "lib":
+    ensure_user_media_loaded()
     st.subheader("保存庫")
     if not st.session_state.library:
         st.write("まだありません。")
@@ -1917,6 +2162,7 @@ elif st.session_state.page == "lib":
                 st.session_state.library.pop(len(st.session_state.library) - 1 - i); save_user_state(); st.rerun()
 
 elif st.session_state.page == "video":
+    ensure_user_media_loaded()
     st.subheader("動画生成")
     job = st.session_state.get("vjob") if isinstance(st.session_state.get("vjob"), dict) else None
     if job and job.get("kind") == "video":
@@ -1974,6 +2220,7 @@ elif st.session_state.page == "video":
             st.download_button("動画を保存", data=f.read(), file_name="video.mp4", mime="video/mp4")
 
 elif st.session_state.page == "vmove":
+    ensure_user_media_loaded()
     st.subheader("動画を移す")
     st.markdown("＊確認が押せないように見えますが押せています。生成には10分以上かかる場合があります。気長に待ってください。再読み込みなど、画面を変えると生成できなくて、ポイントだけ失う可能性があります。そのままの状態で待ってください。失敗しても保証はいたしません。NSFWはできません。")
     job = st.session_state.get("vjob") if isinstance(st.session_state.get("vjob"), dict) else None
@@ -2046,6 +2293,7 @@ elif st.session_state.page == "vmove":
             st.download_button("動画を保存", data=f.read(), file_name="move.mp4", mime="video/mp4")
 
 elif st.session_state.page == "v4":
+    ensure_user_media_loaded()
     st.subheader("4コマ動画")
     job = st.session_state.get("vjob") if isinstance(st.session_state.get("vjob"), dict) else None
     st.session_state.v4_count = st.radio("コマ数", [2, 3, 4], index=[2, 3, 4].index(int(st.session_state.v4_count)), horizontal=True)
@@ -2229,7 +2477,7 @@ elif st.session_state.page == "register":
             elif email_taken(users, p["email"]) or p["name"] in users:
                 st.error("すでに登録されています")
             else:
-                users[p["name"]] = {"password": p["password"], "email": p["email"], "icon": p["icon"], "characters": [], "points": SIGNUP_POINTS, "signup_points_remaining": SIGNUP_POINTS, "community_seen_at": board_last_activity(), "premium_until": "", "rank": "ブロンズ", "history": [], "library": []}
+                users[p["name"]] = {"password": p["password"], "email": p["email"], "icon": p["icon"], "characters": [], "points": SIGNUP_POINTS, "signup_points_remaining": SIGNUP_POINTS, "community_seen_at": board_last_activity(), "premium_until": "", "rank": "ブロンズ", "history": [], "library": [], "stripe_sub": "", "stripe_customer": "", "stripe_period": "", "last_seen": ""}
                 save_json(USERS_FILE, users)
                 apply_login(p["name"], users[p["name"]])
                 st.session_state.pending = None
@@ -2243,7 +2491,7 @@ elif st.session_state.page == "register":
         found = find_user(users, lu)
         if found and users[found]["password"] == hash_password(lp):
             # ログイン時に全ユーザーの画像履歴を保存し直さない。
-            user = load_user_record(found)
+            user = load_user_core(found)
             if isinstance(user, dict):
                 apply_login(found, user, persist=False)
                 go("board"); st.rerun()
@@ -2410,6 +2658,7 @@ elif st.session_state.page == "simple":
     if st.button("履歴"):
         st.session_state.show_history = True; st.rerun()
     if st.session_state.show_history:
+        ensure_user_media_loaded()
         pick = st.session_state.get("hist_pick")
         if pick:
             st.markdown("### 履歴の内容")
@@ -2551,6 +2800,7 @@ elif st.session_state.page == "simple":
                         sampler=sampler_labels[sampler_name], seed=used_seed,
                     )
                 st.session_state.simple_image = img
+                ensure_user_media_loaded()
                 st.session_state.simple_history.append({"url": img, "time": datetime.now().strftime("%Y/%m/%d %H:%M"), "quality": st.session_state.sq, "background": st.session_state.sb, "chars": list(st.session_state.schars), "bubbles": list(st.session_state.get("sbubbles") or []), "other": st.session_state.so, "negative": st.session_state.sn, "size": size_name, "scale": scale, "steps": steps, "sampler": sampler_name, "seed": used_seed})
                 save_user_state(); st.session_state.error = ""
             except Exception as e:
@@ -2837,6 +3087,7 @@ elif st.session_state.page == "board":
     mark_community_seen()
 
 else:
+    ensure_user_characters_loaded()
     usable_fonts = get_usable_fonts()
     st.subheader("4コマ")
     layout = st.radio("並べ方", list(LAYOUTS.keys()), horizontal=True)
