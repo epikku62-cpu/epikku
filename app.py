@@ -2122,7 +2122,7 @@ defaults = {
     "panel_bubbles": [[], [], [], []], "drafts": [empty_bubble() for _ in range(4)],
     "error": "", "busy_index": None, "combined": None, "points": 0, "premium_until": "",
     "simple_image": None, "simple_busy": False, "simple_history": [], "show_history": False, "simple_size": "", "simple_scale": 5.0, "simple_steps": 20, "simple_sampler": "Euler Ancestral",
-    "hist_pick": None, "sq": "", "sb": "", "so": "", "sn": "", "schars": [""], "sbubbles": [""],
+    "hist_pick": None, "lib_pick": None, "show_library_picker": False, "sq": "", "sb": "", "so": "", "sn": "", "schars": [""], "sbubbles": [""],
     "icon": random.choice(ANIMALS), "email": "", "pending": None, "library": [], "library_page": 0, "history_page": 0, "signup_just_completed": False,
     "video_src": None, "video_out": None, "v4_clips": [None] * 4, "v4_prompts": ["", "", "", ""],
     "v4_durs": [5, 5, 5, 5], "v4_count": 4, "v4_layout": "2×2", "v4_play": "同時に動く",
@@ -2271,11 +2271,18 @@ elif st.session_state.page == "lib":
         for i, item in visible:
             st.image(item["url"], width=160)
             st.caption(f"{item.get('label','')} {item.get('time','')}")
-            a, b = st.columns(2)
+            a, b, c = st.columns(3)
             with a:
+                if site_work_kind(item) == "simple":
+                    if st.button("画像生成に使う", key=f"libp_{i}", type="primary"):
+                        apply_simple_settings(item)
+                        st.session_state.show_history = False
+                        st.session_state.hist_pick = None
+                        go("simple"); st.rerun()
+            with b:
                 if st.button("動画にする", key=f"libv_{i}"):
                     st.session_state.video_src = item["url"]; go("video"); st.rerun()
-            with b:
+            with c:
                 if st.button("消す", key=f"libd_{i}"):
                     real_index = len(st.session_state.library) - 1 - i
                     st.session_state.library.pop(real_index); save_user_state(); st.rerun()
@@ -2775,6 +2782,74 @@ elif st.session_state.page == "simple":
     )
     if st.button("👥 コミュニティに移動", use_container_width=True, key="simple_to_community"):
         go("board"); st.rerun()
+    if st.button("📁 保存庫から使う", use_container_width=True, key="simple_open_library"):
+        ensure_user_media_loaded()
+        st.session_state.show_library_picker = True
+        st.session_state.lib_pick = None
+        st.rerun()
+    if st.session_state.get("show_library_picker"):
+        ensure_user_media_loaded()
+        st.markdown("### 保存庫から使う")
+        st.caption("保存庫に入れた画像生成の設定を選んで、画像生成モードへ戻せます。")
+        library_items = [x for x in (st.session_state.get("library") or []) if isinstance(x, dict)]
+        simple_items = [x for x in library_items if site_work_kind(x) == "simple"]
+        if not simple_items:
+            st.write("画像生成モードで作った保存画像はまだありません。")
+            if st.button("閉じる", key="simple_library_close_empty"):
+                st.session_state.show_library_picker = False
+                st.rerun()
+        else:
+            total_lib = len(simple_items)
+            lib_pages = max(1, math.ceil(total_lib / MEDIA_PAGE_SIZE))
+            lib_page = min(max(int(st.session_state.get("simple_library_page", 0)), 0), lib_pages - 1)
+            st.session_state.simple_library_page = lib_page
+            lstart = lib_page * MEDIA_PAGE_SIZE
+            visible_lib = list(enumerate(reversed(simple_items)))[lstart:lstart + MEDIA_PAGE_SIZE]
+            for li, item in visible_lib:
+                label = item.get("label") or "保存画像"
+                lib_time = item.get("time") or "日時不明"
+                if st.button(f"{lib_time}　{label}", key=f"simple_lib_pick_{li}", use_container_width=True):
+                    st.session_state.lib_pick = item
+                    st.rerun()
+            if lib_pages > 1:
+                l1, l2, l3 = st.columns([1, 2, 1])
+                with l1:
+                    if lib_page > 0 and st.button("← 前へ", key="simple_lib_prev"):
+                        st.session_state.simple_library_page = lib_page - 1
+                        st.rerun()
+                with l2:
+                    st.caption(f"{lib_page + 1} / {lib_pages} ページ")
+                with l3:
+                    if lib_page < lib_pages - 1 and st.button("次へ →", key="simple_lib_next"):
+                        st.session_state.simple_library_page = lib_page + 1
+                        st.rerun()
+            if st.session_state.get("lib_pick"):
+                pick = st.session_state.lib_pick
+                st.markdown("#### 選択中の設定")
+                st.caption(pick.get("time") or "日時不明")
+                st.write("画質: " + (pick.get("quality") or "なし"))
+                st.write("背景: " + (pick.get("background") or "なし"))
+                for i, c in enumerate(pick.get("chars") or []):
+                    if str(c).strip():
+                        st.write(f"キャラ{i+1}: {c}")
+                st.write("その他: " + (pick.get("other") or "なし"))
+                st.write("除外: " + (pick.get("negative") or "なし"))
+                a, b = st.columns(2)
+                with a:
+                    if st.button("この設定を使う", type="primary", key="simple_library_apply"):
+                        apply_simple_settings(pick)
+                        st.session_state.lib_pick = None
+                        st.session_state.show_library_picker = False
+                        st.rerun()
+                with b:
+                    if st.button("戻る", key="simple_library_back"):
+                        st.session_state.lib_pick = None
+                        st.rerun()
+            if st.button("保存庫から使うを閉じる", key="simple_library_close"):
+                st.session_state.show_library_picker = False
+                st.session_state.lib_pick = None
+                st.rerun()
+        st.stop()
     if st.session_state.get("signup_just_completed"):
         st.success(f"🎉 登録ありがとうございます！新規登録特典として **{SIGNUP_POINTS}ポイント** プレゼントしました。")
         st.markdown(
