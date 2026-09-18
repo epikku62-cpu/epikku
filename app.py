@@ -18,6 +18,7 @@ import time
 import requests
 import shutil
 import tempfile
+import gc
 from email.mime.text import MIMEText
 from io import BytesIO
 from datetime import datetime, timedelta
@@ -649,16 +650,29 @@ def download_one(path, urls):
         return True
     for url in urls:
         try:
-            r = requests.get(url, timeout=45)
-            if r.status_code == 200 and len(r.content) > 8000:
+            with requests.get(url, timeout=45, stream=True) as r:
+                if r.status_code != 200:
+                    continue
+                total = 0
                 with open(path, "wb") as f:
-                    f.write(r.content)
-                try:
-                    ImageFont.truetype(path, 24)
-                    return True
-                except Exception:
+                    for chunk in r.iter_content(chunk_size=1024 * 1024):
+                        if chunk:
+                            total += len(chunk)
+                            f.write(chunk)
+                if total > 8000:
+                    try:
+                        ImageFont.truetype(path, 24)
+                        return True
+                    except Exception:
+                        pass
+                if os.path.exists(path):
                     os.remove(path)
         except Exception:
+            if os.path.exists(path):
+                try:
+                    os.remove(path)
+                except Exception:
+                    pass
             continue
     return False
 
@@ -684,10 +698,20 @@ def uri_to_image(uri):
     if not uri:
         return None
     if uri.startswith("data:"):
-        return Image.open(BytesIO(base64.b64decode(uri.split(",", 1)[1]))).convert("RGB")
-    res = requests.get(uri, timeout=90)
-    res.raise_for_status()
-    return Image.open(BytesIO(res.content)).convert("RGB")
+        raw = base64.b64decode(uri.split(",", 1)[1])
+        try:
+            with Image.open(BytesIO(raw)) as im:
+                return im.convert("RGB")
+        finally:
+            del raw
+    with requests.get(uri, timeout=90, stream=True) as res:
+        res.raise_for_status()
+        raw = res.content
+    try:
+        with Image.open(BytesIO(raw)) as im:
+            return im.convert("RGB")
+    finally:
+        del raw
 
 def shrink_for_video(image_uri):
     img = uri_to_image(image_uri)
@@ -698,8 +722,14 @@ def shrink_for_video(image_uri):
 
 def save_upload_mp4(uploaded):
     path = os.path.join(VID_DIR, f"up_{uuid.uuid4().hex}.mp4")
+    # UploadedFileの全バイトを別の巨大なbytesへコピーしない。
     with open(path, "wb") as f:
-        f.write(uploaded.getvalue())
+        uploaded.seek(0)
+        while True:
+            chunk = uploaded.read(1024 * 1024)
+            if not chunk:
+                break
+            f.write(chunk)
     r = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", path], capture_output=True, text=True)
     try:
         sec = float((r.stdout or "0").strip() or 0)
@@ -714,11 +744,20 @@ def save_upload_mp4(uploaded):
     return path
 
 def file_to_data_uri(path, mime="video/mp4"):
-    with open(path, "rb") as f:
-        raw = f.read()
-    if len(raw) > 45 * 1024 * 1024:
+    size = os.path.getsize(path)
+    if size > 45 * 1024 * 1024:
         raise Exception("ファイルが大きすぎます")
-    return f"data:{mime};base64," + base64.b64encode(raw).decode()
+    # 45MB級の動画でも、元ファイル全体をbytesとして複製してから
+    # Base64化することを避ける。API仕様上data URIは必要なので、
+    # Base64文字列だけを最終的にメモリへ保持する。
+    encoded_parts = []
+    with open(path, "rb") as f:
+        while True:
+            chunk = f.read(3 * 1024 * 1024)
+            if not chunk:
+                break
+            encoded_parts.append(base64.b64encode(chunk).decode("ascii"))
+    return f"data:{mime};base64," + "".join(encoded_parts)
 
 def pad_ref(uri):
     img = uri_to_image(uri).convert("RGB")
@@ -830,8 +869,7 @@ def save_board_image(uri, pid):
 def board_image_uri(post):
     path = post.get("image") or ""
     if path and os.path.exists(path):
-        with open(path, "rb") as f:
-            return "data:image/jpeg;base64," + base64.b64encode(f.read()).decode()
+        return "data:image/jpeg;base64," + file_b64(path)
     return post.get("url") or ""
 
 def add_library(uri, label="", extra=None):
@@ -1014,8 +1052,34 @@ def nai_request(prompt, width, height, model, steps=23, scale=5.0, negative="", 
             last_err = str(e)
             continue
         if res.status_code == 200:
-            with zipfile.ZipFile(io.BytesIO(res.content)) as zf:
-                return "data:image/png;base64," + base64.b64encode(zf.read(zf.namelist()[0])).decode()
+            # NovelAIのZIPレスポンス全体をres.contentとして保持し続けない。
+            # 一時ファイルへストリーム保存してから展開することでピークRAMを下げる。
+            zip_path = None
+            try:
+                with tempfile.NamedTemporaryFile(prefix="nai_", suffix=".zip", delete=False) as tf:
+                    zip_path = tf.name
+                    for chunk in res.iter_content(chunk_size=1024 * 1024):
+                        if chunk:
+                            tf.write(chunk)
+                with zipfile.ZipFile(zip_path) as zf:
+                    names = [n for n in zf.namelist() if not n.endswith("/")]
+                    if not names:
+                        raise Exception("NovelAIから画像データを受け取れませんでした")
+                    png_raw = zf.read(names[0])
+                result = "data:image/png;base64," + base64.b64encode(png_raw).decode("ascii")
+                del png_raw
+                return result
+            finally:
+                try:
+                    res.close()
+                except Exception:
+                    pass
+                if zip_path and os.path.exists(zip_path):
+                    try:
+                        os.remove(zip_path)
+                    except Exception:
+                        pass
+                gc.collect()
         last_err = f"{res.status_code}: {res.text[:400]}"
 
     raise Exception(last_err or "NovelAIの生成に失敗しました")
@@ -1088,11 +1152,22 @@ def grok_poll_video(request_id):
                 video_url = ((rec.json().get("file") or {}).get("download_url")) or video_url
         if not video_url or not str(video_url).startswith("http"):
             return "error", str(d)[:500]
-        raw = requests.get(str(video_url), timeout=90)
-        raw.raise_for_status()
         path = os.path.join(VID_DIR, f"{uuid.uuid4().hex}.mp4")
-        with open(path, "wb") as f:
-            f.write(raw.content)
+        try:
+            with requests.get(str(video_url), timeout=90, stream=True) as raw:
+                raw.raise_for_status()
+                with open(path, "wb") as f:
+                    for chunk in raw.iter_content(chunk_size=1024 * 1024):
+                        if chunk:
+                            f.write(chunk)
+        except Exception:
+            if os.path.exists(path):
+                try:
+                    os.remove(path)
+                except Exception:
+                    pass
+            raise
+        gc.collect()
         return "done", path
     if status in ("failed", "fail", "cancelled", "canceled"):
         return "error", str(task.get("error") or d.get("error_message") or d)[:400]
