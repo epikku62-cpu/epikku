@@ -800,12 +800,122 @@ def load_user_core(name):
     except Exception:
         return None
 
+HISTORY_KEEP_DAYS = 3
+MEDIA_PAGE_SIZE = 10
+
+def _history_is_recent(item, now=None):
+    """履歴は生成日時から3日以内だけ残す。日時を読めない古い形式は残す。"""
+    if not isinstance(item, dict):
+        return False
+    value = str(item.get("time") or "").strip()
+    if not value:
+        return True
+    try:
+        created = datetime.strptime(value, "%Y/%m/%d %H:%M")
+    except Exception:
+        return True
+    now = now or datetime.now()
+    return created >= now - timedelta(days=HISTORY_KEEP_DAYS)
+
+def _json_bracket_delta(text):
+    """JSON文字列中の[]{}の増減を、文字列リテラルを無視して数える。"""
+    delta = 0
+    in_str = False
+    esc = False
+    for ch in text:
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch in "[{":
+            delta += 1
+        elif ch in "]}":
+            delta -= 1
+    return delta
+
+def _replace_user_history_in_file(name, history):
+    """巨大なusers_data.json全体をPythonのdictにせず、対象ユーザーの履歴だけ置換する。"""
+    if not name or not os.path.exists(USERS_FILE):
+        return False
+    folder = os.path.dirname(USERS_FILE) or "."
+    tmp = None
+    current_user = None
+    replacing = False
+    depth = 0
+    found = False
+    try:
+        fd, tmp = tempfile.mkstemp(prefix=".users_history_", suffix=".json", dir=folder)
+        replacement = json.dumps(history or [], ensure_ascii=False, separators=(",", ":"))
+        with os.fdopen(fd, "w", encoding="utf-8") as out:
+            with open(USERS_FILE, "r", encoding="utf-8") as src:
+                for line in src:
+                    if replacing:
+                        depth += _json_bracket_delta(line)
+                        if depth <= 0:
+                            replacing = False
+                        continue
+
+                    m = re.match(r'^  ("(?:\\.|[^"\\])*")\s*:\s*\{\s*$', line)
+                    if m:
+                        try:
+                            current_user = json.loads(m.group(1))
+                        except Exception:
+                            current_user = None
+                        out.write(line)
+                        continue
+
+                    if current_user == name:
+                        m = re.match(r'^(\s{4})"history"\s*:\s*(.*)$', line.rstrip("\n"))
+                        if m:
+                            old_value = m.group(2)
+                            depth = _json_bracket_delta(old_value)
+                            comma = "," if old_value.rstrip().endswith(",") else ""
+                            # 配列の先頭行だけを新しい履歴に置き換える。
+                            out.write(f'{m.group(1)}"history": {replacement}{comma}\n')
+                            found = True
+                            if depth > 0:
+                                replacing = True
+                            continue
+                    out.write(line)
+        if not found:
+            if tmp and os.path.exists(tmp):
+                os.remove(tmp)
+            return False
+        os.replace(tmp, USERS_FILE)
+        tmp = None
+        return True
+    except Exception:
+        return False
+    finally:
+        if tmp and os.path.exists(tmp):
+            try:
+                os.remove(tmp)
+            except Exception:
+                pass
+
 def load_user_media(name):
-    """必要になった時だけ、ログインユーザーのhistory/libraryを読み込む。"""
+    """保存庫・履歴を必要になった時だけ読み込む。履歴は3日を超えたものを自動削除する。"""
     data = load_user_record(name)
     if not isinstance(data, dict):
         return [], []
-    return data.get("history", []) or [], data.get("library", []) or []
+    now = datetime.now()
+    raw_history = data.get("history", []) or []
+    if not isinstance(raw_history, list):
+        raw_history = []
+    history = [x for x in raw_history if _history_is_recent(x, now)]
+    # 古い履歴を実データからも削除。ただし巨大なusers全体をRAMへ読み直さない。
+    if len(history) != len(raw_history):
+        _replace_user_history_in_file(name, history)
+    library = data.get("library", []) or []
+    if not isinstance(library, list):
+        library = []
+    return history, library
 
 def load_user_record(name):
     """互換用。指定ユーザー1人分だけを読み込む。"""
@@ -2013,7 +2123,7 @@ defaults = {
     "error": "", "busy_index": None, "combined": None, "points": 0, "premium_until": "",
     "simple_image": None, "simple_busy": False, "simple_history": [], "show_history": False, "simple_size": "", "simple_scale": 5.0, "simple_steps": 20, "simple_sampler": "Euler Ancestral",
     "hist_pick": None, "sq": "", "sb": "", "so": "", "sn": "", "schars": [""], "sbubbles": [""],
-    "icon": random.choice(ANIMALS), "email": "", "pending": None, "library": [], "signup_just_completed": False,
+    "icon": random.choice(ANIMALS), "email": "", "pending": None, "library": [], "library_page": 0, "history_page": 0, "signup_just_completed": False,
     "video_src": None, "video_out": None, "v4_clips": [None] * 4, "v4_prompts": ["", "", "", ""],
     "v4_durs": [5, 5, 5, 5], "v4_count": 4, "v4_layout": "2×2", "v4_play": "同時に動く",
     "v4_joined": None, "vjob": None, "v4_joining": False, "do_join": False, "v4_audio": "音声を消す", "board_id": "", "community_seen_at": 0, "wait_until": 0, "video_starting": False, "_media_loaded": False, "_characters_loaded": False, "_booted": False,
@@ -2150,16 +2260,35 @@ elif st.session_state.page == "lib":
     st.subheader("保存庫")
     if not st.session_state.library:
         st.write("まだありません。")
-    for i, item in enumerate(reversed(st.session_state.library)):
-        st.image(item["url"], width=160)
-        st.caption(f"{item.get('label','')} {item.get('time','')}")
-        a, b = st.columns(2)
-        with a:
-            if st.button("動画にする", key=f"libv_{i}"):
-                st.session_state.video_src = item["url"]; go("video"); st.rerun()
-        with b:
-            if st.button("消す", key=f"libd_{i}"):
-                st.session_state.library.pop(len(st.session_state.library) - 1 - i); save_user_state(); st.rerun()
+    else:
+        # 保存庫は永久保存。ただし画面には10件ずつ表示して、一度に大量表示しない。
+        total = len(st.session_state.library)
+        pages = max(1, math.ceil(total / MEDIA_PAGE_SIZE))
+        page = min(max(int(st.session_state.get("library_page", 0)), 0), pages - 1)
+        st.session_state.library_page = page
+        start = page * MEDIA_PAGE_SIZE
+        visible = list(enumerate(reversed(st.session_state.library)))[start:start + MEDIA_PAGE_SIZE]
+        for i, item in visible:
+            st.image(item["url"], width=160)
+            st.caption(f"{item.get('label','')} {item.get('time','')}")
+            a, b = st.columns(2)
+            with a:
+                if st.button("動画にする", key=f"libv_{i}"):
+                    st.session_state.video_src = item["url"]; go("video"); st.rerun()
+            with b:
+                if st.button("消す", key=f"libd_{i}"):
+                    real_index = len(st.session_state.library) - 1 - i
+                    st.session_state.library.pop(real_index); save_user_state(); st.rerun()
+        if pages > 1:
+            p1, p2, p3 = st.columns([1, 2, 1])
+            with p1:
+                if page > 0 and st.button("← 前へ", key="lib_prev"):
+                    st.session_state.library_page = page - 1; st.rerun()
+            with p2:
+                st.caption(f"{page + 1} / {pages} ページ（全{total}件）")
+            with p3:
+                if page < pages - 1 and st.button("次へ →", key="lib_next"):
+                    st.session_state.library_page = page + 1; st.rerun()
 
 elif st.session_state.page == "video":
     ensure_user_media_loaded()
@@ -2697,11 +2826,27 @@ elif st.session_state.page == "simple":
                 st.write("履歴はまだありません")
             else:
                 st.caption("生成した日時を押すと、そのときの設定を確認できます")
-                for hi, item in enumerate(reversed(st.session_state.simple_history)):
+                total_hist = len(st.session_state.simple_history)
+                hist_pages = max(1, math.ceil(total_hist / MEDIA_PAGE_SIZE))
+                hist_page = min(max(int(st.session_state.get("history_page", 0)), 0), hist_pages - 1)
+                st.session_state.history_page = hist_page
+                hstart = hist_page * MEDIA_PAGE_SIZE
+                visible_hist = list(enumerate(reversed(st.session_state.simple_history)))[hstart:hstart + MEDIA_PAGE_SIZE]
+                for hi, item in visible_hist:
                     hist_time = item.get("time") or "日時不明"
                     if st.button(hist_time, key=f"hpick_{hi}", use_container_width=True):
                         st.session_state.hist_pick = item
                         st.rerun()
+                if hist_pages > 1:
+                    h1, h2, h3 = st.columns([1, 2, 1])
+                    with h1:
+                        if hist_page > 0 and st.button("← 前へ", key="hist_prev"):
+                            st.session_state.history_page = hist_page - 1; st.rerun()
+                    with h2:
+                        st.caption(f"{hist_page + 1} / {hist_pages} ページ")
+                    with h3:
+                        if hist_page < hist_pages - 1 and st.button("次へ →", key="hist_next"):
+                            st.session_state.history_page = hist_page + 1; st.rerun()
         st.stop()
     st.text_area("画質プロンプト", key="sq")
     st.text_area("背景プロンプト", key="sb")
