@@ -1021,97 +1021,6 @@ def nai_request(prompt, width, height, model, steps=23, scale=5.0, negative="", 
     raise Exception(last_err or "NovelAIの生成に失敗しました")
 
 
-def mm_headers(json_body=True):
-    if not MINIMAX_KEY:
-        raise Exception("MINIMAX_API_KEY が設定されていません")
-    headers = {"Authorization": f"Bearer {MINIMAX_KEY}"}
-    if json_body:
-        headers["Content-Type"] = "application/json"
-    return headers
-
-def _mm_file_id_from_upload(data):
-    if not isinstance(data, dict):
-        return ""
-    file_obj = data.get("file") if isinstance(data.get("file"), dict) else {}
-    file_id = (
-        file_obj.get("file_id")
-        or file_obj.get("id")
-        or data.get("file_id")
-        or data.get("id")
-    )
-    return str(file_id or "").strip()
-
-def mm_upload_bytes(raw, filename, mime="application/octet-stream"):
-    if not raw:
-        raise Exception("アップロードするファイルが空です")
-    res = requests.post(
-        "https://api.minimax.io/v1/files/upload",
-        headers=mm_headers(json_body=False),
-        data={"purpose": "video_generation_input"},
-        files={"file": (filename, raw, mime)},
-        timeout=120,
-    )
-    if res.status_code not in (200, 201):
-        raise Exception(f"ファイルアップロードに失敗しました {res.status_code}: {res.text[:300]}")
-    try:
-        data = res.json()
-    except Exception:
-        raise Exception("ファイルアップロードの応答を読めませんでした")
-    file_id = _mm_file_id_from_upload(data)
-    if not file_id:
-        raise Exception("ファイルIDを取得できませんでした")
-    if file_id.startswith("mm_file://"):
-        return file_id
-    return f"mm_file://{file_id}"
-
-def mm_upload_path(path, filename="ref.mp4"):
-    if not path or not os.path.exists(path):
-        raise Exception("参照動画ファイルが見つかりません")
-    name = filename or os.path.basename(path) or "ref.mp4"
-    mime = "video/mp4"
-    lower = name.lower()
-    if lower.endswith(".mov"):
-        mime = "video/quicktime"
-    elif lower.endswith(".webm"):
-        mime = "video/webm"
-    with open(path, "rb") as f:
-        raw = f.read()
-    return mm_upload_bytes(raw, name, mime)
-
-def mm_upload_image_uri(image_uri):
-    if not image_uri:
-        raise Exception("画像がありません")
-    uri = str(image_uri).strip()
-    if uri.startswith("mm_file://"):
-        return uri
-    filename = "frame.jpg"
-    mime = "image/jpeg"
-    if uri.startswith("data:"):
-        header, b64 = uri.split(",", 1)
-        raw = base64.b64decode(b64)
-        if "png" in header:
-            filename, mime = "frame.png", "image/png"
-        elif "webp" in header:
-            filename, mime = "frame.webp", "image/webp"
-        else:
-            filename, mime = "frame.jpg", "image/jpeg"
-        return mm_upload_bytes(raw, filename, mime)
-    if uri.startswith("http://") or uri.startswith("https://"):
-        # MiniMaxは公開URLも受け付けるが、期限切れやブロックを避けるためアップロードする
-        res = requests.get(uri, timeout=90)
-        res.raise_for_status()
-        ctype = (res.headers.get("Content-Type") or "").split(";")[0].strip().lower()
-        if "png" in ctype:
-            filename, mime = "frame.png", "image/png"
-        elif "webp" in ctype:
-            filename, mime = "frame.webp", "image/webp"
-        else:
-            filename, mime = "frame.jpg", "image/jpeg"
-        return mm_upload_bytes(res.content, filename, mime)
-    if os.path.exists(uri):
-        return mm_upload_path(uri, os.path.basename(uri) or "frame.jpg")
-    raise Exception("画像の形式が分かりません")
-
 def mm_create_video(payload):
     res = requests.post("https://api.minimax.io/v2/video_generation", headers=mm_headers(), json=payload, timeout=60)
     if res.status_code not in (200, 201, 202):
@@ -1609,6 +1518,7 @@ def render_top_menu():
 def get_usable_fonts():
     font_status = prepare_fonts()
     return [k for k, ok in font_status.items() if ok] or ["ゴシック"]
+
 defaults = {
     "logged_in": False, "page": "home", "auth_token": "", "layout": "縦4", "scenes": ["", "", "", ""],
     "scene_chars": ["セットなし"] * 4, "panel_images": [None] * 4, "panel_upload": [False] * 4,
@@ -1622,6 +1532,7 @@ defaults = {
     "v4_durs": [5, 5, 5, 5], "v4_count": 4, "v4_layout": "2×2", "v4_play": "同時に動く",
     "v4_joined": None, "vjob": None, "v4_joining": False, "do_join": False, "v4_audio": "音声を消す", "board_id": "", "community_seen_at": 0, "wait_until": 0, "video_starting": False, "_booted": False,
     "menu_open": False, "need_top": True, "act_busy": False, "password_hash": "", "characters": [],
+    "vmove_vid": None, "vmove_img": None, "vmove_out": None, "stripe_sub": "", "stripe_customer": "", "stripe_period": "",
 }
 for k, v in defaults.items():
     if k not in st.session_state:
@@ -1739,7 +1650,7 @@ if st.session_state.error:
     if st.button("通知を閉じる"):
         st.session_state.error = ""; st.rerun()
 
-if st.session_state.page == "help":
+elif st.session_state.page == "help":
     st.markdown(f"""<div style="color:#111;background:#fff;padding:16px;border-radius:12px;">
     <h2>画像生成モード</h2><p>ポイントを消費して画像生成<br>日本語で作成可能<br>おすすめ</p>
     <h2>セット</h2><p>絵柄の登録<br>キャラの登録<br>登録したら4コマ画像生成の時、絵柄、キャラが反映される</p>
@@ -2013,8 +1924,6 @@ elif st.session_state.page == "icon":
 elif st.session_state.page == "shop":
     if st.session_state.logged_in:
         credit_pending_checkouts(force=True)
-    if st.session_state.logged_in:
-        credit_pending_checkouts()
     st.subheader("ポイント購入")
     if not st.session_state.logged_in:
         st.warning("購入にはログインが必要です。")
@@ -2675,7 +2584,91 @@ elif st.session_state.page == "board":
     # コミュニティを開いた時点までを既読にする。
     mark_community_seen()
 
-else:
+elif st.session_state.page == "plan":
+    st.subheader("月額登録（VIP）")
+    st.write(f"月額 {MONTHLY_PRICE}円で、セット機能・大きなサイズが使えます。更新ごとに {MONTHLY_POINTS}ポイントが付きます。")
+    if not st.session_state.logged_in:
+        st.warning("月額登録にはログインが必要です。")
+    elif stripe is None or not STRIPE_SECRET_KEY:
+        st.error("決済設定がまだです。")
+    else:
+        if is_premium():
+            st.success(f"VIP有効期限: {st.session_state.get('premium_until') or '確認中'}")
+            if st.session_state.get("stripe_sub") and st.button("月額VIPを解約する"):
+                ok, msg = cancel_subscription_now()
+                st.session_state.error = "" if ok else msg
+                if ok:
+                    st.success(msg)
+                go("plan"); st.rerun()
+        if st.button(f"{MONTHLY_PRICE}円で月額登録する", type="primary"):
+            try:
+                items = []
+                if STRIPE_PRICE_ID:
+                    items = [{"price": STRIPE_PRICE_ID, "quantity": 1}]
+                else:
+                    items = [{
+                        "price_data": {
+                            "currency": "jpy",
+                            "unit_amount": MONTHLY_PRICE,
+                            "recurring": {"interval": "month"},
+                            "product_data": {"name": "panel AI. 月額VIP"},
+                        },
+                        "quantity": 1,
+                    }]
+                session = stripe_checkout(
+                    "subscription",
+                    items,
+                    None,
+                    None,
+                    {"kind": "plan", "user": st.session_state.get("username") or ""},
+                )
+                st.markdown(f"[決済ページへ進む]({session.url})")
+            except Exception as e:
+                st.error(str(e))
+        if st.button("決済の反映を確認する"):
+            credit_pending_checkouts(force=True)
+            sync_subscription(force=True)
+            go("plan"); st.rerun()
+
+elif st.session_state.page == "chars":
+    st.subheader("セット")
+    if not st.session_state.logged_in:
+        st.warning("ログインしてください")
+        st.stop()
+    if not is_premium() and not is_owner():
+        st.warning("セット機能はVIP専用です。月額登録から開放できます。")
+        if st.button("月額登録へ"):
+            go("plan"); st.rerun()
+        st.stop()
+    st.caption("キャラ画像と絵柄画像を登録すると、4コマ生成時にセットとして選べます。")
+    sets = list(st.session_state.characters or [])
+    if sets:
+        for i, ch in enumerate(sets):
+            with st.expander(char_label(ch), expanded=False):
+                st.write(f"キャラ参照 {len(normalize_refs(ch.get('chars')))}枚 / 絵柄参照 {len(normalize_refs(ch.get('styles')))}枚")
+                if st.button("このセットを消す", key=f"delset_{i}"):
+                    st.session_state.characters.pop(i)
+                    save_user_state()
+                    go("chars"); st.rerun()
+    name = st.text_input("セット名", key="set_new_name")
+    cup = st.file_uploader("キャラ画像（最大3枚）", type=["png", "jpg", "jpeg"], accept_multiple_files=True, key="set_chars")
+    sup = st.file_uploader("絵柄画像（最大3枚）", type=["png", "jpg", "jpeg"], accept_multiple_files=True, key="set_styles")
+    if st.button("セットを保存する", type="primary"):
+        if not (name or "").strip():
+            st.session_state.error = "セット名を入れてください"
+        else:
+            chars = [{"uri": uploaded_to_uri(f), "strength": 8} for f in (cup or [])[:3]]
+            styles = [{"uri": uploaded_to_uri(f), "strength": 8} for f in (sup or [])[:3]]
+            if not chars and not styles:
+                st.session_state.error = "キャラか絵柄の画像を1枚以上入れてください"
+            else:
+                st.session_state.characters.append({"save_name": name.strip()[:40], "chars": chars, "styles": styles})
+                save_user_state()
+                st.session_state.error = ""
+                st.success("保存しました")
+        go("chars"); st.rerun()
+
+elif st.session_state.page == "make":
     usable_fonts = get_usable_fonts()
     st.subheader("4コマ")
     layout = st.radio("並べ方", list(LAYOUTS.keys()), horizontal=True)
@@ -2807,3 +2800,9 @@ else:
             st.session_state.combined.save(buf, format="PNG")
             add_library("data:image/png;base64," + base64.b64encode(buf.getvalue()).decode(), "4コマまとめ")
             st.success("入れました")
+
+else:
+    st.warning("このページはありません")
+    if st.button("ホームへ戻る"):
+        go("home"); st.rerun()
+
