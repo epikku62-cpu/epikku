@@ -727,81 +727,53 @@ def _json_scalar(text_value):
         return None
 
 def load_users_for_login():
-    """ログイン判定用。巨大なhistory/libraryをJSONデコードしない。"""
-    out = {}
+    """ログイン判定用。まず軽量ストリーム読み込みを使い、異常時だけ従来のJSON読み込みへ戻す。"""
     if not USERS_FILE or not os.path.exists(USERS_FILE):
-        return out
-    current = None
+        return {}
     try:
-        with open(USERS_FILE, "r", encoding="utf-8") as f:
-            for line in f:
-                # json.dump(indent=2)で作られたトップレベルのユーザー行だけを見る。
-                m = re.match(r'^  ("(?:\\.|[^"\\])*")\s*:\s*\{\s*$', line)
-                if m:
-                    try:
-                        current = json.loads(m.group(1))
-                    except Exception:
-                        current = None
-                    if current is not None:
-                        out[current] = {"password": "", "email": ""}
-                    continue
-                if current is None:
-                    continue
-                m = re.match(r'^\s{4}"(password|email)"\s*:\s*(.*)$', line.rstrip("\n"))
-                if m:
-                    value = _json_scalar(m.group(2))
-                    if m.group(1) == "password":
-                        out[current]["password"] = str(value or "")
-                    else:
-                        out[current]["email"] = str(value or "")
+        out = {}
+        for key, value in _iter_json_object_stream(USERS_FILE) or ():
+            if isinstance(value, dict):
+                out[str(key)] = {
+                    "password": str(value.get("password") or ""),
+                    "email": str(value.get("email") or ""),
+                }
+        # 空ファイルなら空のまま。非空ファイルなのに解析結果が空なら壊れた/想定外形式として従来方式を1回だけ試す。
+        if out or os.path.getsize(USERS_FILE) <= 2:
+            return out
+    except Exception:
+        pass
+    try:
+        users = load_json(USERS_FILE, {})
+        if not isinstance(users, dict):
+            return {}
+        return {str(k): {
+            "password": str(v.get("password") or ""),
+            "email": str(v.get("email") or ""),
+        } for k, v in users.items() if isinstance(v, dict)}
     except Exception:
         return {}
-    return out
 
 def load_user_core(name):
-    """ログイン直後に必要な小さいユーザー情報だけを読み込む。
-    history/libraryは読み込まないので、ログイン時のRAM使用量を抑える。
-    """
+    """ログイン直後に必要なユーザー情報だけを1人分読み込む。"""
     if not name or not USERS_FILE or not os.path.exists(USERS_FILE):
         return None
-    wanted = {
-        "password", "email", "icon", "points", "signup_points_remaining",
-        "community_seen_at", "premium_until", "rank", "stripe_sub",
-        "stripe_customer", "stripe_period"
-    }
-    current = None
-    result = {}
     try:
-        with open(USERS_FILE, "r", encoding="utf-8") as f:
-            for line in f:
-                m = re.match(r'^  ("(?:\\.|[^"\\])*")\s*:\s*\{\s*$', line)
-                if m:
-                    try:
-                        current = json.loads(m.group(1))
-                    except Exception:
-                        current = None
-                    if current == name:
-                        result = {}
-                    elif current is not None and result:
-                        break
-                    continue
-                if current != name:
-                    continue
-                m = re.match(r'^\s{4}"([^"]+)"\s*:\s*(.*)$', line.rstrip("\n"))
-                if not m:
-                    continue
-                field, rest = m.group(1), m.group(2)
-                if field not in wanted:
-                    continue
-                # characters/history/libraryはここでは扱わない。
-                if rest.lstrip().startswith(("[", "{")):
-                    continue
-                value = _json_scalar(rest)
-                if value is not None:
-                    result[field] = value
-        return result or None
+        for key, value in _iter_json_object_stream(USERS_FILE) or ():
+            if key == name and isinstance(value, dict):
+                return dict(value)
+        # ストリーム解析で見つからなかった場合のみ、従来方式をフォールバック。
+        users = load_json(USERS_FILE, {})
+        if isinstance(users, dict) and isinstance(users.get(name), dict):
+            return dict(users[name])
     except Exception:
-        return None
+        try:
+            users = load_json(USERS_FILE, {})
+            if isinstance(users, dict) and isinstance(users.get(name), dict):
+                return dict(users[name])
+        except Exception:
+            pass
+    return None
 
 HISTORY_KEEP_DAYS = 3
 MEDIA_PAGE_SIZE = 10
@@ -949,7 +921,13 @@ def load_user_record(name):
             if key == name and isinstance(value, dict):
                 return value
     except Exception:
-        return None
+        pass
+    try:
+        users = load_json(USERS_FILE, {})
+        if isinstance(users, dict) and isinstance(users.get(name), dict):
+            return users[name]
+    except Exception:
+        pass
     return None
 
 def load_json(path, default):
@@ -2624,9 +2602,9 @@ elif st.session_state.page == "register":
         users = load_users_for_login()
         found = find_user(users, lu)
         if found and users[found]["password"] == hash_password(lp):
-            # ログイン時に全ユーザーの画像履歴を保存し直さない。
             user = load_user_core(found)
             if isinstance(user, dict):
+                # ログイン時は保存庫・履歴を読み込まない。認証に必要な基本情報だけを復元する。
                 apply_login(found, user, persist=False)
                 go("board"); st.rerun()
             else:
