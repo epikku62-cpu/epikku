@@ -1021,6 +1021,97 @@ def nai_request(prompt, width, height, model, steps=23, scale=5.0, negative="", 
     raise Exception(last_err or "NovelAIの生成に失敗しました")
 
 
+def mm_headers(json_body=True):
+    if not MINIMAX_KEY:
+        raise Exception("MINIMAX_API_KEY が設定されていません")
+    headers = {"Authorization": f"Bearer {MINIMAX_KEY}"}
+    if json_body:
+        headers["Content-Type"] = "application/json"
+    return headers
+
+def _mm_file_id_from_upload(data):
+    if not isinstance(data, dict):
+        return ""
+    file_obj = data.get("file") if isinstance(data.get("file"), dict) else {}
+    file_id = (
+        file_obj.get("file_id")
+        or file_obj.get("id")
+        or data.get("file_id")
+        or data.get("id")
+    )
+    return str(file_id or "").strip()
+
+def mm_upload_bytes(raw, filename, mime="application/octet-stream"):
+    if not raw:
+        raise Exception("アップロードするファイルが空です")
+    res = requests.post(
+        "https://api.minimax.io/v1/files/upload",
+        headers=mm_headers(json_body=False),
+        data={"purpose": "video_generation_input"},
+        files={"file": (filename, raw, mime)},
+        timeout=120,
+    )
+    if res.status_code not in (200, 201):
+        raise Exception(f"ファイルアップロードに失敗しました {res.status_code}: {res.text[:300]}")
+    try:
+        data = res.json()
+    except Exception:
+        raise Exception("ファイルアップロードの応答を読めませんでした")
+    file_id = _mm_file_id_from_upload(data)
+    if not file_id:
+        raise Exception("ファイルIDを取得できませんでした")
+    if file_id.startswith("mm_file://"):
+        return file_id
+    return f"mm_file://{file_id}"
+
+def mm_upload_path(path, filename="ref.mp4"):
+    if not path or not os.path.exists(path):
+        raise Exception("参照動画ファイルが見つかりません")
+    name = filename or os.path.basename(path) or "ref.mp4"
+    mime = "video/mp4"
+    lower = name.lower()
+    if lower.endswith(".mov"):
+        mime = "video/quicktime"
+    elif lower.endswith(".webm"):
+        mime = "video/webm"
+    with open(path, "rb") as f:
+        raw = f.read()
+    return mm_upload_bytes(raw, name, mime)
+
+def mm_upload_image_uri(image_uri):
+    if not image_uri:
+        raise Exception("画像がありません")
+    uri = str(image_uri).strip()
+    if uri.startswith("mm_file://"):
+        return uri
+    filename = "frame.jpg"
+    mime = "image/jpeg"
+    if uri.startswith("data:"):
+        header, b64 = uri.split(",", 1)
+        raw = base64.b64decode(b64)
+        if "png" in header:
+            filename, mime = "frame.png", "image/png"
+        elif "webp" in header:
+            filename, mime = "frame.webp", "image/webp"
+        else:
+            filename, mime = "frame.jpg", "image/jpeg"
+        return mm_upload_bytes(raw, filename, mime)
+    if uri.startswith("http://") or uri.startswith("https://"):
+        # MiniMaxは公開URLも受け付けるが、期限切れやブロックを避けるためアップロードする
+        res = requests.get(uri, timeout=90)
+        res.raise_for_status()
+        ctype = (res.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+        if "png" in ctype:
+            filename, mime = "frame.png", "image/png"
+        elif "webp" in ctype:
+            filename, mime = "frame.webp", "image/webp"
+        else:
+            filename, mime = "frame.jpg", "image/jpeg"
+        return mm_upload_bytes(res.content, filename, mime)
+    if os.path.exists(uri):
+        return mm_upload_path(uri, os.path.basename(uri) or "frame.jpg")
+    raise Exception("画像の形式が分かりません")
+
 def mm_create_video(payload):
     res = requests.post("https://api.minimax.io/v2/video_generation", headers=mm_headers(), json=payload, timeout=60)
     if res.status_code not in (200, 201, 202):
