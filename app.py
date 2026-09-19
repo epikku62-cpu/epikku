@@ -1126,12 +1126,18 @@ def adjust_user_points(delta, signup_delta=0):
     return int(st.session_state.get("points") or 0)
 
 def take_points(cost):
-    if is_owner() or int(cost) <= 0:
-        return
+    # ポイントを使う処理は、必ずログイン済みかつ残高が足りる場合だけ通す。
+    # 未ログイン時に username が空のためポイント減算をスキップして
+    # そのまま生成APIへ進んでしまうことを防ぐ。
     cost = int(cost)
-    signup_delta = 0
-    if "signup_points_remaining" in st.session_state:
-        signup_delta = -cost
+    if cost <= 0 or is_owner():
+        return
+    if not st.session_state.get("logged_in") or not st.session_state.get("username"):
+        raise Exception("動画・画像生成を利用するにはログインが必要です。")
+    current = int(st.session_state.get("points") or 0)
+    if current < cost:
+        raise Exception(f"ポイントが足りません。必要 {cost}ポイントです。")
+    signup_delta = -cost if "signup_points_remaining" in st.session_state else 0
     adjust_user_points(-cost, signup_delta=signup_delta)
 
 def finish_action():
@@ -1871,6 +1877,7 @@ if "buypoints" in qs:
 
 st.markdown("""
 <style>
+header[data-testid="stHeader"],
 section[data-testid="stSidebar"],
 [data-testid="stSidebarCollapsedControl"],
 [data-testid="collapsedControl"],
@@ -1975,6 +1982,12 @@ elif st.session_state.page == "lib":
                 st.rerun()
 
 elif st.session_state.page == "video":
+    if not st.session_state.logged_in:
+        st.subheader("動画生成")
+        st.warning("動画生成を利用するにはログインが必要です。")
+        if st.button("ログイン / 登録", type="primary"):
+            go("register"); st.rerun()
+        st.stop()
     st.subheader("動画生成")
     job = st.session_state.get("vjob") if isinstance(st.session_state.get("vjob"), dict) else None
     if job and job.get("kind") == "video":
