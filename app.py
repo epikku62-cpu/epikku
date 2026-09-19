@@ -18,6 +18,7 @@ import time
 import requests
 import shutil
 import tempfile
+import threading
 import gc
 from email.mime.text import MIMEText
 from io import BytesIO
@@ -313,6 +314,19 @@ def apply_checkout_session(session_id):
 NAI_URLS = ["https://image.novelai.net/ai/generate-image", "https://api.novelai.net/ai/generate-image"]
 DATA_DIR = os.environ.get("DATA_DIR", os.path.abspath("data"))
 os.makedirs(DATA_DIR, exist_ok=True)
+USER_MEDIA_DIR = os.path.join(DATA_DIR, "user_media")
+os.makedirs(USER_MEDIA_DIR, exist_ok=True)
+_JSON_LOCKS = {}
+_JSON_LOCKS_GUARD = threading.Lock()
+
+def _path_lock(path):
+    key = os.path.abspath(path)
+    with _JSON_LOCKS_GUARD:
+        lock = _JSON_LOCKS.get(key)
+        if lock is None:
+            lock = threading.RLock()
+            _JSON_LOCKS[key] = lock
+    return lock
 DATA_FILE = os.path.join(DATA_DIR, "studio_data.json")
 USERS_FILE = os.path.join(DATA_DIR, "users_data.json")
 TOKENS_FILE = os.path.join(DATA_DIR, "login_tokens.json")
@@ -380,26 +394,15 @@ def is_owner():
     return bool(OWNER_ACCOUNTS) and (u in OWNER_ACCOUNTS or e in OWNER_ACCOUNTS)
 
 def mark_visit():
-    now = datetime.now()
-    now_ts = now.timestamp()
-    last = float(st.session_state.get("_visit_at") or 0)
-    if now_ts - last < 600:
-        return
-    st.session_state._visit_at = now.timestamp()
-    data = load_json(STATS_FILE, {"total": 0, "days": {}, "last": ""})
-    if not isinstance(data, dict):
-        data = {"total": 0, "days": {}, "last": ""}
-    day = now.strftime("%Y/%m/%d")
-    days = data.get("days") if isinstance(data.get("days"), dict) else {}
-    days[day] = int(days.get(day, 0)) + 1
-    if len(days) > 60:
-        days = dict(sorted(days.items())[-60:])
-    data["days"] = days
-    data["total"] = int(data.get("total", 0)) + 1
-    data["last"] = now.strftime("%Y/%m/%d %H:%M")
-    save_json(STATS_FILE, data)
-    if st.session_state.get("logged_in") and st.session_state.get("username"):
-        touch_user_seen(st.session_state.get("username"))
+    now=datetime.now(); now_ts=now.timestamp(); last=float(st.session_state.get("_visit_at") or 0)
+    if now_ts-last<600: return
+    st.session_state._visit_at=now_ts; day=now.strftime("%Y/%m/%d")
+    def upd(data):
+        if not isinstance(data,dict): data={"total":0,"days":{},"last":""}
+        days=data.get("days") if isinstance(data.get("days"),dict) else {}; days[day]=int(days.get(day,0))+1
+        data["days"]=dict(sorted(days.items())[-60:]); data["total"]=int(data.get("total",0))+1; data["last"]=now.strftime("%Y/%m/%d %H:%M"); return data
+    update_json(STATS_FILE,{"total":0,"days":{},"last":""},upd,backup=False)
+    if st.session_state.get("logged_in") and st.session_state.get("username"): touch_user_seen(st.session_state.get("username"))
 
 def touch_user_seen(name):
     # アクセスのたびに巨大なusers_data.json全体を読み書きしない。
@@ -899,23 +902,43 @@ def _replace_user_history_in_file(name, history):
             except Exception:
                 pass
 
+def _user_media_file(name):
+    key = hashlib.sha256(str(name).encode("utf-8")).hexdigest()
+    return os.path.join(USER_MEDIA_DIR, key + ".json")
+
+def _history_last_3_days(items):
+    now = datetime.now(); result=[]
+    for item in items or []:
+        if not isinstance(item, dict): continue
+        value=str(item.get("time") or "").strip()
+        if not value: result.append(item); continue
+        try:
+            if datetime.strptime(value, "%Y/%m/%d %H:%M") >= now - timedelta(days=3): result.append(item)
+        except Exception: result.append(item)
+    return result
+
+def save_user_media(name, history, library):
+    if name:
+        save_json(_user_media_file(name), {"history": _history_last_3_days(history), "library": library or []}, backup=False)
+
 def load_user_media(name):
-    """保存庫・履歴を必要になった時だけ読み込む。履歴は3日を超えたものを自動削除する。"""
-    data = load_user_record(name)
-    if not isinstance(data, dict):
-        return [], []
-    now = datetime.now()
-    raw_history = data.get("history", []) or []
-    if not isinstance(raw_history, list):
-        raw_history = []
-    history = [x for x in raw_history if _history_is_recent(x, now)]
-    # 古い履歴を実データからも削除。ただし巨大なusers全体をRAMへ読み直さない。
-    if len(history) != len(raw_history):
-        _replace_user_history_in_file(name, history)
-    library = data.get("library", []) or []
-    if not isinstance(library, list):
-        library = []
-    return history, library
+    if not name: return [], []
+    media_path=_user_media_file(name)
+    media=load_json(media_path,None)
+    if isinstance(media,dict):
+        return _history_last_3_days(media.get("history",[]) or []), list(media.get("library",[]) or [])
+    old=load_user_record(name)
+    if isinstance(old,dict):
+        history=_history_last_3_days(old.get("history",[]) or []); library=list(old.get("library",[]) or [])
+        if history or library or "history" in old or "library" in old:
+            save_user_media(name,history,library)
+            def clear_media(users):
+                if isinstance(users,dict) and isinstance(users.get(name),dict):
+                    users[name].pop("history",None); users[name].pop("library",None)
+                return users
+            update_json(USERS_FILE,{},clear_media,backup=False)
+        return history,library
+    return [], []
 
 def load_user_record(name):
     """互換用。指定ユーザー1人分だけを読み込む。"""
@@ -954,37 +977,41 @@ def load_json(path, default):
 def save_json(path, data, backup=True):
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     folder = os.path.dirname(path) or "."
-    fd, tmp = tempfile.mkstemp(prefix=".tmp_", suffix=".json", dir=folder)
-    locked = None
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            if fcntl is not None:
-                try:
-                    locked = open(path + ".lock", "a+", encoding="utf-8")
-                    fcntl.flock(locked.fileno(), fcntl.LOCK_EX)
-                except Exception:
-                    locked = None
-            json.dump(data, f, ensure_ascii=False, indent=2)
-            f.flush()
-            os.fsync(f.fileno())
-        if backup and os.path.exists(path) and os.path.getsize(path) > 2:
-            try:
-                shutil.copy2(path, path + ".bak")
-            except Exception:
-                pass
-        os.replace(tmp, path)
-    finally:
-        if os.path.exists(tmp):
-            try:
-                os.remove(tmp)
-            except Exception:
-                pass
-        if locked is not None:
-            try:
-                fcntl.flock(locked.fileno(), fcntl.LOCK_UN)
-                locked.close()
-            except Exception:
-                pass
+    lock = _path_lock(path)
+    with lock:
+        fd, tmp = tempfile.mkstemp(prefix=".tmp_", suffix=".json", dir=folder)
+        locked = None
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                if fcntl is not None:
+                    try:
+                        locked = open(path + ".lock", "a+", encoding="utf-8")
+                        fcntl.flock(locked.fileno(), fcntl.LOCK_EX)
+                    except Exception:
+                        locked = None
+                json.dump(data, f, ensure_ascii=False, separators=(",", ":"))
+                f.flush(); os.fsync(f.fileno())
+            if backup and os.path.exists(path) and os.path.getsize(path) > 2:
+                try: shutil.copy2(path, path + ".bak")
+                except Exception: pass
+            os.replace(tmp, path)
+        finally:
+            if os.path.exists(tmp):
+                try: os.remove(tmp)
+                except Exception: pass
+            if locked is not None:
+                try: fcntl.flock(locked.fileno(), fcntl.LOCK_UN); locked.close()
+                except Exception: pass
+
+def update_json(path, default, updater, backup=False):
+    lock = _path_lock(path)
+    with lock:
+        data = load_json(path, default)
+        if data is None: data = default
+        result = updater(data)
+        if result is None: result = data
+        save_json(path, result, backup=backup)
+        return result
 
 def email_taken(users, mail):
     mail = norm_mail(mail)
@@ -1267,46 +1294,20 @@ def _save_user_core_only():
                 pass
 
 def save_user_state():
-    name = st.session_state.get("username")
-    if not name:
-        return
-
-    # ログイン直後や通常のポイント/VIP更新では、巨大な画像履歴をRAMへ戻さない。
-    # history/library/charactersをまだ読み込んでいない間は基本情報だけを更新する。
-    if (not st.session_state.get("_media_loaded", False)
-            and not st.session_state.get("_characters_loaded", False)):
-        if _save_user_core_only():
-            save_json(DATA_FILE, {"characters": st.session_state.get("characters", [])})
-            return
-
-    # 保存庫・履歴・セットを実際に読み込んだ後だけ、従来どおり対象ユーザーの内容を保存する。
-    users = load_json(USERS_FILE, {})
-    if not isinstance(users, dict):
-        users = {}
-    prev = users.get(name) if isinstance(users.get(name), dict) else {}
-    users[name] = {
-        "password": prev.get("password") or st.session_state.get("password_hash", ""),
-        "email": st.session_state.get("email") or prev.get("email", ""),
-        "icon": st.session_state.get("icon", prev.get("icon", "")),
-        "characters": st.session_state.get("characters", prev.get("characters", [])),
-        "points": int(st.session_state.get("points", prev.get("points", 0))),
-        "signup_points_remaining": (int(st.session_state.get("signup_points_remaining"))
-                                    if "signup_points_remaining" in st.session_state
-                                    else prev.get("signup_points_remaining")),
-        "community_seen_at": float(st.session_state.get("community_seen_at", prev.get("community_seen_at", 0)) or 0),
-        "premium_until": st.session_state.get("premium_until") or prev.get("premium_until", ""),
-        "rank": "vip" if is_premium() else "ブロンズ",
-        "history": st.session_state.get("simple_history", prev.get("history", []))[-30:],
-        "library": st.session_state.get("library", prev.get("library", []))[-40:],
-        "last_seen": prev.get("last_seen", ""),
-        "stripe_sub": st.session_state.get("stripe_sub") or prev.get("stripe_sub", ""),
-        "stripe_customer": st.session_state.get("stripe_customer") or prev.get("stripe_customer", ""),
-        "stripe_period": st.session_state.get("stripe_period") or prev.get("stripe_period", ""),
-    }
-    if prev.get("password") and not users[name]["password"]:
-        users[name]["password"] = prev["password"]
-    save_json(USERS_FILE, users, backup=False)
-    save_json(DATA_FILE, {"characters": st.session_state.get("characters", [])})
+    name=str(st.session_state.get("username") or "").strip()
+    if not name: return
+    media_loaded=bool(st.session_state.get("_media_loaded"))
+    history=st.session_state.get("simple_history",[]) if media_loaded else None
+    library=st.session_state.get("library",[]) if media_loaded else None
+    def upd(users):
+        if not isinstance(users,dict): users={}
+        prev=users.get(name) if isinstance(users.get(name),dict) else {}
+        row=dict(prev)
+        row.update({"password":st.session_state.get("password_hash") or prev.get("password",""),"email":st.session_state.get("email",prev.get("email","")),"icon":st.session_state.get("icon",prev.get("icon","")),"characters":st.session_state.get("characters",prev.get("characters",[])),"points":int(st.session_state.get("points",prev.get("points",0))),"signup_points_remaining":(int(st.session_state.get("signup_points_remaining")) if "signup_points_remaining" in st.session_state else prev.get("signup_points_remaining")),"community_seen_at":float(st.session_state.get("community_seen_at",prev.get("community_seen_at",0)) or 0),"premium_until":st.session_state.get("premium_until") or prev.get("premium_until",""),"rank":"vip" if is_premium() else "ブロンズ","last_seen":prev.get("last_seen",""),"stripe_sub":st.session_state.get("stripe_sub") or prev.get("stripe_sub",""),"stripe_customer":st.session_state.get("stripe_customer") or prev.get("stripe_customer",""),"stripe_period":st.session_state.get("stripe_period") or prev.get("stripe_period","")})
+        row.pop("history",None); row.pop("library",None); users[name]=row; return users
+    update_json(USERS_FILE,{},upd,backup=False)
+    if media_loaded: save_user_media(name,history,library)
+    save_json(DATA_FILE,{"characters":st.session_state.get("characters",[])})
 
 def ensure_user_media_loaded():
     if not st.session_state.get("logged_in") or st.session_state.get("_media_loaded"):
@@ -1358,15 +1359,12 @@ def community_unread_count():
     return 1 if latest > seen else 0
 
 def mark_community_seen():
-    if not st.session_state.get("logged_in") or not st.session_state.get("username"):
-        return
-    latest = board_last_activity()
-    st.session_state.community_seen_at = latest
-    users = load_json(USERS_FILE, {})
-    name = st.session_state.get("username")
-    if name in users and isinstance(users[name], dict):
-        users[name]["community_seen_at"] = latest
-        save_json(USERS_FILE, users, backup=False)
+    if not st.session_state.get("logged_in") or not st.session_state.get("username"): return
+    latest=board_last_activity(); st.session_state.community_seen_at=latest; name=st.session_state.get("username")
+    def upd(users):
+        if isinstance(users,dict) and isinstance(users.get(name),dict): users[name]["community_seen_at"]=latest
+        return users
+    update_json(USERS_FILE,{},upd,backup=False)
 
 def save_board(data):
     posts = data.get("posts", [])[-BOARD_MAX_POSTS:]
@@ -2679,7 +2677,7 @@ elif st.session_state.page == "stats":
     signup_remaining_positive = 0
 
     for name, u in valid_users:
-        history = u.get("history") or []
+        history, _ = load_user_media(name, u)
         if not isinstance(history, list):
             history = []
         # historyには画像生成履歴が保存されているため、1件以上あれば画像生成経験あり。
