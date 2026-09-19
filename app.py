@@ -1609,70 +1609,94 @@ def apply_login(name, data, persist=True, sync=True, pending=True):
         credit_pending_checkouts()
 
 def render_top_menu():
+    # 左上のハンバーガーメニュー。押すと左側から縦長のメニューを表示する。
     st.markdown(
         """<style>
         div.st-key-panel_menu_toggle {
-            position: fixed;
-            top: 12px;
-            left: 12px;
-            z-index: 99999;
-            width: 120px;
+            position: fixed !important;
+            top: 12px !important;
+            left: 12px !important;
+            z-index: 100000 !important;
+            width: 54px !important;
         }
         div.st-key-panel_menu_toggle button {
-            border: 2px solid #111;
-            border-radius: 12px;
-            background: #ffffff;
-            font-weight: 800;
+            width: 54px !important;
+            height: 54px !important;
+            padding: 0 !important;
+            border: 2px solid #111 !important;
+            border-radius: 12px !important;
+            background: #fff !important;
+            color: #111 !important;
+            font-size: 27px !important;
+            line-height: 1 !important;
+            font-weight: 900 !important;
+        }
+        div.st-key-panel_menu_drawer {
+            position: fixed !important;
+            top: 0 !important;
+            left: 0 !important;
+            bottom: 0 !important;
+            width: min(320px, 82vw) !important;
+            z-index: 99998 !important;
+            overflow-y: auto !important;
+            background: #fff !important;
+            border-right: 2px solid #ddd !important;
+            box-shadow: 6px 0 20px rgba(0,0,0,.16) !important;
+            padding: 76px 14px 24px 14px !important;
+        }
+        div.st-key-panel_menu_drawer button {
+            margin-bottom: 8px !important;
         }
         </style>""",
         unsafe_allow_html=True,
     )
-    left, _ = st.columns([1, 3])
-    with left:
-        label = "閉じる" if st.session_state.menu_open else "メニュー"
-        if st.button(label, key="panel_menu_toggle", use_container_width=True):
-            st.session_state.menu_open = not st.session_state.menu_open
-            st.rerun()
+
+    label = "✕" if st.session_state.menu_open else "☰"
+    if st.button(label, key="panel_menu_toggle", help="メニュー", use_container_width=True):
+        st.session_state.menu_open = not st.session_state.menu_open
+        st.rerun()
+
     if not st.session_state.menu_open:
         return
-    st.markdown('<div style="background:#fff;border:3px solid #111;border-radius:20px;padding:12px;margin:8px 0 16px;">', unsafe_allow_html=True)
-    st.markdown("**メニュー**")
-    if st.session_state.logged_in:
-        icon = st.session_state.get("icon", "🐱")
-        if isinstance(icon, str) and icon.startswith("data:image"):
-            st.image(icon, width=48)
+
+    with st.container(key="panel_menu_drawer"):
+        st.markdown("### メニュー")
+        if st.session_state.logged_in:
+            icon = st.session_state.get("icon", "🐱")
+            if isinstance(icon, str) and icon.startswith("data:image"):
+                st.image(icon, width=48)
+            else:
+                st.write(icon)
+            st.write(st.session_state.get("username", ""))
+            if st.button("アイコン変更", use_container_width=True):
+                go("icon"); st.rerun()
+            if st.button("ログアウト", use_container_width=True):
+                clear_login_token(st.session_state.get("username") or "")
+                st.session_state.logged_in = False
+                st.session_state.username = ""
+                go("home"); st.rerun()
         else:
-            st.write(icon)
-        st.write(st.session_state.get("username", ""))
-        if st.button("アイコン変更", use_container_width=True):
-            go("icon"); st.rerun()
-        if st.button("ログアウト", use_container_width=True):
-            clear_login_token(st.session_state.get("username") or "")
-            st.session_state.logged_in = False
-            st.session_state.username = ""
-            go("home"); st.rerun()
-    else:
-        if st.button("登録", use_container_width=True):
-            go("register"); st.rerun()
-        if st.button("ログイン", use_container_width=True):
-            go("register"); st.rerun()
-        st.markdown(
-            '<div style="background:#fff0f6;border:2px solid #ff6ea8;border-radius:16px;padding:10px 12px;margin:10px 0;text-align:center;color:#ff4d88;font-weight:800;line-height:1.5;">'
-            '🎁 新規登録で<strong>20ポイント</strong>プレゼント！<br>'
-            '登録後すぐに画像生成を試せます。'
-            '</div>',
-            unsafe_allow_html=True,
-        )
-    st.write(f"ポイント {st.session_state.points}")
-    st.write(f"会員 {member_label() if st.session_state.logged_in else '未登録'}")
-    community_badge = " 🔴" if community_unread_count() else ""
-    menu_items = [(f"👥 コミュニティ{community_badge}", "board"), ("画像生成モード", "simple"), ("セット画像生成", "chars"), ("保存庫", "lib"), ("動画生成", "video"), ("動画を移す", "vmove"), ("ポイント購入", "shop"), ("月額登録", "plan"), ("お問い合わせ", "contact")]
-    if is_owner():
-        menu_items.append(("来場", "stats"))
-    for label, page in menu_items:
-        if st.button(label, use_container_width=True, key=f"m_{page}"):
-            go(page); st.rerun()
-    st.markdown("</div>", unsafe_allow_html=True)
+            if st.button("登録", use_container_width=True):
+                go("register"); st.rerun()
+            if st.button("ログイン", use_container_width=True):
+                go("register"); st.rerun()
+            st.markdown(
+                '<div style="background:#fff0f6;border:2px solid #ff6ea8;border-radius:16px;padding:10px 12px;margin:10px 0;text-align:center;color:#ff4d88;font-weight:800;line-height:1.5;">'
+                '🎁 新規登録で<strong>20ポイント</strong>プレゼント！<br>'
+                '登録後すぐに画像生成を試せます。'
+                '</div>',
+                unsafe_allow_html=True,
+            )
+        st.write(f"ポイント {st.session_state.points}")
+        st.write(f"会員 {member_label() if st.session_state.logged_in else '未登録'}")
+        community_badge = " 🔴" if community_unread_count() else ""
+        menu_items = [(f"👥 コミュニティ{community_badge}", "board"), ("画像生成モード", "simple"), ("セット画像生成", "chars"), ("保存庫", "lib"), ("動画生成", "video"), ("動画を移す", "vmove"), ("ポイント購入", "shop"), ("月額登録", "plan"), ("お問い合わせ", "contact")]
+        if is_owner():
+            menu_items.append(("来場", "stats"))
+        for label, page in menu_items:
+            if st.button(label, use_container_width=True, key=f"m_{page}"):
+                go(page); st.rerun()
+
 
 def get_usable_fonts():
     font_status = prepare_fonts()
