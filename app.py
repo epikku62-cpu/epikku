@@ -5,6 +5,7 @@ import json
 import uuid
 import base64
 import hashlib
+import hmac
 import math
 import io
 import zipfile
@@ -205,11 +206,15 @@ def sync_subscription(force=False):
         record["premium_until"] = st.session_state.get("premium_until", "")
         record["stripe_period"] = period
         record["points"] = int(record.get("points") or 0) + MONTHLY_POINTS
+        record["points_gained"] = int(record.get("points_gained") or 0) + MONTHLY_POINTS
         return record
 
+    before_period = str(st.session_state.get("stripe_period") or "")
     record = update_user_atomic(_renew)
     if record is not None:
         _sync_session_from_user_record(record, ("points", "stripe_period", "premium_until"))
+        if str(record.get("stripe_period") or "") != before_period:
+            log_point_event(st.session_state.get("username") or "", MONTHLY_POINTS, "月額VIP付与", record.get("points") or 0)
 
 def cancel_subscription_now():
     """Stripe上の月額契約を即時解約し、同時にPanel AI.のVIPも終了する。"""
@@ -327,7 +332,7 @@ def apply_checkout_session(session_id):
     # ポイント数が確定してから「処理済み」と記録する。
     if not mark_paid_session(sid):
         return "この決済は反映済みです"
-    adjust_user_points(pts)
+    adjust_user_points(pts, reason="ポイント購入")
     return f"{pts}ポイントを追加しました"
 
 NAI_URLS = ["https://image.novelai.net/ai/generate-image", "https://api.novelai.net/ai/generate-image"]
@@ -340,6 +345,11 @@ STATS_FILE = os.path.join(DATA_DIR, "visit_stats.json")
 BOARD_FILE = os.path.join(DATA_DIR, "board_data.json")
 BOARD_DIR = os.path.join(DATA_DIR, "board")
 os.makedirs(BOARD_DIR, exist_ok=True)
+LIBRARY_DIR = os.path.join(DATA_DIR, "library")
+ICON_DIR = os.path.join(DATA_DIR, "icons")
+os.makedirs(LIBRARY_DIR, exist_ok=True)
+os.makedirs(ICON_DIR, exist_ok=True)
+AUTH_COOKIE = "panel_auth"
 BOARD_MAX_POSTS = 80
 BOARD_MAX_COMMENTS = 40
 HOME_IMG = "IMG_1106.jpeg"
@@ -401,9 +411,12 @@ def mark_visit():
     now_ts = now.timestamp()
     last = float(st.session_state.get("_visit_at") or 0)
     if now_ts - last < 600:
+        if st.session_state.get("logged_in") and st.session_state.get("username"):
+            touch_user_seen(st.session_state.get("username"))
         return
     st.session_state._visit_at = now.timestamp()
     day = now.strftime("%Y/%m/%d")
+    who = str(st.session_state.get("username") or "").strip() if st.session_state.get("logged_in") else ""
     def _update_stats(data):
         if not isinstance(data, dict):
             data = {"total": 0, "days": {}, "last": ""}
@@ -414,10 +427,55 @@ def mark_visit():
         data["days"] = days
         data["total"] = int(data.get("total", 0)) + 1
         data["last"] = now.strftime("%Y/%m/%d %H:%M")
+        viewers = data.get("viewers") if isinstance(data.get("viewers"), dict) else {}
+        day_list = viewers.get(day) if isinstance(viewers.get(day), list) else []
+        if who:
+            if who not in day_list:
+                day_list.append(who)
+        else:
+            guest_days = data.get("guest_days") if isinstance(data.get("guest_days"), dict) else {}
+            guest_days[day] = int(guest_days.get(day, 0)) + 1
+            if len(guest_days) > 60:
+                guest_days = dict(sorted(guest_days.items())[-60:])
+            data["guest_days"] = guest_days
+        viewers[day] = day_list[-500:]
+        if len(viewers) > 60:
+            viewers = dict(sorted(viewers.items())[-60:])
+        data["viewers"] = viewers
         return data
     update_json_file(STATS_FILE, {"total": 0, "days": {}, "last": ""}, _update_stats, backup=True)
-    if st.session_state.get("logged_in") and st.session_state.get("username"):
-        touch_user_seen(st.session_state.get("username"))
+    if who:
+        touch_user_seen(who)
+
+def log_point_event(user, delta, reason, balance):
+    now = datetime.now()
+    day = now.strftime("%Y/%m/%d")
+    def _update(data):
+        if not isinstance(data, dict):
+            data = {"total": 0, "days": {}, "last": ""}
+        log = data.get("point_log") if isinstance(data.get("point_log"), list) else []
+        log.append({
+            "time": now.strftime("%Y/%m/%d %H:%M"),
+            "user": str(user or "不明"),
+            "delta": int(delta),
+            "reason": str(reason or ""),
+            "balance": int(balance or 0),
+        })
+        data["point_log"] = log[-300:]
+        used = data.get("points_used_days") if isinstance(data.get("points_used_days"), dict) else {}
+        gained = data.get("points_gained_days") if isinstance(data.get("points_gained_days"), dict) else {}
+        if delta < 0:
+            used[day] = int(used.get(day, 0)) + (-int(delta))
+        elif delta > 0:
+            gained[day] = int(gained.get(day, 0)) + int(delta)
+        if len(used) > 60:
+            used = dict(sorted(used.items())[-60:])
+        if len(gained) > 60:
+            gained = dict(sorted(gained.items())[-60:])
+        data["points_used_days"] = used
+        data["points_gained_days"] = gained
+        return data
+    update_json_file(STATS_FILE, {"total": 0, "days": {}, "last": ""}, _update, backup=True)
 
 def touch_user_seen(name):
     def _update(users):
@@ -478,9 +536,8 @@ def go(page):
     st.session_state.menu_open = False
     st.session_state.need_top = True
     st.query_params["p"] = page
-    tok = str(st.session_state.get("auth_token") or "")
-    if tok:
-        st.query_params["auth"] = tok
+    if "auth" in st.query_params:
+        del st.query_params["auth"]
 
 def load_tokens():
     data = load_json(TOKENS_FILE, {})
@@ -488,6 +545,35 @@ def load_tokens():
 
 def save_tokens(data):
     save_json(TOKENS_FILE, data)
+
+def _cookie_header():
+    try:
+        headers = getattr(getattr(st, "context", None), "headers", None)
+        if headers:
+            return str(headers.get("Cookie") or headers.get("cookie") or "")
+    except Exception:
+        pass
+    return ""
+
+def _token_from_cookie():
+    raw = _cookie_header()
+    for part in raw.split(";"):
+        part = part.strip()
+        if part.startswith(AUTH_COOKIE + "="):
+            return part.split("=", 1)[1].strip()
+    return ""
+
+def _set_auth_cookie(token="", clear=False):
+    if clear or not token:
+        script = f'<script>document.cookie="{AUTH_COOKIE}=; Max-Age=0; Path=/; SameSite=Lax";</script>'
+    else:
+        script = f'<script>document.cookie="{AUTH_COOKIE}={token}; Max-Age=2592000; Path=/; SameSite=Lax";</script>'
+    st.markdown(script, unsafe_allow_html=True)
+    try:
+        import streamlit.components.v1 as components
+        components.html(script, height=0, scrolling=False)
+    except Exception:
+        pass
 
 def issue_login_token(name):
     result = {"token": ""}
@@ -502,11 +588,13 @@ def issue_login_token(name):
     update_json_file(TOKENS_FILE, {}, _update, backup=True)
     token = result["token"]
     st.session_state.auth_token = token
-    st.query_params["auth"] = token
+    if "auth" in st.query_params:
+        del st.query_params["auth"]
+    _set_auth_cookie(token)
     return token
 
 def clear_login_token(name=""):
-    tok = str(st.session_state.get("auth_token") or st.query_params.get("auth") or "")
+    tok = str(st.session_state.get("auth_token") or _token_from_cookie() or st.query_params.get("auth") or "")
     tokens = load_tokens()
     if tok in tokens:
         tokens.pop(tok, None)
@@ -516,17 +604,26 @@ def clear_login_token(name=""):
     st.session_state.auth_token = ""
     if "auth" in st.query_params:
         del st.query_params["auth"]
+    _set_auth_cookie(clear=True)
 
 def restore_login():
     if st.session_state.get("logged_in") and st.session_state.get("username"):
+        if "auth" in st.query_params:
+            del st.query_params["auth"]
         return
-    token = str(st.query_params.get("auth") or st.session_state.get("auth_token") or "")
+    token = str(st.session_state.get("auth_token") or _token_from_cookie() or "")
+    legacy = str(st.query_params.get("auth") or "")
+    if not token and legacy:
+        token = legacy
+    if "auth" in st.query_params:
+        del st.query_params["auth"]
     if not token:
         return
     name = load_tokens().get(token)
     users = load_json(USERS_FILE, {})
     if name and name in users:
         st.session_state.auth_token = token
+        _set_auth_cookie(token)
         # 初期表示時は保存・Stripe確認を行わず、画面表示を優先する。
         apply_login(name, users[name], persist=False, sync=False, pending=False)
 
@@ -557,8 +654,36 @@ def file_b64(path):
     with open(path, "rb") as f:
         return base64.b64encode(f.read()).decode()
 
-def hash_password(p):
-    return hashlib.sha256(p.encode()).hexdigest()
+def hash_password(p, salt=None):
+    raw = (p or "").encode("utf-8")
+    if salt is None:
+        salt = secrets.token_bytes(16)
+    elif isinstance(salt, str):
+        salt = bytes.fromhex(salt)
+    dk = hashlib.scrypt(raw, salt=salt, n=16384, r=8, p=1, dklen=32)
+    return f"scrypt${salt.hex()}${dk.hex()}"
+
+def password_matches(stored, password):
+    stored = str(stored or "")
+    if stored.startswith("scrypt$"):
+        try:
+            _kind, salt_hex, _dk = stored.split("$", 2)
+            return hmac.compare_digest(hash_password(password, salt=salt_hex), stored)
+        except Exception:
+            return False
+    legacy = hashlib.sha256((password or "").encode("utf-8")).hexdigest()
+    return hmac.compare_digest(stored, legacy)
+
+def upgrade_password_hash(name, password, stored):
+    if not name or str(stored or "").startswith("scrypt$"):
+        return stored
+    new_hash = hash_password(password)
+    def _update(users):
+        if isinstance(users, dict) and name in users and isinstance(users[name], dict):
+            users[name]["password"] = new_hash
+        return users
+    update_json_file(USERS_FILE, {}, _update, backup=True)
+    return new_hash
 
 def norm_mail(m):
     return (m or "").strip().lower()
@@ -758,14 +883,88 @@ def load_font(size=28, kind="ゴシック"):
 def uploaded_to_uri(uploaded):
     return f"data:{uploaded.type or 'image/png'};base64,{base64.b64encode(uploaded.getvalue()).decode()}"
 
+def _safe_local_path(path):
+    if not path:
+        return ""
+    raw = os.path.abspath(str(path))
+    root = os.path.abspath(DATA_DIR)
+    if raw == root or raw.startswith(root + os.sep):
+        return raw if os.path.isfile(raw) else ""
+    return ""
+
+def store_image_uri(uri, folder, name_hint="img"):
+    if not uri:
+        return ""
+    local = _safe_local_path(uri)
+    if local:
+        return local
+    img = uri_to_image(uri)
+    if img is None:
+        return ""
+    img = img.convert("RGB")
+    img.thumbnail((1536, 1536))
+    os.makedirs(folder, exist_ok=True)
+    path = os.path.join(folder, f"{name_hint}_{uuid.uuid4().hex}.jpg")
+    img.save(path, format="JPEG", quality=85)
+    return path
+
+def media_src(uri_or_path):
+    local = _safe_local_path(uri_or_path)
+    if local:
+        return local
+    return uri_or_path or ""
+
+def migrate_stored_images(record, username=""):
+    if not isinstance(record, dict):
+        return record
+    changed = False
+    prefix = re.sub(r"[^a-zA-Z0-9_-]+", "_", str(username or "user"))[:24] or "user"
+    icon = record.get("icon")
+    if isinstance(icon, str) and icon.startswith("data:"):
+        path = store_image_uri(icon, ICON_DIR, f"{prefix}_icon")
+        if path:
+            record["icon"] = path
+            changed = True
+    lib = record.get("library") if isinstance(record.get("library"), list) else []
+    new_lib = []
+    for item in lib:
+        if not isinstance(item, dict):
+            continue
+        url = item.get("url") or ""
+        if isinstance(url, str) and url.startswith("data:"):
+            path = store_image_uri(url, LIBRARY_DIR, f"{prefix}_lib")
+            if path:
+                item = dict(item)
+                item["url"] = path
+                changed = True
+        new_lib.append(item)
+    record["library"] = new_lib
+    hist = record.get("history") if isinstance(record.get("history"), list) else []
+    new_hist = []
+    for item in hist:
+        if not isinstance(item, dict):
+            continue
+        url = item.get("url") or ""
+        if isinstance(url, str) and url.startswith("data:"):
+            path = store_image_uri(url, LIBRARY_DIR, f"{prefix}_hist")
+            if path:
+                item = dict(item)
+                item["url"] = path
+                changed = True
+        new_hist.append(item)
+    record["history"] = new_hist
+    record["_images_migrated"] = changed
+    return record
+
 def uri_to_image(uri):
     if not uri:
         return None
-    if uri.startswith("data:"):
+    if isinstance(uri, str) and uri.startswith("data:"):
         return Image.open(BytesIO(base64.b64decode(uri.split(",", 1)[1]))).convert("RGB")
-    res = requests.get(uri, timeout=90)
-    res.raise_for_status()
-    return Image.open(BytesIO(res.content)).convert("RGB")
+    local = _safe_local_path(uri)
+    if local:
+        return Image.open(local).convert("RGB")
+    raise Exception("外部URLの画像は読み込めません")
 
 def shrink_for_video(image_uri):
     img = uri_to_image(image_uri)
@@ -1001,13 +1200,96 @@ def mark_community_seen():
         return users
     update_json_file(USERS_FILE, {}, _update, backup=True)
 
+def update_board(mutator):
+    """掲示板をロック内で最新データに対して更新する。"""
+    def _update(current):
+        if not isinstance(current, dict):
+            current = {"posts": [], "updated_at": 0}
+        posts = current.get("posts")
+        current["posts"] = [p for p in (posts if isinstance(posts, list) else []) if isinstance(p, dict)]
+        result = mutator(current)
+        if result is not None:
+            current = result
+        if not isinstance(current, dict):
+            current = {"posts": [], "updated_at": 0}
+        current["posts"] = [p for p in (current.get("posts") or []) if isinstance(p, dict)][-BOARD_MAX_POSTS:]
+        current["updated_at"] = time.time()
+        return current
+    return update_json_file(BOARD_FILE, {"posts": [], "updated_at": 0}, _update, backup=True)
+
+def board_add_post(post):
+    err = {"msg": ""}
+    def mut(current):
+        posts = current.get("posts") or []
+        if len(posts) >= BOARD_MAX_POSTS:
+            err["msg"] = "掲示板がいっぱいです"
+            return current
+        posts.append(post)
+        current["posts"] = posts
+        return current
+    update_board(mut)
+    if err["msg"]:
+        raise Exception(err["msg"])
+
+def board_add_comment(post_id, comment):
+    err = {"msg": ""}
+    def mut(current):
+        for p in current.get("posts") or []:
+            if p.get("id") == post_id:
+                comments = p.get("comments") if isinstance(p.get("comments"), list) else []
+                if len(comments) >= BOARD_MAX_COMMENTS:
+                    err["msg"] = "返信がいっぱいです"
+                    return current
+                comments.append(comment)
+                p["comments"] = comments
+                p["updated_at"] = time.time()
+                return current
+        err["msg"] = "このスレッドはありません"
+        return current
+    update_board(mut)
+    if err["msg"]:
+        raise Exception(err["msg"])
+
+def board_delete_comment(post_id, idx, username, owner=False):
+    def mut(current):
+        for p in current.get("posts") or []:
+            if p.get("id") == post_id:
+                comments = p.get("comments") if isinstance(p.get("comments"), list) else []
+                if 0 <= idx < len(comments):
+                    c = comments[idx]
+                    if username == c.get("user") or owner:
+                        comments.pop(idx)
+                        p["comments"] = comments
+                        p["updated_at"] = time.time()
+                return current
+        return current
+    update_board(mut)
+
+def board_delete_post(post_id, username, owner=False):
+    removed = {"path": ""}
+    def mut(current):
+        keep = []
+        for p in current.get("posts") or []:
+            if p.get("id") == post_id and (username == p.get("user") or owner):
+                removed["path"] = p.get("image") or ""
+                continue
+            keep.append(p)
+        current["posts"] = keep
+        return current
+    update_board(mut)
+    path = removed["path"]
+    if path and os.path.exists(path):
+        try:
+            os.remove(path)
+        except Exception:
+            pass
+
 def save_board(data):
-    posts = data.get("posts", [])[-BOARD_MAX_POSTS:]
-    data_out = {"posts": posts, "updated_at": float(data.get("updated_at") or time.time())}
-    # boardも同時投稿・返信時の丸ごと上書きを防ぐ。
-    # 既にUI側で編集済みのスナップショットを保存する仕様は維持する。
-    update_json_file(BOARD_FILE, {"posts": [], "updated_at": 0},
-                     lambda _current: data_out, backup=True)
+    # 互換用。新しい処理は update_board を使う。
+    update_board(lambda _current: {
+        "posts": [p for p in (data.get("posts") or []) if isinstance(p, dict)],
+        "updated_at": time.time(),
+    })
 
 def board_image_path(pid):
     return os.path.join(BOARD_DIR, f"{pid}.jpg")
@@ -1033,7 +1315,15 @@ def add_history_item(item):
 
     def _add(record):
         history = record.get("history") if isinstance(record.get("history"), list) else []
-        record["history"] = _history_within_days(history + [item], 3)
+        row = dict(item)
+        url = row.get("url") or ""
+        if isinstance(url, str) and url.startswith("data:"):
+            name = str(st.session_state.get("username") or "user")
+            prefix = re.sub(r"[^a-zA-Z0-9_-]+", "_", name)[:24] or "user"
+            stored = store_image_uri(url, LIBRARY_DIR, f"{prefix}_hist")
+            if stored:
+                row["url"] = stored
+        record["history"] = _history_within_days(history + [row], 3)
         return record
 
     record = update_user_atomic(_add)
@@ -1043,9 +1333,14 @@ def add_history_item(item):
 def add_library(uri, label="", extra=None):
     if not uri:
         return
-    item = {"id": str(uuid.uuid4())[:8], "url": uri, "label": label or "保存画像"}
+    name = str(st.session_state.get("username") or "user")
+    prefix = re.sub(r"[^a-zA-Z0-9_-]+", "_", name)[:24] or "user"
+    stored = store_image_uri(uri, LIBRARY_DIR, f"{prefix}_lib") or uri
+    item = {"id": uuid.uuid4().hex, "url": stored, "label": label or "保存画像"}
     if extra:
         item.update(extra)
+        if extra.get("url"):
+            item["url"] = stored
     item["time"] = datetime.now().strftime("%Y/%m/%d %H:%M")
 
     def _add(record):
@@ -1100,7 +1395,7 @@ def apply_simple_settings(item):
         st.session_state.simple_steps = 20
     st.session_state.simple_sampler = str(item.get("sampler") or "Euler Ancestral")
 
-def adjust_user_points(delta, signup_delta=0):
+def adjust_user_points(delta, signup_delta=0, reason=""):
     """最新の保存済みポイントを基準に原子的に増減する。"""
     delta = int(delta)
     signup_delta = int(signup_delta)
@@ -1110,6 +1405,10 @@ def adjust_user_points(delta, signup_delta=0):
         if delta < 0 and current < -delta:
             raise ValueError(f"ポイントが足りません。必要 {-delta}")
         record["points"] = current + delta
+        if delta < 0:
+            record["points_used"] = int(record.get("points_used") or 0) + (-delta)
+        elif delta > 0:
+            record["points_gained"] = int(record.get("points_gained") or 0) + delta
         if "signup_points_remaining" in record or signup_delta:
             remain = int(record.get("signup_points_remaining") or 0)
             record["signup_points_remaining"] = max(0, remain + signup_delta)
@@ -1123,9 +1422,11 @@ def adjust_user_points(delta, signup_delta=0):
         st.session_state.points = int(record.get("points") or 0)
         if "signup_points_remaining" in record:
             st.session_state.signup_points_remaining = int(record.get("signup_points_remaining") or 0)
+        if delta:
+            log_point_event(st.session_state.get("username") or "", delta, reason, record.get("points") or 0)
     return int(st.session_state.get("points") or 0)
 
-def take_points(cost):
+def take_points(cost, reason="生成"):
     # ポイントを使う処理は、必ずログイン済みかつ残高が足りる場合だけ通す。
     # 未ログイン時に username が空のためポイント減算をスキップして
     # そのまま生成APIへ進んでしまうことを防ぐ。
@@ -1138,7 +1439,7 @@ def take_points(cost):
     if current < cost:
         raise Exception(f"ポイントが足りません。必要 {cost}ポイントです。")
     signup_delta = -cost if "signup_points_remaining" in st.session_state else 0
-    adjust_user_points(-cost, signup_delta=signup_delta)
+    adjust_user_points(-cost, signup_delta=signup_delta, reason=reason)
 
 def finish_action():
     st.session_state.act_busy = False
@@ -1600,8 +1901,20 @@ def apply_login(name, data, persist=True, sync=True, pending=True):
     else:
         st.session_state.community_seen_at = board_last_activity()
     st.session_state.premium_until = data.get("premium_until", "")
-    st.session_state.simple_history = _history_within_days(data.get("history", []), 3)
-    st.session_state.library = data.get("library", [])
+    migrated = migrate_stored_images(dict(data), name)
+    if migrated.get("_images_migrated"):
+        def _persist_migrated(record):
+            record["icon"] = migrated.get("icon", record.get("icon"))
+            record["library"] = migrated.get("library", record.get("library"))
+            record["history"] = migrated.get("history", record.get("history"))
+            return record
+        saved = update_user_atomic(_persist_migrated)
+        if saved is not None:
+            migrated = saved
+    st.session_state.simple_history = _history_within_days(migrated.get("history", []), 3)
+    st.session_state.library = migrated.get("library", [])
+    if migrated.get("icon"):
+        st.session_state.icon = migrated.get("icon")
     st.session_state.stripe_sub = data.get("stripe_sub", "")
     st.session_state.stripe_customer = data.get("stripe_customer", "")
     st.session_state.stripe_period = data.get("stripe_period", "")
@@ -1669,11 +1982,12 @@ def render_top_menu():
         st.markdown("### メニュー")
         if st.session_state.logged_in:
             icon = st.session_state.get("icon", "🐱")
-            if isinstance(icon, str) and icon.startswith("data:image"):
-                st.image(icon, width=48)
+            if isinstance(icon, str) and (icon.startswith("data:image") or _safe_local_path(icon)):
+                st.image(media_src(icon), width=48)
             else:
                 st.write(icon)
-            st.write(st.session_state.get("username", ""))
+            pts = int(st.session_state.get("points") or 0)
+            st.write(f"{st.session_state.get('username', '')}　残り {pts}ポイント")
             if st.button("アイコン変更", use_container_width=True):
                 go("icon"); st.rerun()
             if st.button("ログアウト", use_container_width=True):
@@ -1693,8 +2007,11 @@ def render_top_menu():
                 '</div>',
                 unsafe_allow_html=True,
             )
-        st.write(f"ポイント {st.session_state.points}")
-        st.write(f"会員 {member_label() if st.session_state.logged_in else '未登録'}")
+        if st.session_state.logged_in:
+            st.write(f"会員 {member_label()}")
+        else:
+            st.write(f"ポイント {int(st.session_state.get('points') or 0)}")
+            st.write("会員 未登録")
         community_badge = " 🔴" if community_unread_count() else ""
         menu_items = [(f"👥 コミュニティ{community_badge}", "board"), ("画像生成モード", "simple"), ("セット画像生成", "chars"), ("保存庫", "lib"), ("動画生成", "video"), ("動画を移す", "vmove"), ("ポイント購入", "shop"), ("月額登録", "plan"), ("お問い合わせ", "contact")]
         if is_owner():
@@ -1800,7 +2117,7 @@ def render_set_generation_page():
             with st.spinner("生成中…"):
                 if spec["paid"] and not is_premium() and not is_owner():
                     raise Exception("このサイズはVIPだけです")
-                take_points(spec["cost"])
+                take_points(spec["cost"], reason="セット画像生成")
                 used_seed = seed_value if seed_value is not None else secrets.randbelow(4294967296)
                 char_refs, style_refs = _set_refs_from_entry(selected_entry)
                 prompt_parts = [x.strip() for x in [st.session_state.set_sq, st.session_state.set_sb, st.session_state.set_sc, st.session_state.set_so] if x.strip()]
@@ -1974,7 +2291,18 @@ elif st.session_state.page == "lib":
                 item_id = str((st.session_state.library[len(st.session_state.library) - 1 - i] or {}).get("id") or "")
                 def _delete(record):
                     lib = record.get("library") if isinstance(record.get("library"), list) else []
-                    record["library"] = [x for x in lib if str((x or {}).get("id") or "") != item_id]
+                    keep = []
+                    for x in lib:
+                        if str((x or {}).get("id") or "") == item_id:
+                            path = _safe_local_path((x or {}).get("url") or "")
+                            if path:
+                                try:
+                                    os.remove(path)
+                                except Exception:
+                                    pass
+                            continue
+                        keep.append(x)
+                    record["library"] = keep
                     return record
                 record = update_user_atomic(_delete)
                 if record is not None:
@@ -2030,7 +2358,7 @@ elif st.session_state.page == "video":
         else:
             st.session_state.video_starting = True
             try:
-                take_points(video_cost(dur))
+                take_points(video_cost(dur), reason="動画生成")
                 task_id = grok_start_video(st.session_state.video_src, motion, dur)
                 st.session_state.vjob = {"kind": "video", "id": task_id}
                 start_wait(); st.session_state.error = ""
@@ -2102,7 +2430,7 @@ elif st.session_state.page == "vmove":
         else:
             st.session_state.video_starting = True
             try:
-                take_points(cost)
+                take_points(cost, reason="動画を移す")
                 task_id = mm_start_move(st.session_state.vmove_img, st.session_state.vmove_vid, motion, dur)
                 st.session_state.vjob = {"kind": "vmove", "id": task_id}
                 start_wait(); st.session_state.error = ""
@@ -2124,7 +2452,10 @@ elif st.session_state.page == "icon":
     if up:
         st.image(up, width=80)
     if st.button("この画像にする", type="primary") and up:
-        st.session_state.icon = uploaded_to_uri(up); save_user_state({"icon"}); st.rerun()
+        name = str(st.session_state.get("username") or "user")
+        prefix = re.sub(r"[^a-zA-Z0-9_-]+", "_", name)[:24] or "user"
+        st.session_state.icon = store_image_uri(uploaded_to_uri(up), ICON_DIR, f"{prefix}_icon") or uploaded_to_uri(up)
+        save_user_state({"icon"}); st.rerun()
     if st.button("動物アイコンに戻す"):
         st.session_state.icon = random.choice(ANIMALS); save_user_state({"icon"}); st.rerun()
 
@@ -2209,6 +2540,7 @@ elif st.session_state.page == "register":
                     st.error("すでに登録されています")
                 else:
                     apply_login(p["name"], created["user"])
+                    log_point_event(p["name"], SIGNUP_POINTS, "新規登録", SIGNUP_POINTS)
                     st.session_state.pending = None
                     st.session_state.signup_just_completed = True
                     go("simple"); st.rerun()
@@ -2218,7 +2550,8 @@ elif st.session_state.page == "register":
     if st.button("ログインする"):
         users = load_json(USERS_FILE, {})
         found = find_user(users, lu)
-        if found and users[found]["password"] == hash_password(lp):
+        if found and password_matches(users[found].get("password"), lp):
+            upgrade_password_hash(found, lp, users[found].get("password"))
             apply_login(found, users[found]); go("board"); st.rerun()
         else:
             st.error("ログインできません")
@@ -2294,13 +2627,102 @@ elif st.session_state.page == "stats":
     days = data.get("days") if isinstance(data.get("days"), dict) else {}
     today = datetime.now().strftime("%Y/%m/%d")
     yday = (datetime.now() - timedelta(days=1)).strftime("%Y/%m/%d")
-    st.write(f"累計来場 {int(data.get('total', 0))}")
-    st.write(f"今日 {int(days.get(today, 0))}")
-    st.write(f"昨日 {int(days.get(yday, 0))}")
-    st.write(f"最後 {data.get('last') or 'なし'}")
-
     users = load_json(USERS_FILE, {})
     valid_users = [(name, u) for name, u in users.items() if isinstance(u, dict)]
+    registered = len(valid_users)
+    now = datetime.now()
+    online_rows = []
+    recent_rows = []
+    balances = []
+    total_balance = 0
+    total_used = 0
+    total_gained = 0
+    for name, u in valid_users:
+        pts = int(u.get("points") or 0)
+        used = int(u.get("points_used") or 0)
+        gained = int(u.get("points_gained") or 0)
+        total_balance += pts
+        total_used += used
+        total_gained += gained
+        balances.append((name, pts, used, gained, u))
+        seen = str(u.get("last_seen") or "")
+        if not seen:
+            continue
+        try:
+            t = datetime.strptime(seen, "%Y/%m/%d %H:%M")
+        except Exception:
+            continue
+        mins = (now - t).total_seconds() / 60
+        row = (name, seen, pts, mins)
+        if mins <= 30:
+            online_rows.append(row)
+        recent_rows.append((t, row))
+
+    viewers = data.get("viewers") if isinstance(data.get("viewers"), dict) else {}
+    today_viewers = viewers.get(today) if isinstance(viewers.get(today), list) else []
+    yday_viewers = viewers.get(yday) if isinstance(viewers.get(yday), list) else []
+    guest_days = data.get("guest_days") if isinstance(data.get("guest_days"), dict) else {}
+    used_days = data.get("points_used_days") if isinstance(data.get("points_used_days"), dict) else {}
+    gained_days = data.get("points_gained_days") if isinstance(data.get("points_gained_days"), dict) else {}
+    point_log = data.get("point_log") if isinstance(data.get("point_log"), list) else []
+
+    st.markdown("### いまの状況")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("登録者", f"{registered}人")
+    c2.metric("ログイン中", f"{len(online_rows)}人")
+    c3.metric("今日の来場", f"{int(days.get(today, 0))}回")
+    c4.metric("今日見に来た人", f"{len(today_viewers)}人")
+    d1, d2, d3, d4 = st.columns(4)
+    d1.metric("累計来場", f"{int(data.get('total', 0))}回")
+    d2.metric("昨日の来場", f"{int(days.get(yday, 0))}回")
+    d3.metric("今日の消費", f"{int(used_days.get(today, 0))}pt")
+    d4.metric("全員の残高合計", f"{total_balance}pt")
+    st.caption(f"最後の来場 {data.get('last') or 'なし'}　／　ゲスト来場 今日 {int(guest_days.get(today, 0))}回　昨日 {int(guest_days.get(yday, 0))}回　／　付与合計 {total_gained}pt　消費合計 {total_used}pt")
+
+    st.markdown("### ログイン中の全ユーザー")
+    st.caption("最終操作から30分以内をログイン中として表示します。")
+    if online_rows:
+        for name, seen, pts, _mins in sorted(online_rows, key=lambda x: x[1], reverse=True):
+            st.write(f"**{name}**　残り {pts}ポイント　最終 {seen}")
+    else:
+        st.write("いまログイン中の人はいません")
+
+    st.markdown("### 今日見に来た人")
+    if today_viewers:
+        st.write("、".join(today_viewers))
+    else:
+        st.write("まだログインして見に来た人はいません")
+    st.caption(f"昨日見に来た人: {'、'.join(yday_viewers) if yday_viewers else 'なし'}")
+
+    st.markdown("### 登録者のポイント残高")
+    if balances:
+        for name, pts, used, gained, u in sorted(balances, key=lambda x: x[1], reverse=True):
+            seen = str(u.get("last_seen") or "未ログイン")
+            st.write(f"**{name}**　残高 {pts}　消費 {used}　付与 {gained}　最終 {seen}")
+    else:
+        st.write("登録者はいません")
+
+    st.markdown("### ポイント使用履歴")
+    st.caption("新しい順。反映後の履歴から記録されます。")
+    if point_log:
+        for row in reversed(point_log[-80:]):
+            if not isinstance(row, dict):
+                continue
+            delta = int(row.get("delta") or 0)
+            sign = f"+{delta}" if delta > 0 else str(delta)
+            st.write(f"{row.get('time','')}　{row.get('user','')}　{sign}　{row.get('reason','')}　残高 {row.get('balance','')}")
+    else:
+        st.write("まだ使用履歴はありません")
+    st.caption(f"今日の付与 {int(gained_days.get(today, 0))}pt　／　昨日の消費 {int(used_days.get(yday, 0))}pt　昨日の付与 {int(gained_days.get(yday, 0))}pt")
+
+    st.markdown("### 最近のログイン")
+    if recent_rows:
+        for _t, row in sorted(recent_rows, reverse=True)[:30]:
+            name, seen, pts, _mins = row
+            st.write(f"{name}　{seen}　残高 {pts}")
+    else:
+        st.write("なし")
+
     registered = len(valid_users)
     image_users = []
     image_zero = []
@@ -2372,6 +2794,7 @@ elif st.session_state.page == "stats":
             if not isinstance(current, dict) or grant_name not in current or not isinstance(current[grant_name], dict):
                 return current
             current[grant_name]["points"] = int(current[grant_name].get("points") or 0) + int(grant_pts)
+            current[grant_name]["points_gained"] = int(current[grant_name].get("points_gained") or 0) + int(grant_pts)
             result["ok"] = True
             result["points"] = int(current[grant_name]["points"])
             return current
@@ -2381,33 +2804,8 @@ elif st.session_state.page == "stats":
         else:
             if grant_name == st.session_state.get("username"):
                 st.session_state.points = result["points"]
+            log_point_event(grant_name, int(grant_pts), "管理者付与", result["points"])
             st.success(f"{grant_name} に {int(grant_pts)} ポイント足しました")
-
-    now = datetime.now()
-    online = []
-    recent = []
-    for name, u in valid_users:
-        seen = str(u.get("last_seen") or "")
-        if not seen:
-            continue
-        try:
-            t = datetime.strptime(seen, "%Y/%m/%d %H:%M")
-        except Exception:
-            continue
-        mins = (now - t).total_seconds() / 60
-        row = f"{name}　{seen}"
-        if mins <= 30:
-            online.append(row)
-        recent.append((t, row))
-    st.write("ログイン中（30分以内）")
-    if online:
-        for row in online:
-            st.write(row)
-    else:
-        st.write("なし")
-    st.write("最近ログイン")
-    for _t, row in sorted(recent, reverse=True)[:30]:
-        st.write(row)
 
 elif st.session_state.page == "simple":
     st.subheader("画像生成モード")
@@ -2564,7 +2962,7 @@ elif st.session_state.page == "simple":
         else:
             try:
                 with st.spinner("生成中…"):
-                    take_points(spec["cost"])
+                    take_points(spec["cost"], reason="画像生成")
                     used_seed = seed_value if seed_value is not None else secrets.randbelow(4294967296)
                     img = nai_request(
                         ", ".join(parts), spec["gen"][0], spec["gen"][1], "nai-diffusion-5-full",
@@ -2627,13 +3025,14 @@ elif st.session_state.page == "board":
         else:
             category = post.get("category") or ("作品" if post.get("image") else "その他")
             st.caption(f"【{category}】")
-            st.markdown(f"## {post.get('title') or '無題'}")
+            safe_title = html_lib.escape(str(post.get("title") or "無題"))
+            st.markdown(f"## {safe_title}")
             author = post.get("user") or "名無し"
             author_label = f"{author}　👑管理者" if post.get("is_owner") else author
             st.caption(f"{author_label}　{post.get('time','')}")
             body = str(post.get("body") or "").strip()
             if body:
-                st.markdown(body)
+                st.markdown(html_lib.escape(body).replace("\n", "  \n"))
 
             img = board_image_uri(post)
             if img:
@@ -2674,9 +3073,7 @@ elif st.session_state.page == "board":
                     st.write(c.get("text", ""))
                     if st.session_state.logged_in and (st.session_state.get("username") == c.get("user") or is_owner()):
                         if st.button("この返信を削除", key=f"delc_{view_id}_{idx}"):
-                            comments.pop(idx)
-                            post["comments"] = comments
-                            save_board(board)
+                            board_delete_comment(view_id, idx, st.session_state.get("username") or "", is_owner())
                             st.rerun()
                     if idx < len(comments) - 1:
                         st.markdown("---")
@@ -2688,19 +3085,18 @@ elif st.session_state.page == "board":
                 if st.button("返信する", type="primary", use_container_width=True):
                     if not msg.strip():
                         st.session_state.error = "返信を書いてください"
-                    elif len(comments) >= BOARD_MAX_COMMENTS:
-                        st.session_state.error = "返信がいっぱいです"
                     else:
-                        comments.append({
-                            "user": st.session_state.get("username") or "名無し",
-                            "is_owner": bool(is_owner()),
-                            "text": msg.strip()[:500],
-                            "time": datetime.now().strftime("%m/%d %H:%M"),
-                            "ts": time.time(),
-                        })
-                        post["comments"] = comments
-                        save_board(board)
-                        st.session_state.error = ""
+                        try:
+                            board_add_comment(view_id, {
+                                "user": st.session_state.get("username") or "名無し",
+                                "is_owner": bool(is_owner()),
+                                "text": msg.strip()[:500],
+                                "time": datetime.now().strftime("%m/%d %H:%M"),
+                                "ts": time.time(),
+                            })
+                            st.session_state.error = ""
+                        except Exception as e:
+                            st.session_state.error = str(e)
                     go("board"); st.rerun()
             else:
                 st.caption("返信するにはログインが必要です")
@@ -2708,14 +3104,7 @@ elif st.session_state.page == "board":
             if st.session_state.logged_in and (st.session_state.get("username") == post.get("user") or is_owner()):
                 st.divider()
                 if st.button("このスレッドを削除", type="secondary"):
-                    path = post.get("image") or ""
-                    board["posts"] = [p for p in board.get("posts", []) if p.get("id") != view_id]
-                    if path and os.path.exists(path):
-                        try:
-                            os.remove(path)
-                        except Exception:
-                            pass
-                    save_board(board)
+                    board_delete_post(view_id, st.session_state.get("username") or "", is_owner())
                     st.session_state.board_id = ""
                     go("board"); st.rerun()
     else:
@@ -2730,30 +3119,30 @@ elif st.session_state.page == "board":
                     t_cat = st.selectbox("カテゴリ", ["質問・相談", "要望", "不具合", "雑談", "その他"], key="thread_category")
                     t_body = st.text_area("内容", max_chars=1000, key="thread_body", placeholder="みんなに聞きたいことを書いてください")
                     if st.button("スレッドを作成", type="primary", use_container_width=True):
-                        if len(board.get("posts", [])) >= BOARD_MAX_POSTS:
-                            st.session_state.error = "掲示板がいっぱいです"
-                        elif not t_title.strip() or not t_body.strip():
+                        if not t_title.strip() or not t_body.strip():
                             st.session_state.error = "タイトルと内容を入力してください"
                         else:
                             pid = uuid.uuid4().hex[:10]
-                            board.setdefault("posts", []).append({
-                                "id": pid,
-                                "user": st.session_state.get("username") or "名無し",
-                                "is_owner": bool(is_owner()),
-                                "title": t_title.strip()[:60],
-                                "category": t_cat,
-                                "body": t_body.strip()[:1000],
-                                "image": "",
-                                "kind": "thread",
-                                "show_prompt": False,
-                                "comments": [],
-                                "time": datetime.now().strftime("%Y/%m/%d %H:%M"),
-                                "ts": time.time(),
-                                "updated_at": time.time(),
-                            })
-                            save_board(board)
-                            st.session_state.board_id = pid
-                            st.session_state.error = ""
+                            try:
+                                board_add_post({
+                                    "id": pid,
+                                    "user": st.session_state.get("username") or "名無し",
+                                    "is_owner": bool(is_owner()),
+                                    "title": t_title.strip()[:60],
+                                    "category": t_cat,
+                                    "body": t_body.strip()[:1000],
+                                    "image": "",
+                                    "kind": "thread",
+                                    "show_prompt": False,
+                                    "comments": [],
+                                    "time": datetime.now().strftime("%Y/%m/%d %H:%M"),
+                                    "ts": time.time(),
+                                    "updated_at": time.time(),
+                                })
+                                st.session_state.board_id = pid
+                                st.session_state.error = ""
+                            except Exception as e:
+                                st.session_state.error = str(e)
                         go("board"); st.rerun()
             else:
                 st.caption("投稿・返信にはログインが必要です")
@@ -2801,44 +3190,40 @@ elif st.session_state.page == "board":
                         else:
                             st.caption("この作品には画像生成モードのプロンプト情報がありません")
                         if st.button("作品を投稿する", type="primary", use_container_width=True):
-                            if len(board.get("posts", [])) >= BOARD_MAX_POSTS:
-                                st.session_state.error = "掲示板がいっぱいです"
-                            else:
-                                pid = uuid.uuid4().hex[:10]
-                                meta = chosen.get("meta") or {}
-                                try:
-                                    path = save_board_image(chosen["url"], pid)
-                                    board.setdefault("posts", []).append({
-                                        "id": pid,
-                                        "user": st.session_state.get("username") or "名無し",
-                                        "is_owner": bool(is_owner()),
-                                        "title": (title or "無題").strip()[:40],
-                                        "category": "作品",
-                                        "body": "",
-                                        "image": path,
-                                        "kind": chosen["kind"],
-                                        "show_prompt": chosen["kind"] == "simple" and show_p == "表示する",
-                                        "quality": meta.get("quality", "") if chosen["kind"] == "simple" else "",
-                                        "background": meta.get("background", "") if chosen["kind"] == "simple" else "",
-                                        "bubbles": list(meta.get("bubbles") or []) if chosen["kind"] == "simple" else [],
-                                        "other": meta.get("other", "") if chosen["kind"] == "simple" else "",
-                                        "negative": meta.get("negative", "") if chosen["kind"] == "simple" else "",
-                                        "size": meta.get("size", "") if chosen["kind"] == "simple" else "",
-                                        "scale": meta.get("scale", 5.0) if chosen["kind"] == "simple" else 5.0,
-                                        "steps": meta.get("steps", 20) if chosen["kind"] == "simple" else 20,
-                                        "sampler": meta.get("sampler", "Euler Ancestral") if chosen["kind"] == "simple" else "Euler Ancestral",
-                                        "seed": meta.get("seed") if chosen["kind"] == "simple" else None,
-                                        "chars": list(meta.get("chars") or [])[:3] if chosen["kind"] == "simple" else [],
-                                        "comments": [],
-                                        "time": datetime.now().strftime("%Y/%m/%d %H:%M"),
-                                        "ts": time.time(),
-                                        "updated_at": time.time(),
-                                    })
-                                    save_board(board)
-                                    st.session_state.error = ""
-                                    st.session_state.board_id = pid
-                                except Exception as e:
-                                    st.session_state.error = str(e)
+                            pid = uuid.uuid4().hex[:10]
+                            meta = chosen.get("meta") or {}
+                            try:
+                                path = save_board_image(chosen["url"], pid)
+                                board_add_post({
+                                    "id": pid,
+                                    "user": st.session_state.get("username") or "名無し",
+                                    "is_owner": bool(is_owner()),
+                                    "title": (title or "無題").strip()[:40],
+                                    "category": "作品",
+                                    "body": "",
+                                    "image": path,
+                                    "kind": chosen["kind"],
+                                    "show_prompt": chosen["kind"] == "simple" and show_p == "表示する",
+                                    "quality": meta.get("quality", "") if chosen["kind"] == "simple" else "",
+                                    "background": meta.get("background", "") if chosen["kind"] == "simple" else "",
+                                    "bubbles": list(meta.get("bubbles") or []) if chosen["kind"] == "simple" else [],
+                                    "other": meta.get("other", "") if chosen["kind"] == "simple" else "",
+                                    "negative": meta.get("negative", "") if chosen["kind"] == "simple" else "",
+                                    "size": meta.get("size", "") if chosen["kind"] == "simple" else "",
+                                    "steps": meta.get("steps", 20) if chosen["kind"] == "simple" else 20,
+                                    "sampler": meta.get("sampler", "Euler Ancestral") if chosen["kind"] == "simple" else "Euler Ancestral",
+                                    "seed": meta.get("seed") if chosen["kind"] == "simple" else None,
+                                    "scale": meta.get("scale", 5.0) if chosen["kind"] == "simple" else 5.0,
+                                    "chars": list(meta.get("chars") or [])[:3] if chosen["kind"] == "simple" else [],
+                                    "comments": [],
+                                    "time": datetime.now().strftime("%Y/%m/%d %H:%M"),
+                                    "ts": time.time(),
+                                    "updated_at": time.time(),
+                                })
+                                st.session_state.error = ""
+                                st.session_state.board_id = pid
+                            except Exception as e:
+                                st.session_state.error = str(e)
                             go("board"); st.rerun()
             else:
                 st.caption("作品投稿にはログインが必要です")
