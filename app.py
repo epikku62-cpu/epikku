@@ -2592,6 +2592,8 @@ elif st.session_state.page == "plan":
     elif stripe is None or not STRIPE_SECRET_KEY:
         st.error("決済設定がまだです。")
     else:
+        credit_pending_checkouts()
+        sync_subscription()
         if is_premium():
             st.success(f"VIP有効期限: {st.session_state.get('premium_until') or '確認中'}")
             if st.session_state.get("stripe_sub") and st.button("月額VIPを解約する"):
@@ -2600,6 +2602,8 @@ elif st.session_state.page == "plan":
                 if ok:
                     st.success(msg)
                 go("plan"); st.rerun()
+        else:
+            st.caption("決済後にこの画面へ戻ると、自動でVIPとポイントを確認します。反映まで数十秒かかることがあります。")
         if st.button(f"{MONTHLY_PRICE}円で月額登録する", type="primary"):
             try:
                 items = []
@@ -2625,10 +2629,6 @@ elif st.session_state.page == "plan":
                 st.markdown(f"[決済ページへ進む]({session.url})")
             except Exception as e:
                 st.error(str(e))
-        if st.button("決済の反映を確認する"):
-            credit_pending_checkouts(force=True)
-            sync_subscription(force=True)
-            go("plan"); st.rerun()
 
 elif st.session_state.page == "chars":
     st.subheader("セット")
