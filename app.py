@@ -108,14 +108,18 @@ def sget(obj, key, default=""):
         return getattr(obj, key, default)
 
 def mark_paid_session(session_id):
-    paid = load_json(PAID_FILE, {})
-    if not isinstance(paid, dict):
-        paid = {}
-    if session_id in paid:
-        return False
-    paid[session_id] = datetime.now().isoformat()
-    save_json(PAID_FILE, paid)
-    return True
+    result = {"new": False}
+    def _update(paid):
+        if not isinstance(paid, dict):
+            paid = {}
+        if session_id in paid:
+            result["new"] = False
+            return paid
+        paid[session_id] = datetime.now().isoformat()
+        result["new"] = True
+        return paid
+    update_json_file(PAID_FILE, {}, _update, backup=True)
+    return result["new"]
 
 def _subscription_value(sub, key, default=""):
     value = getattr(sub, key, None)
@@ -124,17 +128,19 @@ def _subscription_value(sub, key, default=""):
     return value if value is not None else default
 
 def _latest_invoice_paid(sub):
-    """現在の請求書が実際にpaidかをStripeで確認する。確認できない場合はFalse。"""
+    """現在の請求書が実際にpaidかを確認する。
+    True=支払い確認済み / False=未払い / None=確認不能（一時障害等）
+    """
     invoice_ref = _subscription_value(sub, "latest_invoice", "")
     if not invoice_ref:
-        return False
+        return None
     try:
         if isinstance(invoice_ref, dict):
             invoice = invoice_ref
         else:
             invoice = stripe.Invoice.retrieve(str(invoice_ref))
     except Exception:
-        return False
+        return None
     status = str(sget(invoice, "status") or "").lower()
     paid = sget(invoice, "paid", False)
     return status == "paid" or paid is True
@@ -142,7 +148,7 @@ def _latest_invoice_paid(sub):
 def _clear_vip_state():
     """Stripe上で契約継続を確認できない場合、VIPを即時終了する。"""
     st.session_state.premium_until = ""
-    save_user_state()
+    save_user_state({"premium_until"})
 
 def sync_subscription(force=False):
     if stripe is None or not st.session_state.get("logged_in"):
@@ -168,7 +174,12 @@ def sync_subscription(force=False):
 
     # 「自動決済が確認できた場合だけ」次の1200ポイントを付与する。
     # 初回決済もCheckout Session側でpaid確認済みだが、ここでも最新Invoiceを確認する。
-    if not _latest_invoice_paid(sub):
+    invoice_paid = _latest_invoice_paid(sub)
+    if invoice_paid is None:
+        # Stripeへの一時的な通信失敗でVIPを消さない。
+        # 更新ポイントも、支払い確認が取れない間は付与しない。
+        return
+    if not invoice_paid:
         _clear_vip_state()
         return
 
@@ -185,10 +196,20 @@ def sync_subscription(force=False):
         _clear_vip_state()
         return
 
-    if st.session_state.get("stripe_period") != period:
-        st.session_state.points = int(st.session_state.points or 0) + MONTHLY_POINTS
-        st.session_state.stripe_period = period
-    save_user_state()
+    # 同じ更新期間の1200ポイントを、複数タブから二重付与しないように
+    # 最新の保存済みstripe_periodをロック内で確認してから付与する。
+    def _renew(record):
+        old_period = str(record.get("stripe_period") or "")
+        if old_period == period:
+            return record
+        record["premium_until"] = st.session_state.get("premium_until", "")
+        record["stripe_period"] = period
+        record["points"] = int(record.get("points") or 0) + MONTHLY_POINTS
+        return record
+
+    record = update_user_atomic(_renew)
+    if record is not None:
+        _sync_session_from_user_record(record, ("points", "stripe_period", "premium_until"))
 
 def cancel_subscription_now():
     """Stripe上の月額契約を即時解約し、同時にPanel AI.のVIPも終了する。"""
@@ -210,7 +231,7 @@ def cancel_subscription_now():
     st.session_state.premium_until = ""
     st.session_state.stripe_sub = ""
     st.session_state.stripe_customer = ""
-    save_user_state()
+    save_user_state({"premium_until", "stripe_sub", "stripe_customer"})
     return True, "月額VIPを解約しました。VIPはここで終了しました。"
 
 def credit_pending_checkouts(force=False):
@@ -277,7 +298,7 @@ def apply_checkout_session(session_id):
             return "月額契約情報を取得できませんでした。少し待ってから再読み込みしてください"
         st.session_state.stripe_sub = sub_id
         st.session_state.stripe_customer = str(sget(ses, "customer") or "")
-        save_user_state()
+        save_user_state({"stripe_sub", "stripe_customer"})
         before = int(st.session_state.get("points") or 0)
         old_period = str(st.session_state.get("stripe_period") or "")
         sync_subscription(force=True)
@@ -290,8 +311,6 @@ def apply_checkout_session(session_id):
 
     # ポイント購入
     sid = str(sget(ses, "id") or session_id)
-    if not mark_paid_session(sid):
-        return "この決済は反映済みです"
     pts = 0
     try:
         pts = int(meta.get("points") or 0)
@@ -305,14 +324,15 @@ def apply_checkout_session(session_id):
                 break
     if pts <= 0:
         return "ポイント数を判別できませんでした。管理者に連絡してください"
-    st.session_state.points = int(st.session_state.points) + pts
-    save_user_state()
+    # ポイント数が確定してから「処理済み」と記録する。
+    if not mark_paid_session(sid):
+        return "この決済は反映済みです"
+    adjust_user_points(pts)
     return f"{pts}ポイントを追加しました"
 
 NAI_URLS = ["https://image.novelai.net/ai/generate-image", "https://api.novelai.net/ai/generate-image"]
 DATA_DIR = os.environ.get("DATA_DIR", os.path.abspath("data"))
 os.makedirs(DATA_DIR, exist_ok=True)
-DATA_FILE = os.path.join(DATA_DIR, "studio_data.json")
 USERS_FILE = os.path.join(DATA_DIR, "users_data.json")
 TOKENS_FILE = os.path.join(DATA_DIR, "login_tokens.json")
 PAID_FILE = os.path.join(DATA_DIR, "paid_sessions.json")
@@ -383,26 +403,30 @@ def mark_visit():
     if now_ts - last < 600:
         return
     st.session_state._visit_at = now.timestamp()
-    data = load_json(STATS_FILE, {"total": 0, "days": {}, "last": ""})
-    if not isinstance(data, dict):
-        data = {"total": 0, "days": {}, "last": ""}
     day = now.strftime("%Y/%m/%d")
-    days = data.get("days") if isinstance(data.get("days"), dict) else {}
-    days[day] = int(days.get(day, 0)) + 1
-    if len(days) > 60:
-        days = dict(sorted(days.items())[-60:])
-    data["days"] = days
-    data["total"] = int(data.get("total", 0)) + 1
-    data["last"] = now.strftime("%Y/%m/%d %H:%M")
-    save_json(STATS_FILE, data)
+    def _update_stats(data):
+        if not isinstance(data, dict):
+            data = {"total": 0, "days": {}, "last": ""}
+        days = data.get("days") if isinstance(data.get("days"), dict) else {}
+        days[day] = int(days.get(day, 0)) + 1
+        if len(days) > 60:
+            days = dict(sorted(days.items())[-60:])
+        data["days"] = days
+        data["total"] = int(data.get("total", 0)) + 1
+        data["last"] = now.strftime("%Y/%m/%d %H:%M")
+        return data
+    update_json_file(STATS_FILE, {"total": 0, "days": {}, "last": ""}, _update_stats, backup=True)
     if st.session_state.get("logged_in") and st.session_state.get("username"):
         touch_user_seen(st.session_state.get("username"))
 
 def touch_user_seen(name):
-    users = load_json(USERS_FILE, {})
-    if name in users and isinstance(users[name], dict):
-        users[name]["last_seen"] = datetime.now().strftime("%Y/%m/%d %H:%M")
-        save_json(USERS_FILE, users)
+    def _update(users):
+        if not isinstance(users, dict):
+            return users
+        if name in users and isinstance(users[name], dict):
+            users[name]["last_seen"] = datetime.now().strftime("%Y/%m/%d %H:%M")
+        return users
+    update_json_file(USERS_FILE, {}, _update, backup=True)
 
 def scroll_top():
     # ページ切り替え後のスクロール位置をスマートフォンでも確実に先頭へ戻す。
@@ -466,10 +490,17 @@ def save_tokens(data):
     save_json(TOKENS_FILE, data)
 
 def issue_login_token(name):
-    tokens = {k: v for k, v in load_tokens().items() if v != name}
-    token = uuid.uuid4().hex
-    tokens[token] = name
-    save_tokens(tokens)
+    result = {"token": ""}
+    def _update(tokens):
+        if not isinstance(tokens, dict):
+            tokens = {}
+        tokens = {k: v for k, v in tokens.items() if v != name}
+        token = uuid.uuid4().hex
+        tokens[token] = name
+        result["token"] = token
+        return tokens
+    update_json_file(TOKENS_FILE, {}, _update, backup=True)
+    token = result["token"]
     st.session_state.auth_token = token
     st.query_params["auth"] = token
     return token
@@ -631,6 +662,53 @@ def save_json(path, data, backup=True):
             except Exception:
                 pass
 
+def update_json_file(path, default, updater, backup=True):
+    """Read-modify-writeを1回のファイルロック内で行う。
+    複数のStreamlitセッションが同時に同じJSONを更新しても、
+    後から保存したセッションが先の更新を丸ごと消さないようにする。
+    """
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    lock_file = None
+    try:
+        if fcntl is not None:
+            lock_file = open(path + ".lock", "a+", encoding="utf-8")
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+
+        data = _read_json_file(path)
+        if data is None:
+            data = default
+        result = updater(data)
+        if result is not None:
+            data = result
+
+        folder = os.path.dirname(path) or "."
+        fd, tmp = tempfile.mkstemp(prefix=".tmp_", suffix=".json", dir=folder)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            if backup and os.path.exists(path) and os.path.getsize(path) > 2:
+                try:
+                    shutil.copy2(path, path + ".bak")
+                except Exception:
+                    pass
+            os.replace(tmp, path)
+        finally:
+            if os.path.exists(tmp):
+                try:
+                    os.remove(tmp)
+                except Exception:
+                    pass
+        return data
+    finally:
+        if lock_file is not None:
+            try:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+                lock_file.close()
+            except Exception:
+                pass
+
 def email_taken(users, mail):
     mail = norm_mail(mail)
     return any(isinstance(v, dict) and norm_mail(v.get("email")) == mail for v in users.values())
@@ -740,37 +818,145 @@ def is_premium():
 def member_label():
     return "VIP" if is_premium() else "ブロンズ"
 
-def save_user_state():
-    users = load_json(USERS_FILE, {})
+def _history_within_days(history, days=3):
+    """画像生成履歴を直近N日だけ残す。壊れた/日付不明の古い項目は保存しない。"""
+    if not isinstance(history, list):
+        return []
+    cutoff = datetime.now() - timedelta(days=days)
+    out = []
+    for item in history:
+        if not isinstance(item, dict):
+            continue
+        raw = str(item.get("time") or "")
+        try:
+            ts = datetime.strptime(raw, "%Y/%m/%d %H:%M")
+        except Exception:
+            # 日付を読めない既存履歴は、勝手に削除せず残す。
+            out.append(item)
+            continue
+        if ts >= cutoff:
+            out.append(item)
+    return out
+
+def save_user_state(fields=None):
+    """ユーザー情報を安全に部分更新する。
+
+    Streamlitの古いsession_stateをユーザー情報全体として保存すると、
+    別タブ・別セッションで先に保存された最新データを古い状態で
+    上書きする危険があるため、指定された項目だけを最新のusers_data.json
+    に対してread-modify-writeする。
+    """
     name = st.session_state.get("username")
     if not name:
         return
-    prev = users.get(name) if isinstance(users.get(name), dict) else {}
-    users[name] = {
-        "password": prev.get("password") or st.session_state.get("password_hash", ""),
-        "email": st.session_state.get("email") or prev.get("email", ""),
-        "icon": st.session_state.get("icon", prev.get("icon", "")),
-        "characters": st.session_state.get("characters", prev.get("characters", [])),
-        "points": int(st.session_state.get("points", prev.get("points", 0))),
-        "signup_points_remaining": (int(st.session_state.get("signup_points_remaining"))
-                                    if "signup_points_remaining" in st.session_state
-                                    else prev.get("signup_points_remaining")),
-        "community_seen_at": float(st.session_state.get("community_seen_at", prev.get("community_seen_at", 0)) or 0),
-        "premium_until": st.session_state.get("premium_until") or prev.get("premium_until", ""),
-        "rank": "vip" if is_premium() else "ブロンズ",
-        "history": st.session_state.get("simple_history", prev.get("history", []))[-30:],
-        "library": st.session_state.get("library", prev.get("library", []))[-40:],
-        "last_seen": datetime.now().strftime("%Y/%m/%d %H:%M") if st.session_state.get("logged_in") else prev.get("last_seen", ""),
-        "stripe_sub": st.session_state.get("stripe_sub") or prev.get("stripe_sub", ""),
-        "stripe_customer": st.session_state.get("stripe_customer") or prev.get("stripe_customer", ""),
-        "stripe_period": st.session_state.get("stripe_period") or prev.get("stripe_period", ""),
+
+    if fields is None:
+        fields = set()
+    else:
+        fields = set(fields)
+
+    # 認証情報・プロフィール・決済・履歴・保存庫など、明示的に指定された項目だけ保存する。
+    allowed = {
+        "email", "icon", "characters", "points", "signup_points_remaining",
+        "community_seen_at", "premium_until", "stripe_sub", "stripe_customer",
+        "stripe_period", "history", "library"
     }
-    if not users[name]["password"] and prev.get("password"):
-        users[name]["password"] = prev["password"]
-    if prev.get("password") and not users[name]["password"]:
-        users[name]["password"] = prev["password"]
-    save_json(USERS_FILE, users, backup=False)
-    save_json(DATA_FILE, {"characters": st.session_state.characters})
+    fields &= allowed
+
+    state_values = {}
+    for key in fields:
+        value = st.session_state.get(key)
+        if key in ("points", "signup_points_remaining"):
+            try:
+                value = int(value or 0)
+            except Exception:
+                value = 0
+        elif key == "community_seen_at":
+            try:
+                value = float(value or 0)
+            except Exception:
+                value = 0.0
+        elif key in ("characters", "history", "library"):
+            value = value if isinstance(value, list) else []
+        state_values[key] = value
+
+    password = st.session_state.get("password_hash")
+    update_last_seen = bool(st.session_state.get("logged_in"))
+
+    def _update(users):
+        if not isinstance(users, dict):
+            users = {}
+        prev = users.get(name) if isinstance(users.get(name), dict) else {}
+        record = dict(prev)
+
+        if password and not record.get("password"):
+            record["password"] = password
+
+        for key, value in state_values.items():
+            if key == "history":
+                record[key] = _history_within_days(value, 3)
+            else:
+                record[key] = value
+
+        # 新規項目の初期値。既存値がある場合は絶対に消さない。
+        defaults = {
+            "email": "", "icon": random.choice(ANIMALS), "characters": [],
+            "points": 0, "signup_points_remaining": 0, "community_seen_at": 0.0,
+            "premium_until": "", "stripe_sub": "", "stripe_customer": "",
+            "stripe_period": "", "history": [], "library": []
+        }
+        for key, default in defaults.items():
+            if key not in record:
+                record[key] = default
+
+        record["rank"] = "vip" if str(record.get("premium_until") or "") and _is_premium_until(record.get("premium_until")) else "ブロンズ"
+        if update_last_seen:
+            record["last_seen"] = datetime.now().strftime("%Y/%m/%d %H:%M")
+        elif "last_seen" not in record:
+            record["last_seen"] = ""
+        users[name] = record
+        return users
+
+    update_json_file(USERS_FILE, {}, _update, backup=True)
+
+
+def _is_premium_until(until):
+    try:
+        return datetime.fromisoformat(str(until)) > datetime.now()
+    except Exception:
+        return False
+
+
+def update_user_atomic(updater):
+    """最新のユーザーデータをロック内で更新する共通処理。"""
+    name = st.session_state.get("username")
+    if not name:
+        return None
+
+    result_holder = {}
+
+    def _update(users):
+        if not isinstance(users, dict):
+            users = {}
+        prev = users.get(name) if isinstance(users.get(name), dict) else {}
+        record = dict(prev)
+        result = updater(record)
+        if result is not None:
+            record = result
+        users[name] = record
+        result_holder["record"] = dict(record)
+        return users
+
+    update_json_file(USERS_FILE, {}, _update, backup=True)
+    return result_holder.get("record")
+
+
+def _sync_session_from_user_record(record, keys):
+    if not isinstance(record, dict):
+        return
+    for key in keys:
+        if key in record:
+            st.session_state[key] = record[key]
 
 def load_board():
     data = load_json(BOARD_FILE, {"posts": []})
@@ -806,16 +992,22 @@ def mark_community_seen():
         return
     latest = board_last_activity()
     st.session_state.community_seen_at = latest
-    users = load_json(USERS_FILE, {})
     name = st.session_state.get("username")
-    if name in users and isinstance(users[name], dict):
-        users[name]["community_seen_at"] = latest
-        save_json(USERS_FILE, users, backup=False)
+    def _update(users):
+        if not isinstance(users, dict):
+            return users
+        if name in users and isinstance(users[name], dict):
+            users[name]["community_seen_at"] = latest
+        return users
+    update_json_file(USERS_FILE, {}, _update, backup=True)
 
 def save_board(data):
     posts = data.get("posts", [])[-BOARD_MAX_POSTS:]
-    data_out = {"posts": posts, "updated_at": float(data.get("updated_at") or 0)}
-    save_json(BOARD_FILE, data_out)
+    data_out = {"posts": posts, "updated_at": float(data.get("updated_at") or time.time())}
+    # boardも同時投稿・返信時の丸ごと上書きを防ぐ。
+    # 既にUI側で編集済みのスナップショットを保存する仕様は維持する。
+    update_json_file(BOARD_FILE, {"posts": [], "updated_at": 0},
+                     lambda _current: data_out, backup=True)
 
 def board_image_path(pid):
     return os.path.join(BOARD_DIR, f"{pid}.jpg")
@@ -834,6 +1026,20 @@ def board_image_uri(post):
             return "data:image/jpeg;base64," + base64.b64encode(f.read()).decode()
     return post.get("url") or ""
 
+def add_history_item(item):
+    """生成履歴を最新データへ原子的に追加し、3日分だけ保持する。"""
+    if not isinstance(item, dict):
+        return
+
+    def _add(record):
+        history = record.get("history") if isinstance(record.get("history"), list) else []
+        record["history"] = _history_within_days(history + [item], 3)
+        return record
+
+    record = update_user_atomic(_add)
+    if record is not None:
+        st.session_state.simple_history = _history_within_days(record.get("history", []), 3)
+
 def add_library(uri, label="", extra=None):
     if not uri:
         return
@@ -841,15 +1047,20 @@ def add_library(uri, label="", extra=None):
     if extra:
         item.update(extra)
     item["time"] = datetime.now().strftime("%Y/%m/%d %H:%M")
-    st.session_state.library.append(item)
-    save_user_state()
+
+    def _add(record):
+        library = record.get("library") if isinstance(record.get("library"), list) else []
+        record["library"] = library + [item]
+        return record
+
+    record = update_user_atomic(_add)
+    if record is not None:
+        st.session_state.library = record.get("library", [])
 
 def site_work_kind(item):
     label = str((item or {}).get("label") or "")
     if label.startswith("画像生成") or (item or {}).get("kind") == "simple":
         return "simple"
-    if "4コマ" in label:
-        return "yonkoma"
     return ""
 
 def prompt_from_history(url):
@@ -889,17 +1100,39 @@ def apply_simple_settings(item):
         st.session_state.simple_steps = 20
     st.session_state.simple_sampler = str(item.get("sampler") or "Euler Ancestral")
 
+def adjust_user_points(delta, signup_delta=0):
+    """最新の保存済みポイントを基準に原子的に増減する。"""
+    delta = int(delta)
+    signup_delta = int(signup_delta)
+
+    def _update(record):
+        current = int(record.get("points") or 0)
+        if delta < 0 and current < -delta:
+            raise ValueError(f"ポイントが足りません。必要 {-delta}")
+        record["points"] = current + delta
+        if "signup_points_remaining" in record or signup_delta:
+            remain = int(record.get("signup_points_remaining") or 0)
+            record["signup_points_remaining"] = max(0, remain + signup_delta)
+        return record
+
+    try:
+        record = update_user_atomic(_update)
+    except ValueError as e:
+        raise Exception(str(e))
+    if record is not None:
+        st.session_state.points = int(record.get("points") or 0)
+        if "signup_points_remaining" in record:
+            st.session_state.signup_points_remaining = int(record.get("signup_points_remaining") or 0)
+    return int(st.session_state.get("points") or 0)
+
 def take_points(cost):
     if is_owner() or int(cost) <= 0:
         return
-    if st.session_state.points < cost:
-        raise Exception(f"ポイントが足りません。必要 {cost}")
     cost = int(cost)
-    st.session_state.points -= cost
-    # 新規登録特典20ポイントの残量を追跡（既存ユーザーには後付けしない）
+    signup_delta = 0
     if "signup_points_remaining" in st.session_state:
-        st.session_state.signup_points_remaining = max(0, int(st.session_state.get("signup_points_remaining") or 0) - cost)
-    save_user_state()
+        signup_delta = -cost
+    adjust_user_points(-cost, signup_delta=signup_delta)
 
 def finish_action():
     st.session_state.act_busy = False
@@ -1021,6 +1254,49 @@ def nai_request(prompt, width, height, model, steps=23, scale=5.0, negative="", 
     raise Exception(last_err or "NovelAIの生成に失敗しました")
 
 
+def mm_headers():
+    if not MINIMAX_KEY:
+        raise Exception("MINIMAX_API_KEY がありません")
+    return {"Authorization": f"Bearer {MINIMAX_KEY}", "Content-Type": "application/json"}
+
+def mm_upload_path(path, filename):
+    if not MINIMAX_KEY:
+        raise Exception("MINIMAX_API_KEY がありません")
+    with open(path, "rb") as f:
+        res = requests.post(
+            "https://api.minimax.io/v1/files/upload",
+            headers={"Authorization": f"Bearer {MINIMAX_KEY}"},
+            data={"purpose": "video_generation_input"},
+            files={"file": (filename, f)},
+            timeout=120,
+        )
+    if res.status_code not in (200, 201):
+        raise Exception(f"アップロード失敗 {res.status_code}: {res.text[:400]}")
+    data = res.json()
+    fid = (data.get("file") or {}).get("file_id") or data.get("file_id")
+    if fid is None:
+        raise Exception(f"file_idがありません: {str(data)[:400]}")
+    return f"mm_file://{fid}"
+
+def mm_upload_image_uri(image_uri):
+    raw = image_uri
+    if "," in raw and str(raw).startswith("data:"):
+        raw = raw.split(",", 1)[1]
+    try:
+        blob = base64.b64decode(raw)
+    except Exception:
+        raise Exception("画像を送れません")
+    path = os.path.join(VID_DIR, f"mm_{uuid.uuid4().hex}.jpg")
+    with open(path, "wb") as f:
+        f.write(blob)
+    try:
+        return mm_upload_path(path, "ref.jpg")
+    finally:
+        try:
+            os.remove(path)
+        except Exception:
+            pass
+
 def mm_create_video(payload):
     res = requests.post("https://api.minimax.io/v2/video_generation", headers=mm_headers(), json=payload, timeout=60)
     if res.status_code not in (200, 201, 202):
@@ -1126,141 +1402,6 @@ def probe_wh(path):
 def even_size(n):
     n = max(2, int(round(n)))
     return n if n % 2 == 0 else n + 1
-
-def layout_kind(layout_key, n):
-    key = str(layout_key)
-    if key.startswith("横"):
-        return n, 1
-    if key == "2×2":
-        return 2, 2
-    return 1, n
-
-def panel_targets(paths, layout_key):
-    n = len(paths)
-    cols, rows = layout_kind(layout_key, n)
-    sizes = [probe_wh(p) for p in paths]
-    max_w = max(w for w, _h in sizes)
-    max_h = max(h for _w, h in sizes)
-    cap = 1080
-    out = []
-    if cols == 1:
-        tw = even_size(min(cap, max_w))
-        for w, h in sizes:
-            out.append((tw, even_size(h * tw / max(w, 1))))
-    elif rows == 1:
-        th = even_size(min(cap, max_h))
-        for w, h in sizes:
-            out.append((even_size(w * th / max(h, 1)), th))
-    else:
-        tw = even_size(min(cap, max_w))
-        for w, h in sizes:
-            out.append((tw, even_size(h * tw / max(w, 1))))
-    return cols, rows, out
-
-def scale_filter(w, h):
-    return f"fps=24,scale={w}:{h}:force_original_aspect_ratio=decrease:force_divisible_by=2,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:color=white,setsar=1,format=yuv420p"
-
-def stack_filter(cols, rows, n, labels, targets):
-    joined = "".join(labels)
-    if cols == 1:
-        return joined + f"vstack=inputs={n}[out]"
-    if rows == 1:
-        return joined + f"hstack=inputs={n}[out]"
-    w0, h0 = targets[0]
-    w1, h1 = targets[1] if n > 1 else targets[0]
-    w2, h2 = targets[2] if n > 2 else targets[0]
-    layout = f"0_0|{w0}_0|0_{h0}|{w0}_{h0}"
-    return joined + f"xstack=inputs={n}:layout={layout}[out]"
-
-def has_audio(path):
-    r = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "a:0", "-show_entries", "stream=codec_type", "-of", "csv=p=0", path], capture_output=True, text=True)
-    return bool((r.stdout or "").strip())
-
-def concat_videos(paths, out_path, keep_audio=False):
-    lst = os.path.join(VID_DIR, f"{uuid.uuid4().hex}.txt")
-    with open(lst, "w", encoding="utf-8") as f:
-        for p in paths:
-            f.write(f"file '{os.path.abspath(p)}'\n")
-    cmd = ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", lst, "-c:v", "libx264", "-pix_fmt", "yuv420p"]
-    if keep_audio:
-        cmd += ["-c:a", "aac", "-b:a", "128k"]
-    else:
-        cmd += ["-an"]
-    cmd.append(out_path)
-    r = subprocess.run(cmd, capture_output=True, text=True)
-    if r.returncode != 0 or not os.path.exists(out_path):
-        raise Exception(r.stderr[-400:] if r.stderr else "結合に失敗しました")
-    return out_path
-
-def run_compose_ffmpeg(ins, filt, out_path, keep_audio=False, extra=None, audio_map=None):
-    cmd = ["ffmpeg", "-y"] + ins + ["-filter_complex", filt, "-map", "[out]"]
-    if keep_audio and audio_map:
-        cmd += ["-map", audio_map, "-c:a", "aac", "-b:a", "128k"]
-    else:
-        cmd += ["-an"]
-    cmd += ["-c:v", "libx264", "-pix_fmt", "yuv420p"]
-    if extra:
-        cmd += extra
-    cmd.append(out_path)
-    r = subprocess.run(cmd, capture_output=True, text=True)
-    if r.returncode != 0 or not os.path.exists(out_path):
-        raise Exception((r.stderr or "結合失敗")[-500:])
-    return out_path
-
-def compose_yonkoma_video(paths, layout_key="2×2", out_path="out.mp4", sequential=False, keep_audio=False):
-    n = len(paths)
-    if n < 2:
-        raise Exception("2本以上必要です")
-    cols, rows, targets = panel_targets(paths, layout_key)
-    audio_flags = [has_audio(p) for p in paths]
-    if not sequential:
-        ins = []
-        for p in paths:
-            ins += ["-i", p]
-        parts, labels = [], []
-        for i in range(n):
-            tw, th = targets[i]
-            parts.append(f"[{i}:v]{scale_filter(tw, th)}[v{i}]")
-            labels.append(f"[v{i}]")
-        filt = ";".join(parts) + ";" + stack_filter(cols, rows, n, labels, targets)
-        audio_map = None
-        if keep_audio and any(audio_flags):
-            a_parts, alabels = [], []
-            for i, ok in enumerate(audio_flags):
-                if ok:
-                    a_parts.append(f"[{i}:a]aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo[a{i}]")
-                    alabels.append(f"[a{i}]")
-            if len(alabels) == 1:
-                filt = filt + ";" + a_parts[0]
-                audio_map = alabels[0]
-            elif len(alabels) > 1:
-                filt = filt + ";" + ";".join(a_parts) + ";" + "".join(alabels) + f"amix=inputs={len(alabels)}:duration=shortest:dropout_transition=0[aout]"
-                audio_map = "[aout]"
-        return run_compose_ffmpeg(ins, filt, out_path, keep_audio=keep_audio, extra=["-shortest"], audio_map=audio_map)
-    durs = [probe_duration(p) for p in paths]
-    segs = []
-    for k in range(n):
-        ins = []
-        for p in paths:
-            ins += ["-i", p]
-        parts, labels = [], []
-        for i in range(n):
-            tw, th = targets[i]
-            sc = scale_filter(tw, th)
-            if i == k:
-                parts.append(f"[{i}:v]{sc},setpts=PTS-STARTPTS[v{i}]")
-            else:
-                parts.append(f"[{i}:v]trim=start=0:end=0.05,loop=-1:size=1,setpts=N/24/TB,{sc},trim=duration={durs[k]:.3f},setpts=PTS-STARTPTS[v{i}]")
-            labels.append(f"[v{i}]")
-        filt = ";".join(parts) + ";" + stack_filter(cols, rows, n, labels, targets)
-        audio_map = None
-        if keep_audio and audio_flags[k]:
-            filt += f";[{k}:a]aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo,atrim=duration={durs[k]:.3f},asetpts=PTS-STARTPTS[aout]"
-            audio_map = "[aout]"
-        seg = os.path.join(VID_DIR, f"seq_{k}_{uuid.uuid4().hex}.mp4")
-        run_compose_ffmpeg(ins, filt, seg, keep_audio=keep_audio, extra=["-t", f"{durs[k]:.3f}"], audio_map=audio_map)
-        segs.append(seg)
-    return concat_videos(segs, out_path, keep_audio=keep_audio)
 
 def wrap_text(text, font, max_width):
     lines, line = [], ""
@@ -1453,21 +1594,39 @@ def apply_login(name, data, persist=True, sync=True, pending=True):
     else:
         st.session_state.community_seen_at = board_last_activity()
     st.session_state.premium_until = data.get("premium_until", "")
-    st.session_state.simple_history = data.get("history", [])
+    st.session_state.simple_history = _history_within_days(data.get("history", []), 3)
     st.session_state.library = data.get("library", [])
     st.session_state.stripe_sub = data.get("stripe_sub", "")
     st.session_state.stripe_customer = data.get("stripe_customer", "")
     st.session_state.stripe_period = data.get("stripe_period", "")
     if not st.session_state.get("auth_token"):
         issue_login_token(name)
-    if persist:
-        save_user_state()
+    # ログイン時は読み込んだユーザーデータをそのまま再保存しない。
+    # 古いセッションが最新の保存庫・ポイント・決済情報を上書きするのを防ぐ。
     if sync:
         sync_subscription()
     if pending:
         credit_pending_checkouts()
 
 def render_top_menu():
+    st.markdown(
+        """<style>
+        div.st-key-panel_menu_toggle {
+            position: fixed;
+            top: 12px;
+            left: 12px;
+            z-index: 99999;
+            width: 120px;
+        }
+        div.st-key-panel_menu_toggle button {
+            border: 2px solid #111;
+            border-radius: 12px;
+            background: #ffffff;
+            font-weight: 800;
+        }
+        </style>""",
+        unsafe_allow_html=True,
+    )
     left, _ = st.columns([1, 3])
     with left:
         label = "閉じる" if st.session_state.menu_open else "メニュー"
@@ -1507,7 +1666,7 @@ def render_top_menu():
     st.write(f"ポイント {st.session_state.points}")
     st.write(f"会員 {member_label() if st.session_state.logged_in else '未登録'}")
     community_badge = " 🔴" if community_unread_count() else ""
-    menu_items = [(f"👥 コミュニティ{community_badge}", "board"), ("画像生成モード", "simple"), ("セット", "chars"), ("4コマ", "make"), ("保存庫", "lib"), ("動画生成", "video"), ("4コマ動画", "v4"), ("動画を移す", "vmove"), ("ポイント購入", "shop"), ("説明書", "help"), ("月額登録", "plan"), ("お問い合わせ", "contact")]
+    menu_items = [(f"👥 コミュニティ{community_badge}", "board"), ("画像生成モード", "simple"), ("セット画像生成", "chars"), ("保存庫", "lib"), ("動画生成", "video"), ("動画を移す", "vmove"), ("ポイント購入", "shop"), ("月額登録", "plan"), ("お問い合わせ", "contact")]
     if is_owner():
         menu_items.append(("来場", "stats"))
     for label, page in menu_items:
@@ -1519,6 +1678,128 @@ def get_usable_fonts():
     font_status = prepare_fonts()
     return [k for k, ok in font_status.items() if ok] or ["ゴシック"]
 
+def _set_refs_from_entry(entry):
+    """登録済みのセット/キャラクター情報から精密参照用画像を取り出す。"""
+    if not isinstance(entry, dict):
+        return [], []
+    char_keys = ("char_refs", "character_refs", "character_images", "character_reference_images")
+    style_keys = ("style_refs", "style_images", "style_reference_images")
+    both_keys = ("refs", "reference_images", "images")
+    char_refs = []
+    style_refs = []
+    for k in char_keys:
+        if entry.get(k):
+            char_refs = normalize_refs(entry.get(k))
+            break
+    for k in style_keys:
+        if entry.get(k):
+            style_refs = normalize_refs(entry.get(k))
+            break
+    if not char_refs and not style_refs:
+        for k in both_keys:
+            if entry.get(k):
+                refs = normalize_refs(entry.get(k))
+                if refs:
+                    char_refs = refs
+                break
+    return char_refs[:3], style_refs[:3]
+
+def render_set_generation_page():
+    st.subheader("セット画像生成")
+    st.caption("画像生成モードと同じ形式で、登録済みのセットを使って生成します。NovelAI 4.5 fullを使用します。")
+
+    entries = st.session_state.get("characters") or []
+    labels = [char_label(x) for x in entries]
+    if labels:
+        selected_label = st.selectbox("セット", labels, key="set_selected")
+        selected_index = labels.index(selected_label)
+        selected_entry = entries[selected_index]
+    else:
+        selected_entry = {}
+        st.info("登録済みのセットがありません。")
+
+    st.text_area("画質プロンプト", key="set_sq")
+    st.text_area("背景プロンプト", key="set_sb")
+    st.text_area("キャラクタープロンプト", key="set_sc")
+    st.text_area("その他プロンプト", key="set_so")
+    st.text_area("除外プロンプト", key="set_sn")
+
+    size_opts = [k for k, v in SIMPLE_SIZES.items() if (is_premium() or is_owner() or not v["paid"])]
+    current_size = st.session_state.get("set_size") or (size_opts[0] if size_opts else "")
+    if current_size not in size_opts:
+        current_size = size_opts[0]
+        st.session_state.set_size = current_size
+    size_name = st.radio("サイズ", size_opts, index=size_opts.index(current_size), horizontal=True, key="set_size")
+    spec = SIMPLE_SIZES[size_name]
+    st.caption(f"{spec['gen'][0]} × {spec['gen'][1]}　{spec['cost']}ポイント")
+    scale = st.slider("プロンプトガイダンス", 1.0, 10.0, float(st.session_state.get("set_scale", 5.0)), 0.1, key="set_scale")
+    with st.expander("詳細な生成設定", expanded=False):
+        steps = st.slider("ステップ", 1, 28, int(st.session_state.get("set_steps", 20)), 1, key="set_steps")
+        sampler_labels = {
+            "Euler Ancestral": "k_euler_ancestral",
+            "Euler": "k_euler",
+            "DPM++ 2M": "k_dpmpp_2m",
+            "DPM++ SDE": "k_dpmpp_sde",
+            "DPM++ 2M SDE": "k_dpmpp_2m_sde",
+            "DPM++ 2S Ancestral": "k_dpmpp_2s_ancestral",
+            "DDIM V3": "ddim_v3",
+        }
+        sampler_options = list(sampler_labels.keys())
+        current_sampler = st.session_state.get("set_sampler") or sampler_options[0]
+        if current_sampler not in sampler_options:
+            current_sampler = sampler_options[0]
+            st.session_state.set_sampler = current_sampler
+        sampler_name = st.selectbox("サンプラー", sampler_options, index=sampler_options.index(current_sampler), key="set_sampler")
+        seed_text = st.text_input("シード値", key="set_seed", placeholder="空欄ならランダム")
+        if seed_text.strip():
+            try:
+                seed_value = int(seed_text.strip())
+                if not (0 <= seed_value <= 4294967295):
+                    raise ValueError
+            except ValueError:
+                st.error("シード値は0～4294967295の整数で入力してください")
+                seed_value = None
+        else:
+            seed_value = None
+
+    if st.button("生成する", type="primary", key="set_generate"):
+        st.session_state.set_busy = True
+        st.rerun()
+    if st.session_state.get("set_busy"):
+        try:
+            with st.spinner("生成中…"):
+                if spec["paid"] and not is_premium() and not is_owner():
+                    raise Exception("このサイズはVIPだけです")
+                take_points(spec["cost"])
+                used_seed = seed_value if seed_value is not None else secrets.randbelow(4294967296)
+                char_refs, style_refs = _set_refs_from_entry(selected_entry)
+                prompt_parts = [x.strip() for x in [st.session_state.set_sq, st.session_state.set_sb, st.session_state.set_sc, st.session_state.set_so] if x.strip()]
+                img = nai_request(
+                    ", ".join(prompt_parts), spec["gen"][0], spec["gen"][1], "nai-diffusion-4-5-full",
+                    steps=steps, scale=scale, negative=st.session_state.set_sn.strip(),
+                    char_refs=char_refs, style_refs=style_refs, sampler=sampler_labels[sampler_name], seed=used_seed,
+                )
+            st.session_state.set_image = img
+            st.session_state.set_last_seed = used_seed
+            st.session_state.set_error = ""
+        except Exception as e:
+            st.session_state.set_error = str(e)
+        st.session_state.set_busy = False
+        go("chars")
+        st.rerun()
+
+    if st.session_state.get("set_error"):
+        st.error(st.session_state.set_error)
+    if st.session_state.get("set_image"):
+        st.image(st.session_state.set_image, use_container_width=True)
+        st.caption(f"シード値: {st.session_state.get('set_last_seed')}")
+        raw = uri_to_image(st.session_state.set_image)
+        st.download_button("PNG保存", data=image_to_bytes(raw), file_name="set.png", mime="image/png", key="set_download")
+        if st.button("この画像を動画にする", key="set_to_video"):
+            st.session_state.video_src = st.session_state.set_image
+            go("video")
+            st.rerun()
+
 defaults = {
     "logged_in": False, "page": "home", "auth_token": "", "layout": "縦4", "scenes": ["", "", "", ""],
     "scene_chars": ["セットなし"] * 4, "panel_images": [None] * 4, "panel_upload": [False] * 4,
@@ -1528,11 +1809,9 @@ defaults = {
     "simple_image": None, "simple_busy": False, "simple_history": [], "show_history": False, "simple_size": "", "simple_scale": 5.0, "simple_steps": 20, "simple_sampler": "Euler Ancestral",
     "hist_pick": None, "sq": "", "sb": "", "so": "", "sn": "", "schars": [""], "sbubbles": [""],
     "icon": random.choice(ANIMALS), "email": "", "pending": None, "library": [], "signup_just_completed": False,
-    "video_src": None, "video_out": None, "v4_clips": [None] * 4, "v4_prompts": ["", "", "", ""],
-    "v4_durs": [5, 5, 5, 5], "v4_count": 4, "v4_layout": "2×2", "v4_play": "同時に動く",
-    "v4_joined": None, "vjob": None, "v4_joining": False, "do_join": False, "v4_audio": "音声を消す", "board_id": "", "community_seen_at": 0, "wait_until": 0, "video_starting": False, "_booted": False,
+    "video_src": None, "video_out": None, "set_selected": "", "set_image": None, "set_busy": False, "set_error": "", "set_size": "", "set_scale": 5.0, "set_steps": 20, "set_sampler": "Euler Ancestral", "set_seed": "", "set_last_seed": None,
+        "vjob": None, "board_id": "", "community_seen_at": 0, "wait_until": 0, "video_starting": False, "_booted": False,
     "menu_open": False, "need_top": True, "act_busy": False, "password_hash": "", "characters": [],
-    "vmove_vid": None, "vmove_img": None, "vmove_out": None, "stripe_sub": "", "stripe_customer": "", "stripe_period": "",
 }
 for k, v in defaults.items():
     if k not in st.session_state:
@@ -1612,7 +1891,7 @@ if st.session_state.page == "home":
     st.markdown("""
     <div style="text-align:center;color:#ff4d88;font-size:20px;font-weight:800;line-height:1.7;
     background:rgba(255,255,255,.82);padding:16px 14px;border-radius:22px;border:3px solid #ffb6d5;">
-    panel AIは<br>4コマ画像・4コマ動画<br>画像生成・動画生成<br>作成AIサイト ♡
+    panel AIは<br>画像生成・動画生成<br>作成AIサイト ♡
     </div>
     """, unsafe_allow_html=True)
     if not st.session_state.logged_in:
@@ -1639,8 +1918,6 @@ if st.session_state.page == "home":
     with mid[1]:
         if st.button("👥 コミュニティ", use_container_width=True, key="home_community"):
             go("board"); st.rerun()
-        if st.button("panel", use_container_width=True, key="home_panel"):
-            go("help"); st.rerun()
     st.stop()
 
 show_header()
@@ -1649,16 +1926,6 @@ if st.session_state.error:
     st.error(st.session_state.error)
     if st.button("通知を閉じる"):
         st.session_state.error = ""; st.rerun()
-
-elif st.session_state.page == "help":
-    st.markdown(f"""<div style="color:#111;background:#fff;padding:16px;border-radius:12px;">
-    <h2>画像生成モード</h2><p>ポイントを消費して画像生成<br>日本語で作成可能<br>おすすめ</p>
-    <h2>セット</h2><p>絵柄の登録<br>キャラの登録<br>登録したら4コマ画像生成の時、絵柄、キャラが反映される</p>
-    <h2>4コマ</h2><p>セット絵柄、キャラを使えて画像生成して、会話、吹き出しをつけれるよ！<br>最後に合体させて4コマ完成！</p>
-    <h2>動画生成モード</h2><p>ポイントで動画生成<br>秒数が長いほどポイントが増える<br>4コマ動画も1コマずつポイント消費<br>自分のmp4（10秒以下）を入れてまとめることもできる<br>まとめは20ポイント</p>
-    <h2>月額登録</h2><p>セット機能開放<br>サイズの変更開放<br>{MONTHLY_POINTS}ポイント付与</p></div>""", unsafe_allow_html=True)
-    if st.button("登録して始めよう！", type="primary", use_container_width=True):
-        go("register" if not st.session_state.logged_in else "simple"); st.rerun()
 
 elif st.session_state.page == "lib":
     st.subheader("保存庫")
@@ -1673,7 +1940,15 @@ elif st.session_state.page == "lib":
                 st.session_state.video_src = item["url"]; go("video"); st.rerun()
         with b:
             if st.button("消す", key=f"libd_{i}"):
-                st.session_state.library.pop(len(st.session_state.library) - 1 - i); save_user_state(); st.rerun()
+                item_id = str((st.session_state.library[len(st.session_state.library) - 1 - i] or {}).get("id") or "")
+                def _delete(record):
+                    lib = record.get("library") if isinstance(record.get("library"), list) else []
+                    record["library"] = [x for x in lib if str((x or {}).get("id") or "") != item_id]
+                    return record
+                record = update_user_atomic(_delete)
+                if record is not None:
+                    st.session_state.library = record.get("library", [])
+                st.rerun()
 
 elif st.session_state.page == "video":
     st.subheader("動画生成")
@@ -1804,111 +2079,6 @@ elif st.session_state.page == "vmove":
         with open(st.session_state.vmove_out, "rb") as f:
             st.download_button("動画を保存", data=f.read(), file_name="move.mp4", mime="video/mp4")
 
-elif st.session_state.page == "v4":
-    st.subheader("4コマ動画")
-    job = st.session_state.get("vjob") if isinstance(st.session_state.get("vjob"), dict) else None
-    st.session_state.v4_count = st.radio("コマ数", [2, 3, 4], index=[2, 3, 4].index(int(st.session_state.v4_count)), horizontal=True)
-    n = int(st.session_state.v4_count)
-    layout_opts = {2: ["縦2", "横2"], 3: ["縦3", "横3"], 4: ["縦4", "横4", "2×2"]}[n]
-    if st.session_state.v4_layout not in layout_opts:
-        st.session_state.v4_layout = layout_opts[0]
-    st.session_state.v4_layout = st.radio("並び", layout_opts, horizontal=True, index=layout_opts.index(st.session_state.v4_layout))
-    st.session_state.v4_play = st.radio("再生", ["同時に動く", "順番に動く"], horizontal=True, index=0 if st.session_state.v4_play == "同時に動く" else 1)
-    audio_opts = ["音声を消す", "音声を残す"]
-    if st.session_state.get("v4_audio") not in audio_opts:
-        st.session_state.v4_audio = "音声を消す"
-    st.session_state.v4_audio = st.radio("音声", audio_opts, horizontal=True, index=audio_opts.index(st.session_state.v4_audio))
-    for i in range(n):
-        with st.expander(f"コマ {i+1}", expanded=True):
-            src = st.session_state.panel_images[i]
-            if st.session_state.library:
-                picks = ["今の4コマ画像"] + [f"{x.get('time','')} {x.get('label','')}" for x in st.session_state.library]
-                sel = st.selectbox("画像", picks, key=f"v4s_{i}")
-                if sel != "今の4コマ画像":
-                    src = st.session_state.library[picks.index(sel) - 1]["url"]
-            up = st.file_uploader("画像をアップロード", type=["png", "jpg", "jpeg"], key=f"v4u_{i}")
-            if up:
-                src = uploaded_to_uri(up)
-            if src:
-                st.image(src, width=180)
-            vup = st.file_uploader("動画をアップロード（mp4・10秒以下）", type=["mp4"], key=f"v4vu_{i}")
-            if vup is not None and st.button("この動画を使う", key=f"v4vuse_{i}"):
-                try:
-                    st.session_state.v4_clips[i] = save_upload_mp4(vup); st.session_state.error = ""
-                except Exception as e:
-                    st.session_state.error = str(e)
-                go("v4"); st.rerun()
-            st.session_state.v4_prompts[i] = st.text_input("動き", value=st.session_state.v4_prompts[i], key=f"v4p_{i}")
-            st.session_state.v4_durs[i] = st.slider("秒数", 5, 10, max(5, int(st.session_state.v4_durs[i])), key=f"v4d_{i}")
-            if job and job.get("kind") == "v4" and int(job.get("i", -1)) == i:
-                act = show_countdown_wait(f"コマ{i+1} 生成中", f"p{i}")
-                if act == "cancel":
-                    finish_action(); st.session_state.vjob = None; go("v4"); st.rerun()
-                if act == "confirm":
-                    try:
-                        state, val = grok_wait_video(job["id"])
-                        if state == "done":
-                            st.session_state.v4_clips[i] = val; st.session_state.vjob = None
-                        elif state == "error":
-                            st.session_state.error = val; st.session_state.vjob = None
-                        else:
-                            start_wait(); st.session_state.error = "まだ生成中です。もう一度確認してください"
-                    except Exception as e:
-                        st.session_state.error = str(e)
-                        start_wait()
-                    finally:
-                        finish_action()
-                    go("v4"); st.rerun()
-            if st.button("このコマを動画にする", key=f"v4g_{i}"):
-                if st.session_state.get("vjob") or st.session_state.get("video_starting"):
-                    st.session_state.error = "すでに動画を生成中です。完了するまで新しい動画は開始できません。"
-                elif not src:
-                    st.session_state.error = "画像がありません"
-                else:
-                    st.session_state.video_starting = True
-                    try:
-                        take_points(video_cost(st.session_state.v4_durs[i]))
-                        task_id = grok_start_video(src, st.session_state.v4_prompts[i], st.session_state.v4_durs[i])
-                        st.session_state.vjob = {"kind": "v4", "i": i, "id": task_id}
-                        start_wait(); st.session_state.error = ""
-                    except Exception as e:
-                        st.session_state.error = str(e)
-                    finally:
-                        st.session_state.video_starting = False
-                go("v4"); st.rerun()
-            if st.session_state.v4_clips[i] and os.path.exists(st.session_state.v4_clips[i]):
-                st.video(st.session_state.v4_clips[i])
-    ready_clips = [st.session_state.v4_clips[i] for i in range(n) if st.session_state.v4_clips[i] and os.path.exists(st.session_state.v4_clips[i])]
-    st.subheader("まとめ")
-    st.session_state.v4_joining = False
-    if st.session_state.get("do_join"):
-        st.markdown('<div style="margin:8px 0;padding:14px;border-radius:14px;background:#fff0f6;color:#ff4d88;font-weight:800;">動画をまとめています。画面を触らず、そのまま待ってください。</div>', unsafe_allow_html=True)
-        try:
-            take_points(JOIN_COST)
-            out = os.path.join(VID_DIR, f"join_{uuid.uuid4().hex}.mp4")
-            st.session_state.v4_joined = compose_yonkoma_video(ready_clips, st.session_state.v4_layout, out, sequential=(st.session_state.v4_play == "順番に動く"), keep_audio=(st.session_state.v4_audio == "音声を残す"))
-            st.session_state.error = ""
-        except Exception as e:
-            st.session_state.error = str(e)
-        st.session_state.do_join = False
-        st.session_state.act_busy = False
-        go("v4")
-        st.rerun()
-    if st.button("漫画動画としてまとめる", type="primary"):
-        if len(ready_clips) < n:
-            st.session_state.error = f"{n}本そろえてください"
-        else:
-            st.session_state.do_join = True
-            st.session_state.vjob = None
-            st.session_state.act_busy = False
-            st.session_state.error = ""
-        go("v4")
-        st.rerun()
-    if st.session_state.v4_joined and os.path.exists(st.session_state.v4_joined):
-        st.video(st.session_state.v4_joined)
-        with open(st.session_state.v4_joined, "rb") as f:
-            st.download_button("漫画動画を保存", data=f.read(), file_name="manga.mp4", mime="video/mp4")
-
 elif st.session_state.page == "icon":
     st.subheader("アイコン変更")
     if not st.session_state.logged_in:
@@ -1917,13 +2087,13 @@ elif st.session_state.page == "icon":
     if up:
         st.image(up, width=80)
     if st.button("この画像にする", type="primary") and up:
-        st.session_state.icon = uploaded_to_uri(up); save_user_state(); st.rerun()
+        st.session_state.icon = uploaded_to_uri(up); save_user_state({"icon"}); st.rerun()
     if st.button("動物アイコンに戻す"):
-        st.session_state.icon = random.choice(ANIMALS); save_user_state(); st.rerun()
+        st.session_state.icon = random.choice(ANIMALS); save_user_state({"icon"}); st.rerun()
 
 elif st.session_state.page == "shop":
     if st.session_state.logged_in:
-        credit_pending_checkouts(force=True)
+        credit_pending_checkouts()
     st.subheader("ポイント購入")
     if not st.session_state.logged_in:
         st.warning("購入にはログインが必要です。")
@@ -1986,12 +2156,25 @@ elif st.session_state.page == "register":
             elif email_taken(users, p["email"]) or p["name"] in users:
                 st.error("すでに登録されています")
             else:
-                users[p["name"]] = {"password": p["password"], "email": p["email"], "icon": p["icon"], "characters": [], "points": SIGNUP_POINTS, "signup_points_remaining": SIGNUP_POINTS, "community_seen_at": board_last_activity(), "premium_until": "", "rank": "ブロンズ", "history": [], "library": []}
-                save_json(USERS_FILE, users)
-                apply_login(p["name"], users[p["name"]])
-                st.session_state.pending = None
-                st.session_state.signup_just_completed = True
-                go("simple"); st.rerun()
+                new_user = {"password": p["password"], "email": p["email"], "icon": p["icon"], "characters": [], "points": SIGNUP_POINTS, "signup_points_remaining": SIGNUP_POINTS, "community_seen_at": board_last_activity(), "premium_until": "", "rank": "ブロンズ", "history": [], "library": [], "stripe_sub": "", "stripe_customer": "", "stripe_period": ""}
+                created = {"ok": False, "user": None}
+                def _create_user(current):
+                    if not isinstance(current, dict):
+                        current = {}
+                    if email_taken(current, p["email"]) or p["name"] in current:
+                        return current
+                    current[p["name"]] = new_user
+                    created["ok"] = True
+                    created["user"] = dict(new_user)
+                    return current
+                update_json_file(USERS_FILE, {}, _create_user, backup=True)
+                if not created["ok"]:
+                    st.error("すでに登録されています")
+                else:
+                    apply_login(p["name"], created["user"])
+                    st.session_state.pending = None
+                    st.session_state.signup_just_completed = True
+                    go("simple"); st.rerun()
     st.write("ログイン")
     lu = st.text_input("メールまたはユーザーネーム", key="lu")
     lp = st.text_input("ログイン用パスワード", type="password", key="lp")
@@ -2002,6 +2185,53 @@ elif st.session_state.page == "register":
             apply_login(found, users[found]); go("board"); st.rerun()
         else:
             st.error("ログインできません")
+
+elif st.session_state.page == "plan":
+    st.subheader("月額登録")
+    if not st.session_state.logged_in:
+        st.warning("月額登録にはログインが必要です。")
+        if st.button("ログイン / 登録", type="primary", use_container_width=True):
+            go("register"); st.rerun()
+    elif stripe is None or not STRIPE_SECRET_KEY:
+        st.error("決済設定がまだです。")
+    else:
+        # 画面を開いたときだけStripeの状態を確認する。
+        credit_pending_checkouts()
+        sync_subscription(force=True)
+        if is_premium():
+            st.success("現在VIPです。")
+            until = st.session_state.get("premium_until") or ""
+            if until:
+                try:
+                    st.write(f"VIP有効期限: {datetime.fromisoformat(until).strftime('%Y/%m/%d %H:%M')}")
+                except Exception:
+                    pass
+            st.write(f"毎月 {MONTHLY_POINTS}ポイント付与")
+            if st.session_state.get("stripe_sub"):
+                if st.button("月額VIPを解約", type="secondary"):
+                    ok, msg = cancel_subscription_now()
+                    if ok:
+                        st.success(msg)
+                        st.rerun()
+                    else:
+                        st.error(msg)
+        else:
+            st.write(f"月額 {MONTHLY_PRICE}円 / 月")
+            st.write(f"登録するとVIP機能が開放され、毎月 {MONTHLY_POINTS}ポイントが支給されます。")
+            if not STRIPE_PRICE_ID:
+                st.error("STRIPE_PRICE_ID が設定されていません。")
+            elif st.button(f"月額 {MONTHLY_PRICE}円で登録", type="primary", use_container_width=True):
+                try:
+                    session = stripe_checkout(
+                        "subscription",
+                        [{"price": STRIPE_PRICE_ID, "quantity": 1}],
+                        None,
+                        None,
+                        {"kind": "plan", "user": st.session_state.get("username") or "", "email": st.session_state.get("email") or ""},
+                    )
+                    st.markdown(f"[決済ページへ進む]({session.url})")
+                except Exception as e:
+                    st.error(str(e))
 
 elif st.session_state.page == "contact":
     st.subheader("お問い合わせ")
@@ -2100,14 +2330,20 @@ elif st.session_state.page == "stats":
     grant_name = st.text_input("ポイントを足す相手", value=str(st.session_state.get("username") or ""))
     grant_pts = st.number_input("追加ポイント", min_value=1, max_value=10000, value=300, step=1)
     if st.button("ポイントを手動で足す"):
-        users2 = load_json(USERS_FILE, {})
-        if grant_name not in users2:
+        result = {"ok": False, "points": 0}
+        def _grant(current):
+            if not isinstance(current, dict) or grant_name not in current or not isinstance(current[grant_name], dict):
+                return current
+            current[grant_name]["points"] = int(current[grant_name].get("points") or 0) + int(grant_pts)
+            result["ok"] = True
+            result["points"] = int(current[grant_name]["points"])
+            return current
+        update_json_file(USERS_FILE, {}, _grant, backup=True)
+        if not result["ok"]:
             st.error("そのユーザーはいません")
         else:
-            users2[grant_name]["points"] = int(users2[grant_name].get("points") or 0) + int(grant_pts)
-            save_json(USERS_FILE, users2)
             if grant_name == st.session_state.get("username"):
-                st.session_state.points = int(users2[grant_name]["points"])
+                st.session_state.points = result["points"]
             st.success(f"{grant_name} に {int(grant_pts)} ポイント足しました")
 
     now = datetime.now()
@@ -2299,8 +2535,8 @@ elif st.session_state.page == "simple":
                         sampler=sampler_labels[sampler_name], seed=used_seed,
                     )
                 st.session_state.simple_image = img
-                st.session_state.simple_history.append({"url": img, "time": datetime.now().strftime("%Y/%m/%d %H:%M"), "quality": st.session_state.sq, "background": st.session_state.sb, "chars": list(st.session_state.schars), "bubbles": list(st.session_state.get("sbubbles") or []), "other": st.session_state.so, "negative": st.session_state.sn, "size": size_name, "scale": scale, "steps": steps, "sampler": sampler_name, "seed": used_seed})
-                save_user_state(); st.session_state.error = ""
+                add_history_item({"url": img, "time": datetime.now().strftime("%Y/%m/%d %H:%M"), "quality": st.session_state.sq, "background": st.session_state.sb, "chars": list(st.session_state.schars), "bubbles": list(st.session_state.get("sbubbles") or []), "other": st.session_state.so, "negative": st.session_state.sn, "size": size_name, "scale": scale, "steps": steps, "sampler": sampler_name, "seed": used_seed})
+                st.session_state.error = ""
             except Exception as e:
                 st.session_state.error = str(e)
         st.session_state.simple_busy = False
@@ -2329,6 +2565,9 @@ elif st.session_state.page == "simple":
             }); st.success("入れました")
         if st.button("この画像を動画にする"):
             st.session_state.video_src = st.session_state.simple_image; go("video"); st.rerun()
+
+elif st.session_state.page == "chars":
+    render_set_generation_page()
 
 elif st.session_state.page == "board":
     st.subheader("👥 コミュニティ")
@@ -2584,225 +2823,7 @@ elif st.session_state.page == "board":
     # コミュニティを開いた時点までを既読にする。
     mark_community_seen()
 
-elif st.session_state.page == "plan":
-    st.subheader("月額登録（VIP）")
-    st.write(f"月額 {MONTHLY_PRICE}円で、セット機能・大きなサイズが使えます。更新ごとに {MONTHLY_POINTS}ポイントが付きます。")
-    if not st.session_state.logged_in:
-        st.warning("月額登録にはログインが必要です。")
-    elif stripe is None or not STRIPE_SECRET_KEY:
-        st.error("決済設定がまだです。")
-    else:
-        credit_pending_checkouts()
-        sync_subscription()
-        if is_premium():
-            st.success(f"VIP有効期限: {st.session_state.get('premium_until') or '確認中'}")
-            if st.session_state.get("stripe_sub") and st.button("月額VIPを解約する"):
-                ok, msg = cancel_subscription_now()
-                st.session_state.error = "" if ok else msg
-                if ok:
-                    st.success(msg)
-                go("plan"); st.rerun()
-        else:
-            st.caption("決済後にこの画面へ戻ると、自動でVIPとポイントを確認します。反映まで数十秒かかることがあります。")
-        if st.button(f"{MONTHLY_PRICE}円で月額登録する", type="primary"):
-            try:
-                items = []
-                if STRIPE_PRICE_ID:
-                    items = [{"price": STRIPE_PRICE_ID, "quantity": 1}]
-                else:
-                    items = [{
-                        "price_data": {
-                            "currency": "jpy",
-                            "unit_amount": MONTHLY_PRICE,
-                            "recurring": {"interval": "month"},
-                            "product_data": {"name": "panel AI. 月額VIP"},
-                        },
-                        "quantity": 1,
-                    }]
-                session = stripe_checkout(
-                    "subscription",
-                    items,
-                    None,
-                    None,
-                    {"kind": "plan", "user": st.session_state.get("username") or ""},
-                )
-                st.markdown(f"[決済ページへ進む]({session.url})")
-            except Exception as e:
-                st.error(str(e))
-
-elif st.session_state.page == "chars":
-    st.subheader("セット")
-    if not st.session_state.logged_in:
-        st.warning("ログインしてください")
-        st.stop()
-    if not is_premium() and not is_owner():
-        st.warning("セット機能はVIP専用です。月額登録から開放できます。")
-        if st.button("月額登録へ"):
-            go("plan"); st.rerun()
-        st.stop()
-    st.caption("キャラ画像と絵柄画像を登録すると、4コマ生成時にセットとして選べます。")
-    sets = list(st.session_state.characters or [])
-    if sets:
-        for i, ch in enumerate(sets):
-            with st.expander(char_label(ch), expanded=False):
-                st.write(f"キャラ参照 {len(normalize_refs(ch.get('chars')))}枚 / 絵柄参照 {len(normalize_refs(ch.get('styles')))}枚")
-                if st.button("このセットを消す", key=f"delset_{i}"):
-                    st.session_state.characters.pop(i)
-                    save_user_state()
-                    go("chars"); st.rerun()
-    name = st.text_input("セット名", key="set_new_name")
-    cup = st.file_uploader("キャラ画像（最大3枚）", type=["png", "jpg", "jpeg"], accept_multiple_files=True, key="set_chars")
-    sup = st.file_uploader("絵柄画像（最大3枚）", type=["png", "jpg", "jpeg"], accept_multiple_files=True, key="set_styles")
-    if st.button("セットを保存する", type="primary"):
-        if not (name or "").strip():
-            st.session_state.error = "セット名を入れてください"
-        else:
-            chars = [{"uri": uploaded_to_uri(f), "strength": 8} for f in (cup or [])[:3]]
-            styles = [{"uri": uploaded_to_uri(f), "strength": 8} for f in (sup or [])[:3]]
-            if not chars and not styles:
-                st.session_state.error = "キャラか絵柄の画像を1枚以上入れてください"
-            else:
-                st.session_state.characters.append({"save_name": name.strip()[:40], "chars": chars, "styles": styles})
-                save_user_state()
-                st.session_state.error = ""
-                st.success("保存しました")
-        go("chars"); st.rerun()
-
-elif st.session_state.page == "make":
-    usable_fonts = get_usable_fonts()
-    st.subheader("4コマ")
-    layout = st.radio("並べ方", list(LAYOUTS.keys()), horizontal=True)
-    st.session_state.layout = layout
-    n = LAYOUTS[layout]["count"]
-    names = [char_label(ch) for ch in st.session_state.characters]
-    size_opts = [k for k, v in SIZES.items() if (is_premium() or is_owner() or not v["paid"])]
-
-    def set_by_name(name):
-        for ch in st.session_state.characters:
-            if char_label(ch) == name:
-                return ch
-        return None
-
-    def make_one(i):
-        scene = st.session_state.scenes[i].strip()
-        if not scene:
-            raise Exception("内容が空です")
-        spec = SIZES.get(st.session_state.panel_shape[i], SIZES["横長"])
-        if spec["paid"] and not is_premium() and not is_owner():
-            raise Exception("このサイズはVIPだけです")
-        chosen = st.session_state.scene_chars[i]
-        if chosen != "セットなし" and not is_premium() and not is_owner():
-            raise Exception("セットはVIPだけです")
-        pack = {} if chosen == "セットなし" else (set_by_name(chosen) or {})
-        chars, styles = normalize_refs(pack.get("chars")), normalize_refs(pack.get("styles"))
-        take_points(spec["cost"] + REF_SITE * (min(3, len(chars)) + min(3, len(styles))))
-        st.session_state.panel_images[i] = nai_request(scene, spec["gen"][0], spec["gen"][1], "nai-diffusion-4-5-full", steps=23, scale=5.0, char_refs=chars, style_refs=styles)
-        st.session_state.panel_sizes[i] = spec["wh"]
-        st.session_state.panel_upload[i] = False
-
-    for i in range(n):
-        with st.expander(f"コマ {i+1}", expanded=True):
-            cur = st.session_state.panel_shape[i] if st.session_state.panel_shape[i] in size_opts else "横長"
-            shape = st.selectbox("サイズ", size_opts, index=size_opts.index(cur), key=f"shape_{i}")
-            st.session_state.panel_shape[i] = shape
-            spec = SIZES[shape]
-            if not st.session_state.panel_upload[i]:
-                st.session_state.panel_sizes[i] = spec["wh"]
-            st.caption(f"{spec['wh'][0]} × {spec['wh'][1]}　消費 {spec['cost']}")
-            up = st.file_uploader("持っている画像を使う", type=["png", "jpg", "jpeg"], key=f"up_{i}")
-            if up:
-                st.session_state.panel_images[i] = uploaded_to_uri(up)
-                st.session_state.panel_upload[i] = True
-                st.session_state.panel_sizes[i] = uri_to_image(st.session_state.panel_images[i]).size
-            st.session_state.scenes[i] = st.text_input("生成する内容", value=st.session_state.scenes[i], key=f"sc_{i}")
-            options = ["セットなし"] + (names if (is_premium() or is_owner()) else [])
-            curc = st.session_state.scene_chars[i]
-            st.session_state.scene_chars[i] = st.selectbox("セット", options, index=options.index(curc) if curc in options else 0, key=f"ch_{i}")
-            if st.session_state.get("busy_index") == i:
-                st.info(f"コマ{i+1} 生成中…")
-                try:
-                    make_one(i)
-                    st.session_state.error = ""
-                except Exception as e:
-                    st.session_state.error = str(e)
-                st.session_state.busy_index = None
-                go("make")
-                st.rerun()
-            c1, c2, c3 = st.columns(3)
-            with c1:
-                if st.button("生成", key=f"gen_{i}", type="primary"):
-                    st.session_state.error = ""
-                    st.session_state.busy_index = i
-                    st.rerun()
-            with c2:
-                if st.button("消す", key=f"clr_{i}"):
-                    st.session_state.panel_images[i] = None
-                    st.session_state.panel_bubbles[i] = []
-                    st.session_state.panel_upload[i] = False
-                    st.rerun()
-            with c3:
-                if st.session_state.panel_images[i] and st.button("保存庫へ", key=f"sv_{i}"):
-                    add_library(st.session_state.panel_images[i], f"4コマ{i+1}")
-                    st.success("入れました")
-            if st.session_state.panel_images[i]:
-                draft = st.session_state.drafts[i]
-                draft["text"] = st.text_input("新しいセリフ", value=draft.get("text", ""), key=f"bt_{i}")
-                d1, d2 = st.columns(2)
-                with d1:
-                    draft["kind"] = st.selectbox("形", BUBBLE_TYPES, key=f"bk_{i}")
-                    draft["tail"] = st.selectbox("しっぽ", TAILS, key=f"tl_{i}")
-                    draft["font"] = st.selectbox("フォント", usable_fonts, key=f"bfn_{i}")
-                    draft["dir"] = st.selectbox("向き", TEXT_DIR, key=f"bd_{i}")
-                with d2:
-                    draft["size"] = st.slider("文字の大きさ", 16, 64, int(draft.get("size", 28)), key=f"bs_{i}")
-                    draft["bold"] = st.slider("太さ", 0, 4, int(draft.get("bold", 0)), key=f"bb_{i}")
-                    draft["tail_size"] = st.slider("しっぽの大きさ", 8, 80, int(draft.get("tail_size", 28)), key=f"bts_{i}")
-                    draft["x"] = st.slider("左右", 0, 100, int(draft.get("x", 8)), key=f"bx_{i}")
-                    draft["y"] = st.slider("上下", 0, 100, int(draft.get("y", 8)), key=f"by_{i}")
-                    draft["angle"] = st.slider("傾き", -45, 45, int(draft.get("angle", 0)), key=f"ba_{i}")
-                draft["fill"] = st.color_picker("吹き出し色", draft.get("fill", "#ffffff"), key=f"bf_{i}")
-                draft["color"] = st.color_picker("文字色", draft.get("color", "#111111"), key=f"bc_{i}")
-                st.session_state.drafts[i] = draft
-                if st.button("このセリフを追加", key=f"addb_{i}") and draft["text"].strip():
-                    st.session_state.panel_bubbles[i].append(dict(draft))
-                    st.session_state.drafts[i] = empty_bubble()
-                    st.rerun()
-                for bi, bb in enumerate(st.session_state.panel_bubbles[i]):
-                    k1, k2 = st.columns([5, 1])
-                    with k1:
-                        st.caption(bb.get("text", ""))
-                    with k2:
-                        if st.button("×", key=f"delb_{i}_{bi}"):
-                            st.session_state.panel_bubbles[i].pop(bi)
-                            st.rerun()
-                preview = draw_all_bubbles(panel_raw(i), st.session_state.panel_bubbles[i])
-                if draft["text"].strip():
-                    preview = draw_one_bubble(preview, draft)
-                st.image(preview, width=340)
-
-    if st.button("1枚にまとめる", type="primary"):
-        panels = []
-        for i in range(n):
-            if not st.session_state.panel_images[i]:
-                st.error(f"コマ{i+1}がありません")
-                panels = None
-                break
-            panels.append(draw_all_bubbles(panel_raw(i), st.session_state.panel_bubbles[i]))
-        if panels:
-            st.session_state.combined = combine_panels(panels, cols=LAYOUTS[layout]["cols"])
-            go("make")
-            st.rerun()
-    if st.session_state.combined is not None:
-        st.image(st.session_state.combined, use_container_width=True)
-        st.download_button("PNG保存", data=image_to_bytes(st.session_state.combined), file_name="yonkoma.png", mime="image/png")
-        if st.button("まとめた画像を保存庫へ"):
-            buf = BytesIO()
-            st.session_state.combined.save(buf, format="PNG")
-            add_library("data:image/png;base64," + base64.b64encode(buf.getvalue()).decode(), "4コマまとめ")
-            st.success("入れました")
-
 else:
-    st.warning("このページはありません")
-    if st.button("ホームへ戻る"):
-        go("home"); st.rerun()
-
+    # 削除済みページや旧セッションからのアクセスはホームへ戻す。
+    go("home")
+    st.rerun()
