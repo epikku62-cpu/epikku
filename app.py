@@ -54,7 +54,11 @@ SMTP_HOST = os.environ.get("SMTP_HOST", "")
 SMTP_PORT = int(os.environ.get("SMTP_PORT", "587"))
 SMTP_USER = os.environ.get("SMTP_USER", "")
 SMTP_PASS = os.environ.get("SMTP_PASS", "")
-OWNER_ACCOUNTS = [x.strip().lower() for x in os.environ.get("OWNER_ACCOUNTS", "").split(",") if x.strip()]
+# 管理者アカウント(カンマ区切り。メールアドレス または ユーザー名)
+# ・ユーザー名は、大文字小文字も含めて「そのまま」完全一致で判定する(例: GMちくわ)
+# ・メールアドレスは小文字にそろえて判定する
+OWNER_ACCOUNTS_RAW = [x.strip() for x in os.environ.get("OWNER_ACCOUNTS", "").split(",") if x.strip()]
+OWNER_ACCOUNTS = [x.lower() for x in OWNER_ACCOUNTS_RAW]
 CONTACT_TO = "panel.com@gmail.com"
 if stripe is not None and STRIPE_SECRET_KEY:
     stripe.api_key = STRIPE_SECRET_KEY
@@ -481,16 +485,15 @@ def video_cost(sec):
 
 def is_owner():
     """管理者判定(ログイン済みが前提)。
-    ・メールアドレス: 登録時に確認コードで認証済みの値と一致すること
-    ・ユーザー名: 大文字小文字・空白を変えずに完全一致すること
-      ("Panel" や "panel " のような偽装名は一致しない。環境変数側は小文字化されるので、
-       ユーザー名で判定する場合は小文字のユーザー名にするか、メールアドレスを推奨)
+    ・ユーザー名: 環境変数の値と、大文字小文字・空白を含めて完全一致すること
+      ("GMちくわ" が管理者なら、"gmちくわ" や "GMちくわ " のような似た名前は管理者にならない)
+    ・メールアドレス: 登録時に確認コードで認証済みの値と一致すること(大文字小文字は区別しない)
     """
-    if not OWNER_ACCOUNTS or not st.session_state.get("logged_in"):
+    if not OWNER_ACCOUNTS_RAW or not st.session_state.get("logged_in"):
         return False
     u = str(st.session_state.get("username") or "")
     e = norm_mail(st.session_state.get("email"))
-    return (bool(u) and u in OWNER_ACCOUNTS) or (bool(e) and e in OWNER_ACCOUNTS)
+    return (bool(u) and u in OWNER_ACCOUNTS_RAW) or (bool(e) and e in OWNER_ACCOUNTS)
 
 def mark_visit():
     now = datetime.now()
