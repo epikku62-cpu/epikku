@@ -406,6 +406,22 @@ def apply_checkout_session(session_id):
 NAI_URLS = ["https://image.novelai.net/ai/generate-image", "https://api.novelai.net/ai/generate-image"]
 DATA_DIR = os.environ.get("DATA_DIR", os.path.abspath("data"))
 os.makedirs(DATA_DIR, exist_ok=True)
+DATA_MARKER = os.path.join(DATA_DIR, ".first_created")
+try:
+    if not os.path.exists(DATA_MARKER):
+        with open(DATA_MARKER, "w", encoding="utf-8") as _marker_file:
+            _marker_file.write(datetime.now().strftime("%Y/%m/%d %H:%M"))
+except Exception:
+    pass
+
+
+def data_marker_time():
+    """この保存フォルダが最初に作られた日時。保存領域が再起動のたびに消える環境だと、毎回新しくなる。"""
+    try:
+        with open(DATA_MARKER, "r", encoding="utf-8") as f:
+            return datetime.strptime(f.read().strip(), "%Y/%m/%d %H:%M")
+    except Exception:
+        return None
 USERS_FILE = os.path.join(DATA_DIR, "users_data.json")
 TOKENS_FILE = os.path.join(DATA_DIR, "login_tokens.json")
 PAID_FILE = os.path.join(DATA_DIR, "paid_sessions.json")
@@ -843,6 +859,30 @@ def send_mail(to_addr, subject, body):
         except Exception as e:
             return False, str(e)
     return False, "メール送信設定がありません"
+
+def mail_method():
+    """メール送信方式。resend / smtp / 未設定("")。"""
+    if RESEND_API_KEY and MAIL_FROM:
+        return "resend"
+    if SMTP_HOST and SMTP_USER and SMTP_PASS and MAIL_FROM:
+        return "smtp"
+    return ""
+
+
+@st.cache_resource
+def _startup_report():
+    """起動時に1回だけ、設定の問題をサーバーログに出す(Renderの Logs で確認できる)。"""
+    mm = mail_method()
+    if not mm:
+        print("[config] メール送信の設定がありません。このままでは会員登録の確認コードを送れず、誰も登録できません。"
+              "RESEND_API_KEY と MAIL_FROM を設定してください。")
+    elif mm == "smtp":
+        print(f"[config] SMTP({SMTP_HOST}:{SMTP_PORT})で送信します。Renderの無料プランではSMTPポートが塞がれています。"
+              "送れない場合は RESEND_API_KEY と MAIL_FROM(Resend)に切り替えてください。")
+    if "DATA_DIR" not in os.environ:
+        print(f"[config] DATA_DIR が未設定です({DATA_DIR})。Renderで永続Diskを付けていない場合、再起動・再デプロイで会員データが消えます。")
+    return True
+
 
 def send_code_mail(to_addr, code):
     return send_mail(to_addr, "panel AI. 登録確認", f"確認コード: {code}\nこのコードをサイトに入力してください。")
@@ -2221,6 +2261,256 @@ def apply_login(name, data, persist=True, sync=True, pending=True):
     if pending:
         credit_pending_checkouts()
 
+# =====================================================================
+# 法務ページ(特定商取引法に基づく表記・利用規約・プライバシーポリシー)
+# 事業者情報は環境変数で設定する(コードには書かない):
+#   LEGAL_SELLER_NAME     販売事業者名(個人の場合は氏名または屋号)
+#   LEGAL_REPRESENTATIVE  運営責任者(省略すると販売事業者名と同じ)
+#   LEGAL_ADDRESS         所在地   ※「請求開示」と入れると「請求があれば遅滞なく開示」表示になる
+#   LEGAL_PHONE           電話番号 ※同上
+#   LEGAL_EMAIL           連絡先メール(省略するとお問い合わせの送信先を表示)
+# ※ 本文は一般的な雛形です。公開前に必ず内容を確認し、必要に応じて専門家(弁護士・行政書士)に確認してください。
+# =====================================================================
+SERVICE_NAME = "panel AI."
+LEGAL_UPDATED = "2026年9月20日"
+LEGAL_SELLER = os.environ.get("LEGAL_SELLER_NAME", "").strip()
+LEGAL_REPRESENTATIVE = os.environ.get("LEGAL_REPRESENTATIVE", "").strip()
+LEGAL_ADDRESS = os.environ.get("LEGAL_ADDRESS", "").strip()
+LEGAL_PHONE = os.environ.get("LEGAL_PHONE", "").strip()
+LEGAL_EMAIL = os.environ.get("LEGAL_EMAIL", "").strip() or CONTACT_TO
+LEGAL_DISCLOSE_WORDS = ("請求開示", "開示請求", "請求により開示")
+LEGAL_DISCLOSE_TEXT = "請求があった場合、遅滞なく開示いたします。下記のメールアドレスまたはサイト内の「お問い合わせ」からご連絡ください。"
+LEGAL_TITLES = {"tokushoho": "特定商取引法に基づく表記", "terms": "利用規約", "privacy": "プライバシーポリシー"}
+LEGAL_PAGES = tuple(LEGAL_TITLES.keys())
+
+
+def legal_field(value):
+    v = (value or "").strip()
+    if not v:
+        return "【未設定】運営者が環境変数で設定してください"
+    if v in LEGAL_DISCLOSE_WORDS:
+        return LEGAL_DISCLOSE_TEXT
+    return v
+
+
+def legal_info_missing():
+    """未設定の事業者情報の名前(環境変数名)を返す。"""
+    missing = []
+    if not LEGAL_SELLER:
+        missing.append("LEGAL_SELLER_NAME")
+    if not LEGAL_ADDRESS:
+        missing.append("LEGAL_ADDRESS")
+    if not LEGAL_PHONE:
+        missing.append("LEGAL_PHONE")
+    return missing
+
+
+def _legal_price_lines():
+    lines = [f"- {p['points']}ポイント: {p['yen']:,}円(税込)" for p in POINT_PACKS]
+    lines.append(f"- 月額VIP: 月額{MONTHLY_PRICE:,}円(税込)(毎月{MONTHLY_POINTS:,}ポイント付与)")
+    return "\n".join(lines)
+
+
+def _legal_cost_lines():
+    lines = [f"- 画像生成 {name}: {spec['cost']}ポイント" for name, spec in SIMPLE_SIZES.items()]
+    lines.append(f"- 動画生成: 1秒あたり{VIDEO_PT_PER_SEC}ポイント")
+    return "\n".join(lines)
+
+
+def legal_sections(kind):
+    """(見出し, 本文) のリストを返す。本文はMarkdown。"""
+    name = LEGAL_SELLER or "運営者"
+    mail = LEGAL_EMAIL
+    if kind == "tokushoho":
+        return [
+            ("販売事業者", legal_field(LEGAL_SELLER)),
+            ("運営責任者", legal_field(LEGAL_REPRESENTATIVE or LEGAL_SELLER)),
+            ("所在地", legal_field(LEGAL_ADDRESS)),
+            ("電話番号", legal_field(LEGAL_PHONE)),
+            ("メールアドレス・お問い合わせ", f"{mail}\n\nサイト内メニューの「お問い合わせ」からもご連絡いただけます。"),
+            ("サイトURL", SITE_URL),
+            ("販売するもの", "AIによる画像生成・動画生成サービスの利用に必要な「ポイント」(前払いで購入するサービス利用権)と、月額会員「VIP」です。"),
+            ("販売価格", _legal_price_lines() + "\n\nすべて消費税を含む総額です。"),
+            ("ポイントの消費量", _legal_cost_lines() + "\n\n消費するポイントは、各機能の画面に表示されます。"),
+            ("販売価格以外の必要料金", "インターネットの接続にかかる通信料等は、お客様のご負担となります。"),
+            ("お支払い方法", "クレジットカード等(決済代行サービス Stripe を利用します)。ご利用いただける決済手段は、決済画面に表示されます。"),
+            ("お支払い時期",
+             "- ポイント: 購入手続きの際に決済されます。\n"
+             "- 月額VIP: お申し込み時に初回の決済が行われ、以降は毎月、申込日と同じ日に自動で決済(更新)されます。"),
+            ("サービスの提供時期",
+             "決済の完了後、通常はすぐにポイント・VIPが反映されます。反映までに数分かかる場合があります。"
+             "反映されない場合は、お問い合わせください。"),
+            ("申込みの撤回・返品・キャンセル",
+             "デジタルサービスの性質上、購入後のポイントの返金・交換はできません。\n\n"
+             "ただし、当サービスの不具合により、ポイントやVIPが付与されなかった場合は、確認のうえ対応いたします。"
+             "画像・動画の生成に失敗したことがシステム上確認できた場合は、原則として、消費したポイントを返却します。"),
+            ("月額VIPの契約期間・解約",
+             "- 最低契約期間はありません。解約しない限り、毎月自動で更新されます。\n"
+             "- 解約は、サイト内メニューの「月額登録」画面にある「月額VIPを解約」ボタンから、いつでも行えます。\n"
+             "- 解約と同時にVIPは終了し、次回以降の請求は停止されます。支払済みの期間の日割りによる返金はありません。\n"
+             "- 決済に失敗した場合など、契約の継続が確認できないときは、VIPが停止されることがあります。"),
+            ("ポイントの有効期限", "現時点では、有効期限は設けていません。"),
+            ("動作環境", "インターネットに接続できる、最新版のブラウザ(Chrome・Safari など)。スマートフォン・パソコンのどちらでもご利用いただけます。"),
+            ("契約不適合責任", "サービスに不具合があった場合は、お問い合わせください。確認のうえ、修正またはポイントの返却等、適切に対応いたします。"),
+            ("その他の販売条件",
+             "- 新規登録などで無料で付与されるポイントは、返金の対象外です。\n"
+             "- 画像・動画の生成結果は、ご希望どおりになることを保証するものではありません。\n"
+             "- 未成年の方は、親権者の同意を得てご利用ください。ご購入には親権者の同意が必要です。"),
+        ]
+    if kind == "terms":
+        return [
+            ("はじめに",
+             f"本規約は、{name}(以下「運営者」)が提供する「{SERVICE_NAME}」(以下「本サービス」)の利用条件を定めるものです。"
+             "本サービスを利用される方(以下「ユーザー」)は、本規約に同意したうえでご利用ください。"),
+            ("第1条(適用)",
+             "本規約は、ユーザーと運営者との間の、本サービスの利用に関わる一切の関係に適用されます。"
+             "運営者が本サービス上に掲載するルールやご案内は、本規約の一部を構成します。"),
+            ("第2条(本サービスの内容)",
+             "本サービスは、外部の生成AIサービス(画像生成: NovelAI、動画生成: MiniMax など)を利用して、"
+             "ユーザーが入力した文章(プロンプト)や画像をもとに画像・動画を作成する機能、作成物の保存、"
+             "およびコミュニティ(投稿・閲覧)を提供します。内容は予告なく変更することがあります。"),
+            ("第3条(会員登録)",
+             "1. 登録は、メールアドレスの確認(確認コード)により行います。\n"
+             "2. ユーザーは、正確な情報を登録し、パスワードを自己の責任で管理するものとします。"
+             "第三者による利用によって生じた損害について、運営者に故意または重大な過失がある場合を除き、運営者は責任を負いません。\n"
+             "3. 未成年の方は、親権者の同意を得てご利用ください。ポイントの購入・月額VIPの申込みには、親権者の同意が必要です。\n"
+             "4. 複数のアカウントを作成して、無料ポイントを不正に取得する行為を禁止します。"),
+            ("第4条(ポイント)",
+             "1. ポイントは、画像生成・動画生成などの機能を利用する際に消費します。購入(1ポイント=1円)、新規登録などでの無料付与、月額VIPでの毎月の付与があります。\n"
+             "2. 各機能で消費するポイントは、画面に表示されます。運営者は、消費するポイントを変更することがあります。\n"
+             "3. ポイントを他人に譲渡・貸与・売買することはできません。\n"
+             "4. 購入したポイントの払い戻しはできません(法令により認められる場合を除きます)。\n"
+             "5. ポイントの有効期限は、現時点では設けていません。設ける場合は、事前にお知らせします。\n"
+             "6. 生成に失敗したことがシステム上確認できた場合は、原則として、消費したポイントを返却します。"
+             "ただし、外部サービスの状況などにより、生成が受け付けられた可能性がある場合や、確認できない場合は、返却できないことがあります。\n"
+             "7. 本サービスを終了する場合、未使用の購入済みポイントについては、法令に従い、払い戻しなど適切に対応します。\n"
+             "8. 運営者が第10条により利用を停止した場合、残っているポイントは失効し、払い戻しはしません。"),
+            ("第5条(月額VIP)",
+             f"1. 月額VIPは、月額{MONTHLY_PRICE:,}円(税込)で、毎月{MONTHLY_POINTS:,}ポイントの付与と、VIP限定の機能(大きなサイズでの生成など)を提供する有料プランです。\n"
+             "2. 解約しない限り、毎月自動で更新されます。\n"
+             "3. 解約は、サイト内の「月額登録」画面から、いつでも行えます。解約と同時にVIPは終了し、支払済みの期間の日割りによる返金はしません。\n"
+             "4. 決済に失敗した場合など、契約の継続が確認できないときは、VIPを停止することがあります。\n"
+             "5. 料金や内容を変更する場合は、事前にお知らせします。"),
+            ("第6条(生成機能の利用)",
+             "1. 生成結果は、ユーザーの意図どおりになること、内容が正確であること、第三者の権利を侵害しないことを、運営者は保証しません。\n"
+             "2. 生成には時間がかかることや、失敗することがあります。\n"
+             "3. 生成には外部のAIサービスを利用しており、ユーザーは、それらの利用規約・利用ポリシーにも従うものとします。\n"
+             "4. 生成履歴は、現在は直近3日分のみ保持します。サーバーに保存されるデータ(画像・動画など)は、運営者が必要と判断する期間を過ぎると削除することがあり、保存を保証しません。"
+             "必要なものは、ご自身でダウンロードするなどして保管してください。"),
+            ("第7条(禁止事項)",
+             "ユーザーは、次の行為をしてはいけません。\n\n"
+             "- 法令または公序良俗に反する行為\n"
+             "- 他人の著作権・肖像権・プライバシーなどの権利を侵害する画像・文章の生成、アップロード、投稿\n"
+             "- わいせつな表現、過度に性的な表現、および未成年者を性的に描写する内容の生成・投稿\n"
+             "- 実在する人物になりすます、または実在の人物の名誉を傷つける内容(偽の画像・動画を含む)の生成・投稿\n"
+             "- 暴力・差別・誹謗中傷を助長する内容の生成・投稿\n"
+             "- 他人の個人情報の公開、迷惑行為、スパム、勧誘行為\n"
+             "- 本サービスや外部AIサービスの利用規約に反する行為\n"
+             "- 不正アクセス、過度な負荷をかける行為、システムの解析・改変、その他運営を妨げる行為\n"
+             "- 複数アカウントによるポイントの不正取得、ポイントの不正な取得・利用\n"
+             "- その他、運営者が不適切と判断する行為"),
+            ("第8条(生成物・投稿の権利と責任)",
+             "1. ユーザーは、入力する文章や、アップロードする画像・動画について、適法に利用できる権利を有していることを確認するものとします。\n"
+             "2. 生成物に関する権利の扱い(著作権の帰属、商用利用の可否など)は、法令および外部AIサービスの利用規約に従います。運営者は、生成物の権利の帰属や商用利用の可否を保証しません。\n"
+             "3. 生成物が、既存の作品・キャラクターなどに似る可能性があります。生成物の利用は、ユーザー自身の責任で行ってください。\n"
+             "4. ユーザーがコミュニティに投稿した内容について、著作権はユーザーに残ります。ただし、ユーザーは運営者に対し、本サービス内での表示・保存・複製、および表示に必要な範囲でのサイズ変更等を行うことを、無償で許諾するものとします。\n"
+             "5. 投稿時にプロンプトを公開した場合、他のユーザーがそのプロンプトを利用できます。"),
+            ("第9条(コミュニティ)",
+             "1. 投稿・コメントは、他のユーザーが閲覧できます。個人情報を含めないでください。\n"
+             "2. 運営者は、第7条に反する投稿、その他不適切と判断した投稿を、事前の通知なく削除・非表示にできます。\n"
+             "3. 投稿の数には上限があり、古い投稿から自動的に削除されることがあります。"),
+            ("第10条(利用停止・退会)",
+             "1. ユーザーが本規約に違反した場合、運営者は、事前の通知なく、投稿の削除、利用の停止、登録の抹消をすることがあります。\n"
+             "2. 退会を希望される場合は、サイト内の「お問い合わせ」からご連絡ください。本人確認のうえ、運営者が手続きします。"),
+            ("第11条(本サービスの変更・中断・終了)",
+             "運営者は、保守、障害、外部サービスの停止、天災などの理由により、本サービスの全部または一部を、変更・中断・終了することがあります。"
+             "可能な限り、事前にお知らせします。"),
+            ("第12条(免責)",
+             "1. 外部サービスの障害・仕様変更、通信の不具合、天災などにより生じた損害について、運営者は責任を負いません。\n"
+             "2. データの保存には努めますが、消失しないことを保証するものではありません。\n"
+             "3. ユーザー間、またはユーザーと第三者との間のトラブルは、当事者間で解決するものとします。\n"
+             "4. 運営者に故意または重大な過失がある場合を除き、運営者の責任は、ユーザーが当該損害の原因となった取引で運営者に支払った金額を上限とします。"
+             "ただし、消費者契約法など、法令により制限される場合は、その範囲で法令に従います。"),
+            ("第13条(規約の変更)",
+             "運営者は、必要に応じて、本規約を変更できます。変更後の規約は、本サービス上に掲載した時点から効力を生じます。"
+             "重要な変更は、事前にお知らせします。"),
+            ("第14条(個人情報の取扱い)", "ユーザーの個人情報は、別に定める「プライバシーポリシー」に従って取り扱います。"),
+            ("第15条(準拠法・管轄)", "本規約は日本法に従います。本サービスに関して訴訟が必要になった場合は、日本の裁判所を管轄裁判所とします。"),
+            ("制定日", f"{LEGAL_UPDATED}"),
+        ]
+    if kind == "privacy":
+        return [
+            ("はじめに",
+             f"{name}(以下「運営者」)は、「{SERVICE_NAME}」(以下「本サービス」)における、ユーザーの個人情報の取扱いについて、以下のとおり定めます。"),
+            ("1. 取得する情報",
+             "- 登録情報: ユーザーネーム、メールアドレス、パスワード(暗号化して保存し、運営者は元の文字列を見られません)、アイコン画像(任意)\n"
+             "- 利用情報: ポイントの残高と付与・消費の履歴、月額会員の契約状況、生成時の設定(プロンプトなど)と生成した画像、"
+             "保存庫に保存した画像、セット(参照画像)、アップロードした画像・動画、コミュニティへの投稿・コメント\n"
+             "- アクセス情報: 最終ログイン日時・最終訪問日時、ログイン回数・訪問回数、ログインを維持するための識別情報(Cookie)\n"
+             "- お問い合わせ内容: お名前、返信先のメールアドレス、内容\n"
+             "- 決済に関する情報: 決済は Stripe が行います。クレジットカード番号などは、運営者は取得・保存しません。"
+             "決済の完了通知(決済ID、金額、メールアドレスなど)を受け取ります。"),
+            ("2. 利用目的",
+             "- 本サービスの提供、本人確認、ログインの維持\n"
+             "- 画像・動画の生成、作成物・履歴の保存と表示\n"
+             "- ポイント・月額会員の管理、料金の請求、決済の確認\n"
+             "- お問い合わせへの対応、重要なお知らせの連絡\n"
+             "- 不正利用の防止、規約違反への対応\n"
+             "- 利用状況の把握と、サービスの改善"),
+            ("3. 外部サービスへの送信・委託",
+             "本サービスは、次の外部サービスを利用しており、利用目的の範囲で情報が送信されます。\n\n"
+             "- 画像生成(NovelAI): 入力したプロンプト、参照画像\n"
+             "- 動画生成(MiniMax): 入力したプロンプト、元になる画像・動画\n"
+             "- 決済(Stripe): 決済に必要な情報\n"
+             "- メール送信(Resend または SMTPサーバー): 送信先メールアドレス、メールの内容\n"
+             "- サーバー・データ保管(Render): 本サービスのデータ全般\n\n"
+             "これらの事業者は、米国などの外国にある場合があり、その国の個人情報の保護制度は、日本と異なることがあります。"
+             "ユーザーは、本サービスを利用することにより、必要な範囲でこれらの事業者へ情報が送信されることに同意したものとします。"
+             "なお、生成AIに入力する内容には、他人の個人情報や写真を含めないでください。"),
+            ("4. 第三者への提供", "法令に基づく場合を除き、ご本人の同意なく、個人情報を第三者に提供しません。(上記3の外部サービスへの送信を除きます。)"),
+            ("5. Cookie等の利用",
+             "ログインの状態を維持するため、Cookie(有効期間は約30日)を使用します。ブラウザの設定で無効にできますが、その場合、ログインの維持ができなくなることがあります。"
+             "現時点で、広告配信やアクセス解析のための外部ツールは使用していません。導入する場合は、本ポリシーに記載します。"),
+            ("6. 保管期間・安全管理",
+             "- パスワードは暗号化して保存します。通信はHTTPSで暗号化します。\n"
+             "- 生成履歴は、現在は直近3日分のみ保持します。\n"
+             "- その他の情報は、利用目的に必要な期間、保管します。退会の手続き後は、合理的な期間内に削除します(法令上保存が必要なものを除く)。"),
+            ("7. 未成年の方", "未成年の方は、親権者の同意を得たうえで、ご利用ください。"),
+            ("8. 開示・訂正・削除などの請求",
+             f"ご本人から、個人情報の開示・訂正・削除、および退会のご請求があった場合は、本人確認のうえ、法令に従い対応します。"
+             f"下記のお問い合わせ窓口までご連絡ください。"),
+            ("9. プライバシーポリシーの変更", "必要に応じて、本ポリシーを変更することがあります。変更後の内容は、本サービス上に掲載した時点から効力を生じます。"),
+            ("10. お問い合わせ窓口", f"{name}\n\nメール: {mail}\n\nサイト内メニューの「お問い合わせ」からもご連絡いただけます。"),
+            ("制定日", f"{LEGAL_UPDATED}"),
+        ]
+    return []
+
+
+def legal_link_md(kind):
+    return f"[{LEGAL_TITLES[kind]}](?p={kind})"
+
+
+def render_legal_page(kind):
+    st.subheader(LEGAL_TITLES[kind])
+    st.caption(f"最終更新: {LEGAL_UPDATED}")
+    if is_owner() and legal_info_missing():
+        st.warning("管理者向け: 事業者情報が未設定です(" + "、".join(legal_info_missing()) + ")。"
+                   "Renderの環境変数に設定してください。未設定のままだと、この表示は一般のお客様にも「未設定」と見えます。")
+    for head, body in legal_sections(kind):
+        st.markdown(f"#### {head}")
+        st.markdown(body)
+    st.divider()
+    others = [k for k in LEGAL_PAGES if k != kind]
+    cols = st.columns(3)
+    for col, k in zip(cols, others):
+        with col:
+            if st.button(LEGAL_TITLES[k], key=f"legal_nav_{kind}_{k}", use_container_width=True):
+                go(k); st.rerun()
+    with cols[2]:
+        if st.button("ホームへ", key=f"legal_home_{kind}", use_container_width=True):
+            go("home"); st.rerun()
+
+
 def render_top_menu():
     # 左上のハンバーガーメニュー。押すと左側から縦長のメニューを表示する。
     st.markdown(
@@ -2334,6 +2624,10 @@ def render_top_menu():
         for label, page in menu_items:
             if st.button(label, use_container_width=True, key=f"m_{page}"):
                 go(page); st.rerun()
+        st.divider()
+        for _k in LEGAL_PAGES:
+            if st.button(LEGAL_TITLES[_k], use_container_width=True, key=f"m_{_k}"):
+                go(_k); st.rerun()
 
 
 def get_usable_fonts():
@@ -2654,6 +2948,8 @@ def render_set_generation_page():
             go("video")
             st.rerun()
 
+_startup_report()
+
 defaults = {
     "logged_in": False, "page": "home", "auth_token": "", "layout": "縦4", "scenes": ["", "", "", ""],
     "scene_chars": ["セットなし"] * 4, "panel_images": [None] * 4, "panel_upload": [False] * 4,
@@ -2781,6 +3077,11 @@ if st.session_state.page == "home":
     with mid[1]:
         if st.button("👥 コミュニティ", use_container_width=True, key="home_community"):
             go("board"); st.rerun()
+    foot = st.columns(3)
+    for _c, _k, _label in zip(foot, LEGAL_PAGES, ("特商法表記", "利用規約", "プライバシー")):
+        with _c:
+            if st.button(_label, key=f"home_legal_{_k}", use_container_width=True):
+                go(_k); st.rerun()
     st.stop()
 
 show_header()
@@ -3000,6 +3301,7 @@ elif st.session_state.page == "shop":
     if st.session_state.logged_in:
         credit_pending_checkouts()
     st.subheader("ポイント購入")
+    st.caption("1ポイント=1円(税込)。購入したポイントの払い戻しはできません。詳しくは " + legal_link_md("tokushoho") + " をご確認ください。")
     if not st.session_state.logged_in:
         st.warning("購入にはログインが必要です。")
     elif stripe is None or not STRIPE_SECRET_KEY:
@@ -3031,11 +3333,18 @@ elif st.session_state.page == "register":
     icon_up = st.file_uploader("アイコン（任意）", type=["png", "jpg", "jpeg"])
     if icon_up:
         st.image(icon_up, width=80)
+    st.checkbox("利用規約・プライバシーポリシーに同意します", key="agree_terms")
+    st.caption("内容は、こちらでご確認ください: " + legal_link_md("terms") + " ／ " + legal_link_md("privacy"))
     if st.button("確認コードを送る"):
         users = load_json(USERS_FILE, {})
         name = (name or "").strip()
         if not name or not mail or not pw:
             st.warning("全部入れてください")
+        elif not st.session_state.get("agree_terms"):
+            st.warning("利用規約とプライバシーポリシーへの同意が必要です")
+        elif not mail_method():
+            print("[warn] メール送信の設定がないため、会員登録の確認コードを送れません")
+            st.error("現在、会員登録の受付を一時停止しています(メール送信の準備中です)。しばらくしてからお試しください。")
         elif time.time() - float(st.session_state.get("_code_sent_at") or 0) < 60:
             st.warning("確認コードは60秒に1回まで送れます。少し待ってからもう一度お試しください")
         elif len(name) > MAX_NAME_LEN or "@" in name:
@@ -3077,7 +3386,7 @@ elif st.session_state.page == "register":
             elif email_taken(users, p["email"]) or name_taken(users, p["name"]):
                 st.error("すでに登録されています")
             else:
-                new_user = {"password": p["password"], "email": p["email"], "icon": p["icon"], "characters": [], "points": SIGNUP_POINTS, "signup_points_remaining": SIGNUP_POINTS, "community_seen_at": board_last_activity(), "premium_until": "", "rank": "ブロンズ", "history": [], "library": [], "stripe_sub": "", "stripe_customer": "", "stripe_period": "", "created_at": datetime.now().strftime("%Y/%m/%d %H:%M")}
+                new_user = {"password": p["password"], "email": p["email"], "icon": p["icon"], "characters": [], "points": SIGNUP_POINTS, "signup_points_remaining": SIGNUP_POINTS, "community_seen_at": board_last_activity(), "premium_until": "", "rank": "ブロンズ", "history": [], "library": [], "stripe_sub": "", "stripe_customer": "", "stripe_period": "", "created_at": datetime.now().strftime("%Y/%m/%d %H:%M"), "terms_agreed_at": datetime.now().strftime("%Y/%m/%d %H:%M"), "terms_version": LEGAL_UPDATED}
                 created = {"ok": False, "user": None}
                 def _create_user(current):
                     if not isinstance(current, dict):
@@ -3139,6 +3448,7 @@ elif st.session_state.page == "plan":
                     pass
             st.write(f"毎月 {MONTHLY_POINTS}ポイント付与")
             if st.session_state.get("stripe_sub"):
+                st.caption("解約すると、すぐにVIPが終了します(日割りの返金はありません)。")
                 if st.button("月額VIPを解約", type="secondary"):
                     ok, msg = cancel_subscription_now()
                     if ok:
@@ -3148,6 +3458,8 @@ elif st.session_state.page == "plan":
                         st.error(msg)
         else:
             st.write(f"月額 {MONTHLY_PRICE}円 / 月")
+            st.caption(f"月額{MONTHLY_PRICE:,}円(税込)・毎月自動更新です。解約はこの画面からいつでもできます。"
+                       "解約と同時にVIPが終了し、日割りの返金はありません。詳しくは " + legal_link_md("tokushoho") + " をご確認ください。")
             st.write(f"登録するとVIP機能が開放され、毎月 {MONTHLY_POINTS}ポイントが支給されます。")
             if not STRIPE_PRICE_ID:
                 st.error("STRIPE_PRICE_ID が設定されていません。")
@@ -3163,6 +3475,9 @@ elif st.session_state.page == "plan":
                     st.markdown(f"[決済ページへ進む]({session.url})")
                 except Exception as e:
                     st.error(str(e))
+
+elif st.session_state.page in LEGAL_PAGES:
+    render_legal_page(st.session_state.page)
 
 elif st.session_state.page == "contact":
     st.subheader("お問い合わせ")
@@ -3242,6 +3557,14 @@ elif st.session_state.page == "stats":
     login_today_n = sum(1 for r in user_rows if r["login_today"])
 
     st.caption(f"時刻はサーバーの時刻です。最終訪問から{ONLINE_MIN}分以内の会員を「ログイン中」としています。")
+    _marker = data_marker_time()
+    if not mail_method():
+        st.error("メール送信の設定がありません。このままでは誰も会員登録できません。「🔧 診断」タブを確認してください。")
+    if legal_info_missing():
+        st.warning("特定商取引法に基づく表記の事業者情報が未設定です(" + "、".join(legal_info_missing()) + ")。「🔧 診断」タブを確認してください。")
+    if _marker is not None and (now - _marker).total_seconds() < 24 * 3600:
+        st.info("会員データの保存フォルダが24時間以内に作られています。公開・再デプロイの直後なら問題ありません。"
+                "再起動のたびに会員が消える場合は、保存領域の設定が必要です(「🔧 診断」タブ)。")
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("登録者", f"{len(user_rows)}人")
     c2.metric("ログイン中", f"{online_n}人")
@@ -3253,7 +3576,7 @@ elif st.session_state.page == "stats":
     d3.metric("昨日の訪問(延べ)", f"{int(days.get(yday, 0))}回")
     d4.metric("全員の残高合計", f"{total_balance}pt")
 
-    tab_users, tab_visits, tab_points, tab_usage = st.tabs(["👤 全ユーザー", "📈 訪問者", "💰 ポイント", "📊 利用状況"])
+    tab_users, tab_visits, tab_points, tab_usage, tab_diag = st.tabs(["👤 全ユーザー", "📈 訪問者", "💰 ポイント", "📊 利用状況", "🔧 診断"])
 
     with tab_users:
         f1, f2 = st.columns([2, 1])
@@ -3435,6 +3758,57 @@ elif st.session_state.page == "stats":
                     st.write(name)
             else:
                 st.write("全員が1回以上画像生成しています")
+    with tab_diag:
+        st.markdown("#### メール送信(会員登録の確認コード)")
+        _mm = mail_method()
+        if _mm == "resend":
+            st.success(f"Resend(HTTPS)で送信します。送信元: {MAIL_FROM}")
+        elif _mm == "smtp":
+            st.warning(f"SMTP({SMTP_HOST}:{SMTP_PORT})で送信します。Renderの無料プランでは、SMTPのポート(25・465・587)が塞がれていて送れません。"
+                       "テストメールが失敗する場合は、Resend(RESEND_API_KEY と MAIL_FROM)への切り替えをおすすめします。")
+        else:
+            st.error("メール送信の設定がありません。RESEND_API_KEY と MAIL_FROM(または SMTP_HOST・SMTP_USER・SMTP_PASS・MAIL_FROM)を設定してください。"
+                     "このままでは誰も会員登録できません。")
+        _test_to = norm_mail(st.session_state.get("email"))
+        st.caption(f"テストメールの送り先: {_test_to or '(このアカウントにメールアドレスがありません)'}")
+        if st.button("テストメールを送る", key="adm_mailtest", disabled=not (_mm and _test_to)):
+            with st.spinner("送信中…(最大20秒)"):
+                _ok, _err = send_mail(_test_to, "panel AI. テストメール", "管理者ページからのテストメールです。届いていれば、会員登録の確認コードも送れます。")
+            if _ok:
+                st.success("送信できました。受信箱(迷惑メールフォルダも)を確認してください。")
+            else:
+                st.error(f"送信に失敗しました: {_err}")
+
+        st.markdown("#### 会員データの保存先")
+        st.write(f"保存フォルダ: {DATA_DIR}")
+        st.write(f"このフォルダが最初に作られた日時: {_fmt(_marker)}(現在の登録者 {len(user_rows)}人)")
+        if os.access(DATA_DIR, os.W_OK):
+            st.success("保存フォルダに書き込めます。")
+        else:
+            st.error("保存フォルダに書き込めません。")
+        if "DATA_DIR" not in os.environ:
+            st.warning("環境変数 DATA_DIR が未設定です。Renderで永続Diskを付けていない場合、再起動・再デプロイのたびに会員データが消えます。")
+        st.caption("この日時が、再起動や再デプロイのたびに新しくなる場合は、保存領域が消えています(Renderの無料プランや、Diskを付けていない場合)。"
+                   "会員データを残すには、有料プランで Disk を付け、そのマウント先(例: /var/data)を環境変数 DATA_DIR に設定してください。")
+
+        st.markdown("#### 設定の読み込み状況(値は表示しません)")
+        st.dataframe([
+            {"項目": "NovelAI(画像生成)", "状態": "✅ 設定あり" if NAI_KEY else "❌ 未設定"},
+            {"項目": "MiniMax(動画生成)", "状態": "✅ 設定あり" if MINIMAX_KEY else "❌ 未設定"},
+            {"項目": "Stripe(決済)", "状態": "✅ 設定あり" if STRIPE_SECRET_KEY else "❌ 未設定"},
+            {"項目": "メール送信", "状態": {"resend": "✅ Resend", "smtp": "⚠️ SMTP"}.get(_mm, "❌ 未設定")},
+            {"項目": "管理者(OWNER_ACCOUNTS)", "状態": "✅ 設定あり" if OWNER_ACCOUNTS_RAW else "❌ 未設定"},
+            {"項目": "SITE_URL", "状態": "✅ 設定あり" if "SITE_URL" in os.environ else "⚠️ 未設定(初期値を使用)"},
+            {"項目": "DATA_DIR", "状態": "✅ 設定あり" if "DATA_DIR" in os.environ else "⚠️ 未設定(./data を使用)"},
+            {"項目": "法務ページの事業者情報", "状態": "✅ 設定あり" if not legal_info_missing() else "❌ 未設定: " + "、".join(legal_info_missing())},
+        ], hide_index=True)
+
+        st.markdown("#### 法務ページ(特商法・規約・プライバシーポリシー)")
+        st.write("公開URL: " + SITE_URL.rstrip("/") + "/?p=tokushoho　" + SITE_URL.rstrip("/") + "/?p=terms　" + SITE_URL.rstrip("/") + "/?p=privacy")
+        st.caption("事業者情報は環境変数で設定します: LEGAL_SELLER_NAME(販売事業者名)、LEGAL_ADDRESS(所在地)、LEGAL_PHONE(電話番号)。"
+                   "任意: LEGAL_REPRESENTATIVE(運営責任者)、LEGAL_EMAIL(連絡先メール)。"
+                   "住所・電話番号を公開したくない場合は、値を「請求開示」にすると「請求があれば遅滞なく開示」の表示になります(条件があるため、公開前に必ず確認してください)。")
+
 elif st.session_state.page == "simple":
     st.subheader("画像生成モード")
     st.markdown(
