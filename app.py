@@ -3016,7 +3016,7 @@ def _set_refs_from_entry(entry):
 
 def render_set_generation_page():
     st.subheader("セット画像生成")
-    st.caption("画像生成モードと同じ形式で、登録済みのセットを使って生成します。NovelAI 4.5 fullを使用します。")
+    st.caption("登録済みのセットを使って生成できます。")
 
     render_set_manager()
     entries = st.session_state.get("characters") or []
