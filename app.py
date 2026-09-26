@@ -450,11 +450,16 @@ MAX_NAME_LEN = 30
 # --- セット(NovelAI「精密画像参照」)の設定 ---
 SET_DIR = os.path.join(DATA_DIR, "sets")
 os.makedirs(SET_DIR, exist_ok=True)
+# 保存庫に「設定ごと」保存するとき、参照画像はここにコピーする。
+# 元のセット(SET_DIR側)を後から削除・変更しても、保存庫からの再現には影響しない。
+REPLAY_DIR = os.path.join(DATA_DIR, "set_replay")
+os.makedirs(REPLAY_DIR, exist_ok=True)
 MAX_SETS = 20                 # 1人が登録できるセットの上限
 SET_MAX_REFS = 3              # 1回の生成で同時に使えるセットの上限
-# NovelAI側は精密画像参照を使うと、参照1枚ごとに追加のAnlasがかかります(公式: 1回の生成につき5 Anlas〜)。
-# その分をお客様のポイントにも上乗せしたい場合だけ、ここを 1 以上にしてください(参照1枚ごとの追加ポイント)。
-SET_REF_EXTRA_POINTS = 0
+# セット画像生成の料金は「セットを使った数」だけで決まる(サイズによる基本料金はない)。
+# セットを1つも使わなければ無料。セットを使うと、1つにつきこのポイントがかかる。
+# 環境変数 SET_REF_EXTRA_POINTS で変更できる(未設定なら15pt)。
+SET_REF_EXTRA_POINTS = int(os.environ.get("SET_REF_EXTRA_POINTS", "15") or 15)
 SET_KINDS = {"キャラクター": "character", "絵柄": "style", "キャラクター+絵柄": "character&style"}
 SET_KIND_VALUES = tuple(SET_KINDS.values())
 SET_KIND_LABEL = {v: k for k, v in SET_KINDS.items()}
@@ -2484,7 +2489,11 @@ def _legal_price_lines():
 
 
 def _legal_cost_lines():
-    lines = [f"- 画像生成 {name}: {spec['cost']}ポイント" for name, spec in SIMPLE_SIZES.items()]
+    lines = ["【画像生成モード】"]
+    lines += [f"- {name}: {spec['cost']}ポイント" for name, spec in SIMPLE_SIZES.items()]
+    lines.append("【セット画像生成】")
+    lines.append("- セットを使わない場合: 無料")
+    lines.append(f"- セットを使う場合: セット1個につき{SET_REF_EXTRA_POINTS}ポイント(画像のサイズによる追加料金はありません)")
     lines.append(f"- 動画生成: 1秒あたり{VIDEO_PT_PER_SEC}ポイント")
     return "\n".join(lines)
 
@@ -3014,25 +3023,82 @@ def _set_refs_from_entry(entry):
                 break
     return char_refs[:3], style_refs[:3]
 
+def set_refs_for_library(refs):
+    """生成に使った参照画像を、保存庫用に別フォルダへコピーして保存する。
+    元のセット(登録済みキャラクター)が後で削除・変更されても、保存庫からの再現に影響しない。"""
+    out = []
+    for r in refs or []:
+        if not isinstance(r, dict) or not r.get("uri"):
+            continue
+        try:
+            path = store_image_uri(r["uri"], REPLAY_DIR, "replay")
+        except Exception:
+            continue
+        if not path:
+            continue
+        out.append({"uri": path, "kind": r.get("kind") or "character&style",
+                    "strength": _unit(r.get("strength"), 1.0), "secondary": _unit(r.get("secondary"), 0.75),
+                    "name": r.get("name") or ""})
+    return out[:SET_MAX_REFS]
+
+
+def apply_set_settings(item):
+    """保存庫から、セット画像生成の全設定(参照画像を含む)を復元する。"""
+    item = item or {}
+    st.session_state.set_sq = item.get("quality") or ""
+    st.session_state.set_sb = item.get("background") or ""
+    st.session_state.set_sc = item.get("character_text") or ""
+    st.session_state.set_so = item.get("other") or ""
+    st.session_state.set_sn = item.get("negative") or ""
+    st.session_state.set_seed = "" if item.get("seed") is None else str(item.get("seed"))
+    st.session_state.set_size = str(item.get("size") or "")
+    try:
+        st.session_state.set_scale = max(1.0, min(10.0, float(item.get("scale", 5.0))))
+    except Exception:
+        st.session_state.set_scale = 5.0
+    try:
+        st.session_state.set_steps = max(1, min(28, int(item.get("steps", 20))))
+    except Exception:
+        st.session_state.set_steps = 20
+    st.session_state.set_sampler = str(item.get("sampler") or "Euler Ancestral")
+    st.session_state.set_picks = []                              # 通常のセット選択はいったん外す
+    st.session_state.set_replay_refs = list(item.get("refs") or [])   # 保存庫からの参照画像を、そのまま使う
+
+
 def render_set_generation_page():
     st.subheader("セット画像生成")
-    st.caption("登録済みのセットを使って生成できます。")
+    st.caption("画像生成モードと同じ形式で、セット(参照画像)を使って生成します。セットは使わなくても生成できます。")
 
-    render_set_manager()
-    entries = st.session_state.get("characters") or []
-    set_ids = [_set_id(x, i) for i, x in enumerate(entries)]
-    set_names = {sid: set_display_name(x) for sid, x in zip(set_ids, entries)}
-    # 削除済みのセットが選択状態に残っていても落ちないように、ウィジェット作成前に整える
-    st.session_state.set_picks = [x for x in (st.session_state.get("set_picks") or []) if x in set_ids][:SET_MAX_REFS]
-    if set_ids:
-        st.multiselect(f"使うセット(最大{SET_MAX_REFS}つ。選ばなくても生成できます)", set_ids,
-                       format_func=lambda x: set_names.get(x, x), max_selections=SET_MAX_REFS, key="set_picks")
+    replay_refs = list(st.session_state.get("set_replay_refs") or [])
+    if replay_refs:
+        st.info("保存庫から呼び出した設定です。以下の参照画像を、そのまま使って生成します(登録済みセットである必要はありません)。")
+        cols = st.columns(min(3, len(replay_refs)) or 1)
+        for i, r in enumerate(replay_refs):
+            with cols[i % len(cols)]:
+                path = _safe_local_path(r.get("uri") or "")
+                if path:
+                    st.image(thumb_path(path, 200), width=100)
+                st.caption(f"{r.get('name') or 'セット'}({SET_KIND_LABEL.get(r.get('kind') or '', '-')})")
+        if st.button("この参照画像をやめて、いつものセット選択に戻す", key="set_replay_clear"):
+            st.session_state.set_replay_refs = []
+            st.rerun()
+        picked_refs = replay_refs
     else:
-        st.info("登録済みのセットがありません。上の「セットを登録する」から追加できます。")
-    picked_ids = list(st.session_state.get("set_picks") or [])
-    picked_refs = set_refs_from_picks(entries, picked_ids)
-    if sum(1 for r in picked_refs if r["kind"] in ("character", "character&style")) > 1:
-        st.caption("キャラクター参照を複数選ぶと、キャラクターが混ざります(NovelAIの仕様です)。")
+        render_set_manager()
+        entries = st.session_state.get("characters") or []
+        set_ids = [_set_id(x, i) for i, x in enumerate(entries)]
+        set_names = {sid: set_display_name(x) for sid, x in zip(set_ids, entries)}
+        # 削除済みのセットが選択状態に残っていても落ちないように、ウィジェット作成前に整える
+        st.session_state.set_picks = [x for x in (st.session_state.get("set_picks") or []) if x in set_ids][:SET_MAX_REFS]
+        if set_ids:
+            st.multiselect(f"使うセット(最大{SET_MAX_REFS}つ。選ばなくても生成できます)", set_ids,
+                           format_func=lambda x: set_names.get(x, x), max_selections=SET_MAX_REFS, key="set_picks")
+        else:
+            st.info("登録済みのセットがありません。セットなしでも生成できます。使う場合は、上の「セットを登録する」から追加してください。")
+        picked_ids = list(st.session_state.get("set_picks") or [])
+        picked_refs = set_refs_from_picks(entries, picked_ids)
+        if sum(1 for r in picked_refs if r["kind"] in ("character", "character&style")) > 1:
+            st.caption("キャラクター参照を複数選ぶと、キャラクターが混ざります(NovelAIの仕様です)。")
 
     st.text_area("画質プロンプト", key="set_sq")
     st.text_area("背景プロンプト", key="set_sb")
@@ -3047,8 +3113,11 @@ def render_set_generation_page():
         st.session_state.set_size = current_size
     size_name = st.radio("サイズ", size_opts, index=size_opts.index(current_size), horizontal=True, key="set_size")
     spec = SIMPLE_SIZES[size_name]
-    total_cost = spec["cost"] + SET_REF_EXTRA_POINTS * len(picked_refs)
-    st.caption(f"{spec['gen'][0]} × {spec['gen'][1]}　{total_cost}ポイント")
+    total_cost = SET_REF_EXTRA_POINTS * len(picked_refs)
+    if picked_refs:
+        st.caption(f"{spec['gen'][0]} × {spec['gen'][1]}　セット{len(picked_refs)}個 × {SET_REF_EXTRA_POINTS}pt = {total_cost}ポイント")
+    else:
+        st.caption(f"{spec['gen'][0]} × {spec['gen'][1]}　セットを使わないので無料です")
     scale = st.slider("プロンプトガイダンス", 1.0, 10.0, float(st.session_state.get("set_scale", 5.0)), 0.1, key="set_scale")
     with st.expander("詳細な生成設定", expanded=False):
         steps = st.slider("ステップ", 1, 28, int(st.session_state.get("set_steps", 20)), 1, key="set_steps")
@@ -3089,9 +3158,9 @@ def render_set_generation_page():
             with st.spinner("生成中…"):
                 if spec["paid"] and not is_premium() and not is_owner():
                     raise Exception("このサイズはVIPだけです")
-                charged = take_points(total_cost, reason="セット画像生成")
+                charged = take_points(total_cost, reason="セット画像生成") if total_cost > 0 else False
                 used_seed = seed_value if seed_value is not None else secrets.randbelow(4294967296)
-                refs = set_refs_from_picks(st.session_state.get("characters") or [], picked_ids)
+                refs = picked_refs
                 prompt_parts = [x.strip() for x in [st.session_state.set_sq, st.session_state.set_sb, st.session_state.set_sc, st.session_state.set_so] if x.strip()]
                 img = nai_request(
                     ", ".join(prompt_parts), spec["gen"][0], spec["gen"][1], "nai-diffusion-4-5-full",
@@ -3100,6 +3169,7 @@ def render_set_generation_page():
                 )
             st.session_state.set_image = img
             st.session_state.set_last_seed = used_seed
+            st.session_state.set_last_refs = refs
             st.session_state.set_error = ""
         except Exception as e:
             if charged:
@@ -3120,6 +3190,22 @@ def render_set_generation_page():
             st.session_state.video_src = st.session_state.set_image
             go("video")
             st.rerun()
+        if st.button("保存庫に入れる", key="set_to_library"):
+            add_library(st.session_state.set_image, "セット画像生成", {
+                "kind": "set",
+                "quality": st.session_state.set_sq,
+                "background": st.session_state.set_sb,
+                "character_text": st.session_state.set_sc,
+                "other": st.session_state.set_so,
+                "negative": st.session_state.set_sn,
+                "size": st.session_state.get("set_size", ""),
+                "scale": st.session_state.get("set_scale", 5.0),
+                "steps": st.session_state.get("set_steps", 20),
+                "sampler": st.session_state.get("set_sampler", "Euler Ancestral"),
+                "seed": st.session_state.get("set_last_seed"),
+                "refs": set_refs_for_library(st.session_state.get("set_last_refs") or []),
+            })
+            st.success("入れました")
 
 _startup_report()
 
@@ -3272,11 +3358,20 @@ elif st.session_state.page == "lib":
     for i, item in enumerate(list(reversed(st.session_state.library))[:lib_limit]):
         st.image(thumb_path(item["url"]), width=160)
         st.caption(f"{item.get('label','')} {item.get('time','')}")
-        a, b = st.columns(2)
-        with a:
+        has_settings = item.get("kind") in ("simple", "set")
+        cols = st.columns(3 if has_settings else 2)
+        with cols[0]:
             if st.button("動画にする", key=f"libv_{i}"):
                 st.session_state.video_src = item["url"]; go("video"); st.rerun()
-        with b:
+        if has_settings:
+            with cols[1]:
+                if st.button("🔁 同じ設定で再生成", key=f"libr_{i}"):
+                    if item.get("kind") == "set":
+                        apply_set_settings(item); go("chars")
+                    else:
+                        apply_simple_settings(item); go("simple")
+                    st.rerun()
+        with cols[-1]:
             if st.button("消す", key=f"libd_{i}"):
                 target = st.session_state.library[len(st.session_state.library) - 1 - i] or {}
                 item_id = str(target.get("id") or "")
