@@ -463,6 +463,18 @@ SET_REF_EXTRA_POINTS = int(os.environ.get("SET_REF_EXTRA_POINTS", "15") or 15)
 SET_KINDS = {"キャラクター": "character", "絵柄": "style", "キャラクター+絵柄": "character&style"}
 SET_KIND_VALUES = tuple(SET_KINDS.values())
 SET_KIND_LABEL = {v: k for k, v in SET_KINDS.items()}
+BOARD_CATEGORY_COLORS = {
+    "質問・相談": "#2f6fed", "要望": "#8a4fe0", "不具合": "#e5484d",
+    "雑談": "#2fa876", "その他": "#8a8f98", "作品": "#e07a3f",
+}
+
+
+def board_category_badge(category):
+    """掲示板の一覧で、カテゴリごとに色を変えたバッジ(丸いラベル)を返す。"""
+    label = str(category or "その他")
+    color = BOARD_CATEGORY_COLORS.get(label, "#8a8f98")
+    return (f'<span style="background:{color};color:#fff;padding:2px 10px;border-radius:10px;'
+            f'font-size:0.8em;white-space:nowrap;display:inline-block;">{html_lib.escape(label)}</span>')
 # 一覧表示用の縮小画像のキャッシュ(なくなっても、必要になったときに自動で作り直される)
 THUMB_DIR = os.path.join(DATA_DIR, "thumbs")
 os.makedirs(THUMB_DIR, exist_ok=True)
@@ -2804,6 +2816,8 @@ def render_top_menu():
             menu_items.append(("来場者管理", "stats"))
         for label, page in menu_items:
             if st.button(label, use_container_width=True, key=f"m_{page}"):
+                if page == "board":
+                    st.session_state.board_id = ""      # コミュニティは、必ず一覧から開く
                 go(page); st.rerun()
         st.divider()
         for _k in LEGAL_PAGES:
@@ -3244,9 +3258,6 @@ if st.session_state.logged_in and stripe is not None and st.session_state.get("s
         _need_sync = True
     if _need_sync:
         sync_subscription()      # 30秒に1回までに間引かれる
-if qs.get("bid"):
-    st.session_state.board_id = str(qs.get("bid"))
-    st.session_state.page = "board"
 if qs.get("session_id"):
     if st.session_state.logged_in:
         st.session_state.error = apply_checkout_session(str(qs.get("session_id")))
@@ -3335,6 +3346,7 @@ if st.session_state.page == "home":
     mid = st.columns([1, 2, 1])
     with mid[1]:
         if st.button("👥 コミュニティ", use_container_width=True, key="home_community"):
+            st.session_state.board_id = ""      # コミュニティは、必ず一覧から開く
             go("board"); st.rerun()
     foot = st.columns(3)
     for _c, _k, _label in zip(foot, LEGAL_PAGES, ("特商法表記", "利用規約", "プライバシー")):
@@ -4329,7 +4341,7 @@ elif st.session_state.page == "board":
             st.session_state.board_id = ""
         else:
             category = post.get("category") or ("作品" if post.get("image") else "その他")
-            st.caption(f"【{category}】")
+            st.markdown(board_category_badge(category), unsafe_allow_html=True)
             safe_title = html_lib.escape(str(post.get("title") or "無題"))
             st.markdown(f"## {safe_title}")
             author = post.get("user") or "名無し"
@@ -4418,7 +4430,7 @@ elif st.session_state.page == "board":
 
         with tab_thread:
             if st.session_state.logged_in:
-                with st.expander("📝 新しいスレッドを作る", expanded=True):
+                with st.expander("📝 新しいスレッドを作る", expanded=False):
                     st.caption("質問・相談・要望・雑談など、自由に投稿できます。")
                     t_title = st.text_input("タイトル", max_chars=60, key="thread_title", placeholder="例：このプロンプトについて質問です")
                     t_cat = st.selectbox("カテゴリ", ["質問・相談", "要望", "不具合", "雑談", "その他"], key="thread_category")
@@ -4460,15 +4472,23 @@ elif st.session_state.page == "board":
             if not thread_posts:
                 st.caption("まだスレッドはありません")
             else:
+                my_name = st.session_state.get("username") if st.session_state.logged_in else None
                 for p in thread_posts:
                     title = str(p.get("title") or "無題").strip() or "無題"
-                    if st.button(title[:60], key=f"plist_thread_{p.get('id')}", use_container_width=True):
+                    mine = bool(my_name) and p.get("user") == my_name
+                    n_comments = len(p.get("comments") or [])
+                    badge = board_category_badge(p.get("category"))
+                    if mine:
+                        badge += ' <span style="color:#2fa876;font-size:0.8em;">● あなたの投稿</span>'
+                    st.markdown(badge, unsafe_allow_html=True)
+                    label = f"{title[:60]}　💬{n_comments}" if n_comments else title[:60]
+                    if st.button(label, key=f"plist_thread_{p.get('id')}", use_container_width=True):
                         st.session_state.board_id = p.get("id")
                         go("board"); st.rerun()
 
         with tab_work:
             if st.session_state.logged_in:
-                with st.expander("🖼️ 作品を投稿する", expanded=True):
+                with st.expander("🖼️ 作品を投稿する", expanded=False):
                     title = st.text_input("タイトル", max_chars=40, key="board_work_title")
                     # 作品投稿は「保存庫」に入っている作品だけを選択できます。
                     # 履歴や現在表示中の画像は投稿候補に含めません。
@@ -4541,8 +4561,13 @@ elif st.session_state.page == "board":
             if not work_posts:
                 st.caption("まだ作品投稿はありません")
             else:
+                my_name = st.session_state.get("username") if st.session_state.logged_in else None
                 for p in work_posts:
                     title = str(p.get("title") or "無題").strip() or "無題"
+                    mine = bool(my_name) and p.get("user") == my_name
+                    author = html_lib.escape(str(p.get("user") or "名無し"))
+                    badge = f'<span style="color:#2fa876;font-size:0.8em;">● あなたの投稿</span>' if mine else f'<span style="color:#8a8f98;font-size:0.8em;">{author}</span>'
+                    st.markdown(badge, unsafe_allow_html=True)
                     if st.button(title[:60], key=f"plist_work_{p.get('id')}", use_container_width=True):
                         st.session_state.board_id = p.get("id")
                         go("board"); st.rerun()
