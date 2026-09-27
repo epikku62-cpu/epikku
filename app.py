@@ -463,9 +463,13 @@ SET_REF_EXTRA_POINTS = int(os.environ.get("SET_REF_EXTRA_POINTS", "15") or 15)
 SET_KINDS = {"キャラクター": "character", "絵柄": "style", "キャラクター+絵柄": "character&style"}
 SET_KIND_VALUES = tuple(SET_KINDS.values())
 SET_KIND_LABEL = {v: k for k, v in SET_KINDS.items()}
+# スレッドを作るときに選べるカテゴリ。「お知らせ」は管理者だけが選べる。
+THREAD_CATEGORIES = ["質問", "雑談", "お知らせ"]
 BOARD_CATEGORY_COLORS = {
-    "質問・相談": "#2f6fed", "要望": "#8a4fe0", "不具合": "#e5484d",
-    "雑談": "#2fa876", "その他": "#8a8f98", "作品": "#e07a3f",
+    "質問": "#2f6fed", "雑談": "#2fa876", "お知らせ": "#d4a017",
+    # 旧カテゴリ(過去の投稿を色分けするためだけに残す。新規作成では選べない)
+    "質問・相談": "#2f6fed", "要望": "#8a4fe0", "不具合": "#e5484d", "その他": "#8a8f98",
+    "作品": "#e07a3f",
 }
 
 
@@ -1658,6 +1662,29 @@ def board_add_post(post):
         _remove_board_image(path)
     if err["msg"]:
         raise Exception(err["msg"])
+
+def board_toggle_like(post_id, username):
+    """いいねを付ける/外す。処理後の(いいね数, 自分が押しているか)を返す。"""
+    if not username:
+        raise Exception("ログインが必要です")
+    result = {"count": 0, "liked": False}
+    def mut(current):
+        for p in current.get("posts") or []:
+            if p.get("id") == post_id:
+                likes = p.get("likes") if isinstance(p.get("likes"), list) else []
+                if username in likes:
+                    likes = [u for u in likes if u != username]
+                    result["liked"] = False
+                else:
+                    likes.append(username)
+                    result["liked"] = True
+                p["likes"] = likes
+                result["count"] = len(likes)
+                return current
+        return current
+    update_board(mut)
+    return result["count"], result["liked"]
+
 
 def board_add_comment(post_id, comment):
     err = {"msg": ""}
@@ -4347,6 +4374,17 @@ elif st.session_state.page == "board":
             author = post.get("user") or "名無し"
             author_label = f"{author}　👑管理者" if post.get("is_owner") else author
             st.caption(f"{author_label}　{post.get('time','')}")
+
+            likes = post.get("likes") or []
+            liked = bool(st.session_state.logged_in) and st.session_state.get("username") in likes
+            like_label = f"♥ いいね済み（{len(likes)}）" if liked else f"♡ いいね（{len(likes)}）"
+            if st.session_state.logged_in:
+                if st.button(like_label, key=f"like_{view_id}"):
+                    board_toggle_like(view_id, st.session_state.get("username") or "")
+                    st.rerun()
+            else:
+                st.caption(f"♡ いいね（{len(likes)}）　※いいねするにはログインが必要です")
+
             body = str(post.get("body") or "").strip()
             if body:
                 st.markdown(html_lib.escape(body).replace("\n", "  \n"))
@@ -4433,7 +4471,8 @@ elif st.session_state.page == "board":
                 with st.expander("📝 新しいスレッドを作る", expanded=False):
                     st.caption("質問・相談・要望・雑談など、自由に投稿できます。")
                     t_title = st.text_input("タイトル", max_chars=60, key="thread_title", placeholder="例：このプロンプトについて質問です")
-                    t_cat = st.selectbox("カテゴリ", ["質問・相談", "要望", "不具合", "雑談", "その他"], key="thread_category")
+                    cat_options = THREAD_CATEGORIES if is_owner() else [c for c in THREAD_CATEGORIES if c != "お知らせ"]
+                    t_cat = st.selectbox("カテゴリ", cat_options, key="thread_category")
                     t_body = st.text_area("内容", max_chars=1000, key="thread_body", placeholder="みんなに聞きたいことを書いてください")
                     if st.button("スレッドを作成", type="primary", use_container_width=True):
                         if not t_title.strip() or not t_body.strip():
@@ -4464,8 +4503,14 @@ elif st.session_state.page == "board":
             else:
                 st.caption("投稿・返信にはログインが必要です")
 
-            q = st.text_input("スレッドを検索", key="board_thread_q", placeholder="タイトル・名前・内容")
+            f1, f2 = st.columns([1, 2])
+            with f1:
+                cat_filter = st.selectbox("カテゴリ", ["すべて"] + THREAD_CATEGORIES, key="board_thread_cat")
+            with f2:
+                q = st.text_input("スレッドを検索", key="board_thread_q", placeholder="タイトル・名前・内容")
             thread_posts = [p for p in posts_all if not (p.get("image") or p.get("category") == "作品")]
+            if cat_filter != "すべて":
+                thread_posts = [p for p in thread_posts if (p.get("category") or "") == cat_filter]
             if q and q.strip():
                 w = q.strip().lower()
                 thread_posts = [p for p in thread_posts if w in str(p.get("title") or "").lower() or w in str(p.get("user") or "").lower() or w in str(p.get("body") or "").lower()]
@@ -4477,11 +4522,14 @@ elif st.session_state.page == "board":
                     title = str(p.get("title") or "無題").strip() or "無題"
                     mine = bool(my_name) and p.get("user") == my_name
                     n_comments = len(p.get("comments") or [])
+                    n_likes = len(p.get("likes") or [])
                     badge = board_category_badge(p.get("category"))
                     if mine:
                         badge += ' <span style="color:#2fa876;font-size:0.8em;">● あなたの投稿</span>'
                     st.markdown(badge, unsafe_allow_html=True)
-                    label = f"{title[:60]}　💬{n_comments}" if n_comments else title[:60]
+                    meta = ("　💬" + str(n_comments)) if n_comments else ""
+                    meta += ("　♥" + str(n_likes)) if n_likes else ""
+                    label = title[:60] + meta
                     if st.button(label, key=f"plist_thread_{p.get('id')}", use_container_width=True):
                         st.session_state.board_id = p.get("id")
                         go("board"); st.rerun()
@@ -4553,24 +4601,36 @@ elif st.session_state.page == "board":
             else:
                 st.caption("作品投稿にはログインが必要です")
 
-            q = st.text_input("作品を検索", key="board_work_q", placeholder="タイトル・名前")
+            f1, f2 = st.columns([1, 2])
+            with f1:
+                w_sort = st.selectbox("並び順", ["新着順", "人気順"], key="board_work_sort")
+            with f2:
+                q = st.text_input("作品を検索", key="board_work_q", placeholder="タイトル・名前")
             work_posts = [p for p in posts_all if p.get("image") or p.get("category") == "作品"]
             if q and q.strip():
                 w = q.strip().lower()
                 work_posts = [p for p in work_posts if w in str(p.get("title") or "").lower() or w in str(p.get("user") or "").lower()]
+            if w_sort == "人気順":
+                work_posts = sorted(work_posts, key=lambda p: len(p.get("likes") or []), reverse=True)
             if not work_posts:
                 st.caption("まだ作品投稿はありません")
             else:
                 my_name = st.session_state.get("username") if st.session_state.logged_in else None
-                for p in work_posts:
+                gcols = st.columns(3)
+                for i, p in enumerate(work_posts):
                     title = str(p.get("title") or "無題").strip() or "無題"
                     mine = bool(my_name) and p.get("user") == my_name
-                    author = html_lib.escape(str(p.get("user") or "名無し"))
-                    badge = f'<span style="color:#2fa876;font-size:0.8em;">● あなたの投稿</span>' if mine else f'<span style="color:#8a8f98;font-size:0.8em;">{author}</span>'
-                    st.markdown(badge, unsafe_allow_html=True)
-                    if st.button(title[:60], key=f"plist_work_{p.get('id')}", use_container_width=True):
-                        st.session_state.board_id = p.get("id")
-                        go("board"); st.rerun()
+                    author = str(p.get("user") or "名無し")
+                    n_likes = len(p.get("likes") or [])
+                    with gcols[i % 3]:
+                        img = board_image_uri(p)
+                        if img:
+                            st.image(thumb_path(img, 300), use_container_width=True)
+                        who = "● あなた" if mine else author
+                        st.caption(f"{title[:20]}　♥{n_likes}　{who}")
+                        if st.button("開く", key=f"plist_work_{p.get('id')}", use_container_width=True):
+                            st.session_state.board_id = p.get("id")
+                            go("board"); st.rerun()
 
     # コミュニティを開いた時点までを既読にする。
     mark_community_seen()
