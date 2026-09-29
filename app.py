@@ -442,7 +442,11 @@ ICON_DIR = os.path.join(DATA_DIR, "icons")
 os.makedirs(LIBRARY_DIR, exist_ok=True)
 os.makedirs(ICON_DIR, exist_ok=True)
 AUTH_COOKIE = "panel_auth"
-BOARD_MAX_POSTS = 80
+BOARD_MAX_POSTS = 300          # タイムライン(質問・雑談・お知らせ)の保持件数。超えたら古いものから消える
+BOARD_MAX_WORKS = 100          # 作品投稿の保持件数(画像ファイルも一緒に消える)
+BOARD_FEED_KEEP_PER_USER = 30  # 1人が残せるタイムライン投稿の数(超えたら、その人の古い投稿から消える)
+BOARD_FEED_COOLDOWN_SEC = 15   # 連続投稿の間隔
+BOARD_FEED_MAX_CHARS = 300     # タイムライン1件の最大文字数
 BOARD_MAX_COMMENTS = 40
 BOARD_MAX_POSTS_PER_USER = 10   # 1人が掲示板を埋めないための上限(管理者は対象外)
 MIN_PASSWORD_LEN = 8
@@ -471,6 +475,229 @@ BOARD_CATEGORY_COLORS = {
     "質問・相談": "#2f6fed", "要望": "#8a4fe0", "不具合": "#e5484d", "その他": "#8a8f98",
     "作品": "#e07a3f",
 }
+
+
+def gallery_css():
+    """作品ギャラリーの見た目を整えるCSS。
+    Streamlitの列は、スマホの狭い画面では自動で縦に積まれてしまうため、
+    「ちょうど3列の行」だけ、スマホでも横に並べる(サムネイルは正方形に切り抜いて、小さく揃える)。
+    Streamlitのバージョンによって列のtest-idが違う(column / stColumn)ため、両方に対応している。"""
+    row = 'div[data-testid="stHorizontalBlock"]:has(> div[data-testid="{c}"]:nth-child(3):last-child)'
+    rows = [row.format(c=c) for c in ("stColumn", "column")]
+    cols = [f'{r} > div[data-testid="{c}"]' for r, c in zip(rows, ("stColumn", "column"))]
+    imgs = [f'{r} [data-testid="stImage"] img' for r in rows]
+    caps = [f'{r} [data-testid="stCaptionContainer"]' for r in rows]
+    btns = [f'{r} button' for r in rows]
+    return ("<style>"
+            + ",".join(rows) + "{flex-wrap:nowrap !important;gap:0.4rem !important;max-width:640px;}"
+            + ",".join(cols) + "{min-width:0 !important;width:auto !important;flex:1 1 0 !important;}"
+            + ",".join(imgs) + "{aspect-ratio:1/1;object-fit:cover;object-position:center top;border-radius:8px;width:100%;}"
+            + ",".join(caps) + "{font-size:0.72rem !important;line-height:1.25 !important;overflow-wrap:anywhere;}"
+            + ",".join(btns) + "{padding:0.1rem 0.2rem !important;min-height:1.8rem !important;font-size:0.8rem !important;}"
+            + "</style>")
+
+
+def board_category_group(category):
+    """旧カテゴリ(質問・相談)を、新しい「質問」として扱う(絞り込み用)。"""
+    c = str(category or "")
+    return "質問" if c in ("質問", "質問・相談") else c
+
+
+def board_short_title(body):
+    """つぶやき形式の投稿は、本文の最初の20文字を、検索・一覧用のタイトルにする。"""
+    first = str(body or "").strip().split("\n")[0].strip()
+    return (first[:20] + ("…" if len(first) > 20 else "")) or "投稿"
+
+
+def relative_time(ts, fallback=""):
+    """「たった今」「3分前」「2時間前」「昨日」のような、SNS風の時刻表示。"""
+    try:
+        diff = time.time() - float(ts)
+    except Exception:
+        return fallback
+    if diff < 0:
+        return fallback
+    if diff < 60:
+        return "たった今"
+    if diff < 3600:
+        return f"{int(diff // 60)}分前"
+    if diff < 86400:
+        return f"{int(diff // 3600)}時間前"
+    if diff < 86400 * 2:
+        return "昨日"
+    if diff < 86400 * 7:
+        return f"{int(diff // 86400)}日前"
+    return fallback or datetime.fromtimestamp(float(ts)).strftime("%Y/%m/%d")
+
+
+def board_avatar_html(icon, size=32):
+    """投稿者のアイコン(動物の絵文字、またはアップロードした画像)を、丸いHTMLにする。"""
+    icon = str(icon or "")
+    if icon and not icon.startswith(("/", "data:", "http")) and len(icon) <= 4:
+        return f'<span style="font-size:{int(size * 0.8)}px;line-height:{size}px;">{html_lib.escape(icon)}</span>'
+    path = _safe_local_path(icon) if icon and not icon.startswith("data:") else ""
+    if path:
+        try:
+            with open(thumb_path(path, 64), "rb") as f:
+                b64 = base64.b64encode(f.read()).decode()
+            return (f'<img src="data:image/jpeg;base64,{b64}" '
+                    f'style="width:{size}px;height:{size}px;border-radius:50%;object-fit:cover;">')
+        except Exception:
+            pass
+    return f'<span style="font-size:{int(size * 0.8)}px;line-height:{size}px;">🙂</span>'
+
+
+def board_user_icons(names):
+    """投稿者の名前から、アイコンをまとめて取得する。"""
+    out = {}
+    users = load_json(USERS_FILE, {})
+    if isinstance(users, dict):
+        for n in names:
+            u = users.get(n)
+            if isinstance(u, dict):
+                out[n] = u.get("icon") or ""
+    return out
+
+
+def _board_text_html(text, limit=None):
+    """投稿の本文を、安全なHTML(改行だけ反映・Markdownは無効)にする。"""
+    t = str(text or "").replace("\r", "").strip()
+    if limit and len(t) > limit:
+        t = t[:limit].rstrip() + "…"
+    return html_lib.escape(t).replace("\n", "<br>")
+
+
+def _board_feed_more():
+    st.session_state.board_feed_limit = int(st.session_state.get("board_feed_limit", 20) or 20) + 20
+
+
+def render_feed_composer():
+    """タイムラインの投稿フォーム(最初は閉じている)。お知らせは管理者だけが選べる。"""
+    if not st.session_state.get("logged_in"):
+        st.caption("投稿・いいね・返信にはログインが必要です")
+        return
+    n = int(st.session_state.get("feed_n") or 0)
+    with st.expander("✏️ 投稿する", expanded=False):
+        cats = THREAD_CATEGORIES if is_owner() else [c for c in THREAD_CATEGORIES if c != "お知らせ"]
+        cat = st.radio("カテゴリ", cats, horizontal=True, key="feed_cat")
+        body = st.text_area("内容", key=f"feed_body_{n}", max_chars=BOARD_FEED_MAX_CHARS, height=110,
+                            placeholder="気軽に書いてみましょう")
+        if st.button("投稿する", type="primary", key=f"feed_post_{n}", use_container_width=True):
+            text = (body or "").strip()
+            wait = BOARD_FEED_COOLDOWN_SEC - (time.time() - float(st.session_state.get("_feed_last_post") or 0))
+            if not text:
+                st.error("内容を入力してください")
+            elif cat == "お知らせ" and not is_owner():
+                st.error("お知らせは、管理者だけが投稿できます")
+            elif wait > 0 and not is_owner():
+                st.error(f"連続での投稿は、あと{int(wait) + 1}秒お待ちください")
+            else:
+                now = time.time()
+                posted = False
+                try:
+                    board_add_post({
+                        "id": uuid.uuid4().hex[:10],
+                        "user": st.session_state.get("username") or "名無し",
+                        "is_owner": bool(is_owner()),
+                        "title": board_short_title(text),
+                        "short": True,
+                        "category": cat,
+                        "body": text[:BOARD_FEED_MAX_CHARS],
+                        "image": "",
+                        "kind": "thread",
+                        "show_prompt": False,
+                        "comments": [],
+                        "likes": [],
+                        "time": datetime.now().strftime("%Y/%m/%d %H:%M"),
+                        "ts": now,
+                        "updated_at": now,
+                    })
+                    st.session_state._feed_last_post = now
+                    st.session_state.feed_n = n + 1          # 入力欄を空に戻す
+                    st.session_state.feed_notice = "投稿しました"
+                    posted = True
+                except Exception as e:
+                    st.error(str(e))
+                if posted:
+                    st.rerun()
+
+
+def render_feed_card(p, icons, my_name, pinned=False):
+    """タイムラインの1件(カード)。アイコン・名前・時刻・本文・いいね・返信数。"""
+    pid = str(p.get("id") or "")
+    author = str(p.get("user") or "名無し")
+    likes = p.get("likes") or []
+    n_comments = len(p.get("comments") or [])
+    when = relative_time(p.get("ts"), str(p.get("time") or ""))
+    mark = " 👑" if p.get("is_owner") else ""
+    mine = ' <span style="color:#2fa876;font-size:0.8em;">● あなた</span>' if (my_name and author == my_name) else ""
+    with st.container(border=True):
+        if pinned:
+            st.markdown('<div style="font-size:0.8em;color:#d4a017;margin-bottom:4px;">📌 固定されたお知らせ</div>', unsafe_allow_html=True)
+        header = (f'<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">'
+                  f'{board_avatar_html(icons.get(author))}'
+                  f'<div style="flex:1;min-width:0;line-height:1.25;"><b>{html_lib.escape(author)}</b>{mark}{mine}<br>'
+                  f'<span style="font-size:0.8em;opacity:0.7;">{html_lib.escape(when)}</span></div>'
+                  f'{board_category_badge(p.get("category"))}</div>')
+        st.markdown(header, unsafe_allow_html=True)
+        body = str(p.get("body") or "")
+        if p.get("short"):
+            text = _board_text_html(body)
+        else:                                   # 以前の「スレッド」形式の投稿: タイトルを太字で、本文は先頭だけ
+            title = html_lib.escape(str(p.get("title") or "無題"))
+            text = f'<b>{title}</b>' + (('<br>' + _board_text_html(body, 120)) if body.strip() else "")
+        st.markdown(f'<div style="word-break:break-word;line-height:1.55;margin-bottom:4px;">{text}</div>', unsafe_allow_html=True)
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            if st.session_state.get("logged_in"):
+                liked = st.session_state.get("username") in likes
+                if st.button(("♥ " if liked else "♡ ") + str(len(likes)), key=f"flike_{pid}", use_container_width=True):
+                    board_toggle_like(pid, st.session_state.get("username") or "")
+                    st.rerun()
+            else:
+                st.caption(f"♡ {len(likes)}")
+        with c2:
+            if st.button(f"💬 {n_comments}", key=f"freply_{pid}", use_container_width=True):
+                st.session_state.board_id = pid
+                go("board"); st.rerun()
+
+
+def render_timeline(posts_all):
+    """質問・雑談・お知らせを、新しい順に流れるタイムラインで表示する。"""
+    notice = st.session_state.pop("feed_notice", "") if "feed_notice" in st.session_state else ""
+    if notice:
+        st.success(notice)
+    render_feed_composer()
+    cat_filter = st.radio("表示", ["すべて"] + THREAD_CATEGORIES, horizontal=True, key="board_feed_cat", label_visibility="collapsed")
+    with st.expander("🔍 検索", expanded=False):
+        q = st.text_input("検索", key="board_feed_q", placeholder="内容・名前", label_visibility="collapsed")
+    feed = [p for p in posts_all if not (p.get("image") or p.get("category") == "作品")]
+    if cat_filter != "すべて":
+        feed = [p for p in feed if board_category_group(p.get("category")) == cat_filter]
+    searching = bool(q and q.strip())
+    if searching:
+        w = q.strip().lower()
+        feed = [p for p in feed if w in str(p.get("title") or "").lower() or w in str(p.get("user") or "").lower() or w in str(p.get("body") or "").lower()]
+    pinned = None
+    if cat_filter in ("すべて", "お知らせ") and not searching:
+        notices = [p for p in feed if p.get("category") == "お知らせ"]
+        if notices:
+            pinned = max(notices, key=lambda p: float(p.get("ts") or 0))
+    rest = [p for p in feed if p is not pinned]
+    if not feed:
+        st.caption("まだ投稿はありません。最初の1件を書いてみましょう。")
+        return
+    limit = int(st.session_state.get("board_feed_limit", 20) or 20)
+    shown = rest[:limit]
+    names = {str(p.get("user") or "名無し") for p in shown + ([pinned] if pinned else [])}
+    icons = board_user_icons(names)
+    my_name = st.session_state.get("username") if st.session_state.get("logged_in") else None
+    if pinned:
+        render_feed_card(pinned, icons, my_name, pinned=True)
+    for p in shown:
+        render_feed_card(p, icons, my_name)
+    if len(rest) > limit:
+        st.button(f"さらに表示（残り{len(rest) - limit}件）", key="board_feed_more", on_click=_board_feed_more, use_container_width=True)
 
 
 def board_category_badge(category):
@@ -1625,7 +1852,7 @@ def update_board(mutator):
             current = result
         if not isinstance(current, dict):
             current = {"posts": [], "updated_at": 0}
-        current["posts"] = [p for p in (current.get("posts") or []) if isinstance(p, dict)][-BOARD_MAX_POSTS:]
+        current["posts"] = [p for p in (current.get("posts") or []) if isinstance(p, dict)][-(BOARD_MAX_POSTS + BOARD_MAX_WORKS):]
         current["updated_at"] = time.time()
         return current
     return update_json_file(BOARD_FILE, {"posts": [], "updated_at": 0}, _update, backup=True)
@@ -1642,20 +1869,32 @@ def _remove_board_image(path):
 def board_add_post(post):
     err = {"msg": ""}
     removed = []
+    is_work = bool(post.get("image"))
     def mut(current):
         posts = current.get("posts") or []
-        if not post.get("is_owner"):
-            mine = sum(1 for p in posts if p.get("user") == post.get("user") and not p.get("is_owner"))
+        user = post.get("user")
+        if is_work and not post.get("is_owner"):
+            mine = sum(1 for p in posts if p.get("user") == user and not p.get("is_owner") and p.get("image"))
             if mine >= BOARD_MAX_POSTS_PER_USER:
-                err["msg"] = f"投稿できるのは1人{BOARD_MAX_POSTS_PER_USER}件までです。古い投稿を削除してください"
+                err["msg"] = f"作品を投稿できるのは1人{BOARD_MAX_POSTS_PER_USER}件までです。古い作品を削除してください"
                 return current
         posts.append(post)
-        # いっぱいになったら、拒否ではなく古い投稿から順に消す(画像ファイルも削除)
-        while len(posts) > BOARD_MAX_POSTS:
-            old = posts.pop(0)
-            if old.get("image"):
-                removed.append(old.get("image"))
-        current["posts"] = posts
+        drop = set()
+        # 1人のタイムライン投稿は、最新の30件だけ残す(古いものから自動で消える)
+        if not is_work and not post.get("is_owner"):
+            mine_feed = [p for p in posts if p.get("user") == user and not p.get("is_owner") and not p.get("image")]
+            for old in mine_feed[:-BOARD_FEED_KEEP_PER_USER]:
+                drop.add(id(old))
+        # 全体の上限(お知らせは、できるだけ消さない)
+        feed = [p for p in posts if not p.get("image") and id(p) not in drop]
+        removable = [p for p in feed if p.get("category") != "お知らせ"]
+        for old in removable[:max(0, len(feed) - BOARD_MAX_POSTS)]:
+            drop.add(id(old))
+        works = [p for p in posts if p.get("image")]
+        for old in works[:max(0, len(works) - BOARD_MAX_WORKS)]:
+            drop.add(id(old))
+            removed.append(old.get("image"))
+        current["posts"] = [p for p in posts if id(p) not in drop]
         return current
     update_board(mut)
     for path in removed:
@@ -1924,6 +2163,10 @@ def _save_history_safely(item):
         add_history_item(item)
     except Exception as e:
         print(f"[warn] add_history_item failed: {e}")
+
+def _board_work_more():
+    st.session_state.board_work_limit = int(st.session_state.get("board_work_limit", 18) or 18) + 18
+
 
 def _lib_more():
     st.session_state.lib_limit = int(st.session_state.get("lib_limit", 12) or 12) + 12
@@ -4350,7 +4593,7 @@ elif st.session_state.page == "chars":
 
 elif st.session_state.page == "board":
     st.subheader("👥 コミュニティ")
-    st.caption("質問・相談・要望・作品について、ユーザー同士や管理者で会話できます。")
+    st.caption("質問・雑談・お知らせ・作品を、みんなで気軽に共有できます。")
     board = load_board()
     posts_all = list(reversed(board.get("posts", [])))
     view_id = str(st.session_state.get("board_id") or "")
@@ -4364,13 +4607,14 @@ elif st.session_state.page == "board":
                 del st.query_params["bid"]
             go("board"); st.rerun()
         if not post:
-            st.warning("このスレッドはありません")
+            st.warning("この投稿はありません")
             st.session_state.board_id = ""
         else:
             category = post.get("category") or ("作品" if post.get("image") else "その他")
             st.markdown(board_category_badge(category), unsafe_allow_html=True)
-            safe_title = html_lib.escape(str(post.get("title") or "無題"))
-            st.markdown(f"## {safe_title}")
+            if not post.get("short"):
+                safe_title = html_lib.escape(str(post.get("title") or "無題"))
+                st.markdown(f"## {safe_title}")
             author = post.get("user") or "名無し"
             author_label = f"{author}　👑管理者" if post.get("is_owner") else author
             st.caption(f"{author_label}　{post.get('time','')}")
@@ -4387,7 +4631,7 @@ elif st.session_state.page == "board":
 
             body = str(post.get("body") or "").strip()
             if body:
-                st.markdown(html_lib.escape(body).replace("\n", "  \n"))
+                st.markdown(f'<div style="word-break:break-word;line-height:1.6;">{_board_text_html(body)}</div>', unsafe_allow_html=True)
 
             img = board_image_uri(post)
             if img:
@@ -4458,81 +4702,17 @@ elif st.session_state.page == "board":
 
             if st.session_state.logged_in and (st.session_state.get("username") == post.get("user") or is_owner()):
                 st.divider()
-                if st.button("このスレッドを削除", type="secondary"):
+                if st.button("この投稿を削除", type="secondary"):
                     board_delete_post(view_id, st.session_state.get("username") or "", is_owner())
                     st.session_state.board_id = ""
                     go("board"); st.rerun()
     else:
-        # コミュニティを「スレッド」と「作品投稿」に分離。
-        tab_thread, tab_work = st.tabs(["🗨️ スレッド", "🖼️ 作品投稿"])
+        # コミュニティを「タイムライン」と「作品投稿」に分離。
+        st.markdown(gallery_css(), unsafe_allow_html=True)
+        tab_thread, tab_work = st.tabs(["💬 タイムライン", "🖼️ 作品投稿"])
 
         with tab_thread:
-            if st.session_state.logged_in:
-                with st.expander("📝 新しいスレッドを作る", expanded=False):
-                    st.caption("質問・相談・要望・雑談など、自由に投稿できます。")
-                    t_title = st.text_input("タイトル", max_chars=60, key="thread_title", placeholder="例：このプロンプトについて質問です")
-                    cat_options = THREAD_CATEGORIES if is_owner() else [c for c in THREAD_CATEGORIES if c != "お知らせ"]
-                    t_cat = st.selectbox("カテゴリ", cat_options, key="thread_category")
-                    t_body = st.text_area("内容", max_chars=1000, key="thread_body", placeholder="みんなに聞きたいことを書いてください")
-                    if st.button("スレッドを作成", type="primary", use_container_width=True):
-                        if not t_title.strip() or not t_body.strip():
-                            st.session_state.error = "タイトルと内容を入力してください"
-                        else:
-                            pid = uuid.uuid4().hex[:10]
-                            try:
-                                board_add_post({
-                                    "id": pid,
-                                    "user": st.session_state.get("username") or "名無し",
-                                    "is_owner": bool(is_owner()),
-                                    "title": t_title.strip()[:60],
-                                    "category": t_cat,
-                                    "body": t_body.strip()[:1000],
-                                    "image": "",
-                                    "kind": "thread",
-                                    "show_prompt": False,
-                                    "comments": [],
-                                    "time": datetime.now().strftime("%Y/%m/%d %H:%M"),
-                                    "ts": time.time(),
-                                    "updated_at": time.time(),
-                                })
-                                st.session_state.board_id = pid
-                                st.session_state.error = ""
-                            except Exception as e:
-                                st.session_state.error = str(e)
-                        go("board"); st.rerun()
-            else:
-                st.caption("投稿・返信にはログインが必要です")
-
-            f1, f2 = st.columns([1, 2])
-            with f1:
-                cat_filter = st.selectbox("カテゴリ", ["すべて"] + THREAD_CATEGORIES, key="board_thread_cat")
-            with f2:
-                q = st.text_input("スレッドを検索", key="board_thread_q", placeholder="タイトル・名前・内容")
-            thread_posts = [p for p in posts_all if not (p.get("image") or p.get("category") == "作品")]
-            if cat_filter != "すべて":
-                thread_posts = [p for p in thread_posts if (p.get("category") or "") == cat_filter]
-            if q and q.strip():
-                w = q.strip().lower()
-                thread_posts = [p for p in thread_posts if w in str(p.get("title") or "").lower() or w in str(p.get("user") or "").lower() or w in str(p.get("body") or "").lower()]
-            if not thread_posts:
-                st.caption("まだスレッドはありません")
-            else:
-                my_name = st.session_state.get("username") if st.session_state.logged_in else None
-                for p in thread_posts:
-                    title = str(p.get("title") or "無題").strip() or "無題"
-                    mine = bool(my_name) and p.get("user") == my_name
-                    n_comments = len(p.get("comments") or [])
-                    n_likes = len(p.get("likes") or [])
-                    badge = board_category_badge(p.get("category"))
-                    if mine:
-                        badge += ' <span style="color:#2fa876;font-size:0.8em;">● あなたの投稿</span>'
-                    st.markdown(badge, unsafe_allow_html=True)
-                    meta = ("　💬" + str(n_comments)) if n_comments else ""
-                    meta += ("　♥" + str(n_likes)) if n_likes else ""
-                    label = title[:60] + meta
-                    if st.button(label, key=f"plist_thread_{p.get('id')}", use_container_width=True):
-                        st.session_state.board_id = p.get("id")
-                        go("board"); st.rerun()
+            render_timeline(posts_all)
 
         with tab_work:
             if st.session_state.logged_in:
@@ -4616,21 +4796,25 @@ elif st.session_state.page == "board":
                 st.caption("まだ作品投稿はありません")
             else:
                 my_name = st.session_state.get("username") if st.session_state.logged_in else None
-                gcols = st.columns(3)
-                for i, p in enumerate(work_posts):
-                    title = str(p.get("title") or "無題").strip() or "無題"
-                    mine = bool(my_name) and p.get("user") == my_name
-                    author = str(p.get("user") or "名無し")
-                    n_likes = len(p.get("likes") or [])
-                    with gcols[i % 3]:
-                        img = board_image_uri(p)
-                        if img:
-                            st.image(thumb_path(img, 300), use_container_width=True)
-                        who = "● あなた" if mine else author
-                        st.caption(f"{title[:20]}　♥{n_likes}　{who}")
-                        if st.button("開く", key=f"plist_work_{p.get('id')}", use_container_width=True):
-                            st.session_state.board_id = p.get("id")
-                            go("board"); st.rerun()
+                work_limit = int(st.session_state.get("board_work_limit", 18) or 18)
+                for start in range(0, min(len(work_posts), work_limit), 3):
+                    gcols = st.columns(3)
+                    for j, p in enumerate(work_posts[start:start + 3][:max(0, work_limit - start)]):
+                        title = str(p.get("title") or "無題").strip() or "無題"
+                        mine = bool(my_name) and p.get("user") == my_name
+                        author = str(p.get("user") or "名無し")
+                        n_likes = len(p.get("likes") or [])
+                        with gcols[j]:
+                            img = board_image_uri(p)
+                            if img:
+                                st.image(thumb_path(img, 300), use_container_width=True)
+                            who = "● あなた" if mine else author[:8]
+                            st.caption(f"{title[:10]}  \n♥{n_likes} {who}")
+                            if st.button("開く", key=f"plist_work_{p.get('id')}", use_container_width=True):
+                                st.session_state.board_id = p.get("id")
+                                go("board"); st.rerun()
+                if len(work_posts) > work_limit:
+                    st.button(f"さらに表示（残り{len(work_posts) - work_limit}件）", key="board_work_more", on_click=_board_work_more, use_container_width=True)
 
     # コミュニティを開いた時点までを既読にする。
     mark_community_seen()
