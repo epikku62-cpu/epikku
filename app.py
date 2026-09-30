@@ -622,24 +622,37 @@ def render_feed_composer():
                     st.rerun()
 
 
-def render_feed_card(p, icons, my_name, pinned=False):
-    """タイムラインの1件(カード)。アイコン・名前・時刻・本文・いいね・返信数。"""
+def board_avatar_text(icon):
+    """ボタンの文字として使える、絵文字だけの短いアイコン表現。画像アイコンの場合は代わりに🙂を使う
+    (Streamlitのボタンには、画像を埋め込めないため)。"""
+    icon = str(icon or "")
+    if icon and not icon.startswith(("/", "data:", "http")) and len(icon) <= 4:
+        return icon
+    return "🙂"
+
+
+def render_feed_card(p, icons, my_name, pinned=False, show_mine=True):
+    """タイムラインの1件(カード)。名前を押すと、その人のページに移動する。"""
     pid = str(p.get("id") or "")
     author = str(p.get("user") or "名無し")
     likes = p.get("likes") or []
     n_comments = len(p.get("comments") or [])
     when = relative_time(p.get("ts"), str(p.get("time") or ""))
     mark = " 👑" if p.get("is_owner") else ""
-    mine = ' <span style="color:#2fa876;font-size:0.8em;">● あなた</span>' if (my_name and author == my_name) else ""
+    mine = " ● あなた" if (show_mine and my_name and author == my_name) else ""
     with st.container(border=True):
         if pinned:
             st.markdown('<div style="font-size:0.8em;color:#d4a017;margin-bottom:4px;">📌 固定されたお知らせ</div>', unsafe_allow_html=True)
-        header = (f'<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">'
-                  f'{board_avatar_html(icons.get(author))}'
-                  f'<div style="flex:1;min-width:0;line-height:1.25;"><b>{html_lib.escape(author)}</b>{mark}{mine}<br>'
-                  f'<span style="font-size:0.8em;opacity:0.7;">{html_lib.escape(when)}</span></div>'
-                  f'{board_category_badge(p.get("category"))}</div>')
-        st.markdown(header, unsafe_allow_html=True)
+        h1, h2 = st.columns([5, 2])
+        with h1:
+            name_label = f"{board_avatar_text(icons.get(author))} {author}{mark}{mine}"
+            if st.button(name_label, key=f"prof_{pid}", use_container_width=True):
+                st.session_state.board_view_user = author
+                st.session_state.board_id = ""
+                go("board"); st.rerun()
+            st.caption(when)
+        with h2:
+            st.markdown(board_category_badge(p.get("category")), unsafe_allow_html=True)
         body = str(p.get("body") or "")
         if p.get("short"):
             text = _board_text_html(body)
@@ -647,7 +660,7 @@ def render_feed_card(p, icons, my_name, pinned=False):
             title = html_lib.escape(str(p.get("title") or "無題"))
             text = f'<b>{title}</b>' + (('<br>' + _board_text_html(body, 120)) if body.strip() else "")
         st.markdown(f'<div style="word-break:break-word;line-height:1.55;margin-bottom:4px;">{text}</div>', unsafe_allow_html=True)
-        c1, c2, c3 = st.columns(3)
+        c1, c2 = st.columns(2)
         with c1:
             if st.session_state.get("logged_in"):
                 liked = st.session_state.get("username") in likes
@@ -660,6 +673,66 @@ def render_feed_card(p, icons, my_name, pinned=False):
             if st.button(f"💬 {n_comments}", key=f"freply_{pid}", use_container_width=True):
                 st.session_state.board_id = pid
                 go("board"); st.rerun()
+
+
+def render_profile_page(target_user, posts_all):
+    """1人の投稿だけを集めた、Twitterのプロフィールのようなページ。"""
+    if st.button("← タイムラインに戻る", key="prof_back", use_container_width=True):
+        st.session_state.board_view_user = ""
+        st.rerun()
+
+    users = load_json(USERS_FILE, {})
+    record = users.get(target_user) if isinstance(users, dict) else None
+    my_posts = [p for p in posts_all if p.get("user") == target_user]
+    feed_posts = [p for p in my_posts if not p.get("image")]
+    work_posts = [p for p in my_posts if p.get("image")]
+    total_likes = sum(len(p.get("likes") or []) for p in my_posts)
+    is_admin_user = target_user in OWNER_ACCOUNTS_RAW or norm_mail((record or {}).get("email")) in OWNER_ACCOUNTS
+
+    icon = (record or {}).get("icon") or ""
+    joined = (record or {}).get("created_at") or ""
+    with st.container(border=True):
+        h1, h2 = st.columns([1, 4])
+        with h1:
+            path = _safe_local_path(icon) if icon and not icon.startswith("data:") else ""
+            if path:
+                st.image(thumb_path(path, 160), width=64)
+            else:
+                st.markdown(f'<div style="font-size:40px;text-align:center;">{html_lib.escape(icon) if icon else "🙂"}</div>', unsafe_allow_html=True)
+        with h2:
+            title = f"{target_user}" + (" 👑管理者" if is_admin_user else "")
+            st.markdown(f"### {html_lib.escape(title)}")
+            if not (st.session_state.logged_in and st.session_state.get("username") == target_user) and joined:
+                st.caption(f"{joined} から利用")
+        m1, m2, m3 = st.columns(3)
+        m1.metric("つぶやき", len(feed_posts))
+        m2.metric("作品", len(work_posts))
+        m3.metric("もらったいいね", total_likes)
+
+    if not record:
+        st.warning("このユーザーは見つかりませんでした(退会済みの可能性があります)")
+
+    if st.session_state.logged_in and st.session_state.get("username") == target_user:
+        render_feed_composer()
+
+    tab_feed, tab_work = st.tabs(["💬 つぶやき", "🖼️ 作品"])
+    with tab_feed:
+        if not feed_posts:
+            st.caption("まだ投稿がありません")
+        else:
+            limit = int(st.session_state.get("board_profile_feed_limit", 20) or 20)
+            names = {target_user}
+            icons = board_user_icons(names)
+            my_name = st.session_state.get("username") if st.session_state.get("logged_in") else None
+            own_page = bool(my_name and my_name == target_user)
+            for p in feed_posts[:limit]:
+                render_feed_card(p, icons, my_name, show_mine=not own_page)
+            if len(feed_posts) > limit:
+                st.button(f"さらに表示（残り{len(feed_posts) - limit}件）", key="board_profile_feed_more",
+                         on_click=lambda: st.session_state.__setitem__("board_profile_feed_limit", limit + 20),
+                         use_container_width=True)
+    with tab_work:
+        render_work_gallery(work_posts, "board_profile_work_limit", "board_profile_work_more", "まだ作品がありません")
 
 
 def render_timeline(posts_all):
@@ -2164,6 +2237,34 @@ def _save_history_safely(item):
     except Exception as e:
         print(f"[warn] add_history_item failed: {e}")
 
+def render_work_gallery(work_posts, limit_key, more_key, empty_msg="まだ作品はありません"):
+    """作品(サムネイル)を3列のギャラリーで表示する。プロフィールページと作品タブの両方で使う。"""
+    if not work_posts:
+        st.caption(empty_msg)
+        return
+    my_name = st.session_state.get("username") if st.session_state.logged_in else None
+    work_limit = int(st.session_state.get(limit_key, 18) or 18)
+    for start in range(0, min(len(work_posts), work_limit), 3):
+        gcols = st.columns(3)
+        for j, p in enumerate(work_posts[start:start + 3][:max(0, work_limit - start)]):
+            title = str(p.get("title") or "無題").strip() or "無題"
+            mine = bool(my_name) and p.get("user") == my_name
+            author = str(p.get("user") or "名無し")
+            n_likes = len(p.get("likes") or [])
+            with gcols[j]:
+                img = board_image_uri(p)
+                if img:
+                    st.image(thumb_path(img, 300), use_container_width=True)
+                who = "● あなた" if mine else author[:8]
+                st.caption(f"{title[:10]}  \n♥{n_likes} {who}")
+                if st.button("開く", key=f"plist_work_{p.get('id')}", use_container_width=True):
+                    st.session_state.board_id = p.get("id")
+                    go("board"); st.rerun()
+    if len(work_posts) > work_limit:
+        st.button(f"さらに表示（残り{len(work_posts) - work_limit}件）", key=more_key,
+                 on_click=lambda: st.session_state.__setitem__(limit_key, work_limit + 18), use_container_width=True)
+
+
 def _board_work_more():
     st.session_state.board_work_limit = int(st.session_state.get("board_work_limit", 18) or 18) + 18
 
@@ -2199,7 +2300,7 @@ def logout_reset():
         "characters": [], "library": [], "simple_history": [], "community_seen_at": 0,
         "simple_image": None, "set_image": None, "video_src": None, "video_out": None,
         "vjob": None, "hist_pick": None, "show_history": False, "pending": None,
-        "error": "", "board_id": "", "auth_token": "", "set_picks": [],
+        "error": "", "board_id": "", "board_view_user": "", "auth_token": "", "set_picks": [],
     }.items():
         st.session_state[k] = v
     st.session_state.icon = random.choice(ANIMALS)
@@ -3503,7 +3604,7 @@ defaults = {
     "hist_pick": None, "sq": "", "sb": "", "so": "", "sn": "", "schars": [""], "sbubbles": [""],
     "icon": random.choice(ANIMALS), "email": "", "pending": None, "library": [], "signup_just_completed": False,
     "video_src": None, "video_out": None, "set_selected": "", "set_picks": [], "setnew_n": 0, "set_image": None, "set_busy": False, "set_error": "", "set_size": "", "set_scale": 5.0, "set_steps": 20, "set_sampler": "Euler Ancestral", "set_seed": "", "set_last_seed": None,
-        "vjob": None, "board_id": "", "community_seen_at": 0, "wait_until": 0, "video_starting": False, "_booted": False,
+        "vjob": None, "board_id": "", "community_seen_at": 0, "board_view_user": "", "wait_until": 0, "video_starting": False, "_booted": False,
     "menu_open": False, "need_top": True, "act_busy": False, "password_hash": "", "characters": [],
 }
 for k, v in defaults.items():
@@ -4616,8 +4717,10 @@ elif st.session_state.page == "board":
                 safe_title = html_lib.escape(str(post.get("title") or "無題"))
                 st.markdown(f"## {safe_title}")
             author = post.get("user") or "名無し"
-            author_label = f"{author}　👑管理者" if post.get("is_owner") else author
-            st.caption(f"{author_label}　{post.get('time','')}")
+            if st.button(f"👤 {author}" + (" 👑管理者" if post.get("is_owner") else ""), key=f"prof_detail_{view_id}"):
+                st.session_state.board_view_user = author
+                st.rerun()
+            st.caption(post.get("time", ""))
 
             likes = post.get("likes") or []
             liked = bool(st.session_state.logged_in) and st.session_state.get("username") in likes
@@ -4706,9 +4809,16 @@ elif st.session_state.page == "board":
                     board_delete_post(view_id, st.session_state.get("username") or "", is_owner())
                     st.session_state.board_id = ""
                     go("board"); st.rerun()
+    elif st.session_state.get("board_view_user"):
+        st.markdown(gallery_css(), unsafe_allow_html=True)
+        render_profile_page(str(st.session_state.get("board_view_user")), posts_all)
     else:
         # コミュニティを「タイムライン」と「作品投稿」に分離。
         st.markdown(gallery_css(), unsafe_allow_html=True)
+        if st.session_state.logged_in:
+            if st.button(f"🙋 マイページ（{st.session_state.get('username')}）", key="board_mypage", use_container_width=True):
+                st.session_state.board_view_user = st.session_state.get("username") or ""
+                st.rerun()
         tab_thread, tab_work = st.tabs(["💬 タイムライン", "🖼️ 作品投稿"])
 
         with tab_thread:
@@ -4792,29 +4902,7 @@ elif st.session_state.page == "board":
                 work_posts = [p for p in work_posts if w in str(p.get("title") or "").lower() or w in str(p.get("user") or "").lower()]
             if w_sort == "人気順":
                 work_posts = sorted(work_posts, key=lambda p: len(p.get("likes") or []), reverse=True)
-            if not work_posts:
-                st.caption("まだ作品投稿はありません")
-            else:
-                my_name = st.session_state.get("username") if st.session_state.logged_in else None
-                work_limit = int(st.session_state.get("board_work_limit", 18) or 18)
-                for start in range(0, min(len(work_posts), work_limit), 3):
-                    gcols = st.columns(3)
-                    for j, p in enumerate(work_posts[start:start + 3][:max(0, work_limit - start)]):
-                        title = str(p.get("title") or "無題").strip() or "無題"
-                        mine = bool(my_name) and p.get("user") == my_name
-                        author = str(p.get("user") or "名無し")
-                        n_likes = len(p.get("likes") or [])
-                        with gcols[j]:
-                            img = board_image_uri(p)
-                            if img:
-                                st.image(thumb_path(img, 300), use_container_width=True)
-                            who = "● あなた" if mine else author[:8]
-                            st.caption(f"{title[:10]}  \n♥{n_likes} {who}")
-                            if st.button("開く", key=f"plist_work_{p.get('id')}", use_container_width=True):
-                                st.session_state.board_id = p.get("id")
-                                go("board"); st.rerun()
-                if len(work_posts) > work_limit:
-                    st.button(f"さらに表示（残り{len(work_posts) - work_limit}件）", key="board_work_more", on_click=_board_work_more, use_container_width=True)
+            render_work_gallery(work_posts, "board_work_limit", "board_work_more", "まだ作品投稿はありません")
 
     # コミュニティを開いた時点までを既読にする。
     mark_community_seen()
