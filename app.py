@@ -632,26 +632,27 @@ def board_avatar_text(icon):
 
 
 def render_feed_card(p, icons, my_name, pinned=False, show_mine=True):
-    """タイムラインの1件(カード)。名前を押すと、その人のページに移動する。"""
+    """タイムラインの1件(カード)。アイコンは実際の画像で表示し、名前(文字)を押すとプロフィールに移動する。"""
     pid = str(p.get("id") or "")
     author = str(p.get("user") or "名無し")
     likes = p.get("likes") or []
     n_comments = len(p.get("comments") or [])
     when = relative_time(p.get("ts"), str(p.get("time") or ""))
     mark = " 👑" if p.get("is_owner") else ""
-    mine = " ● あなた" if (show_mine and my_name and author == my_name) else ""
+    mine = " · あなた" if (show_mine and my_name and author == my_name) else ""
     with st.container(border=True):
         if pinned:
             st.markdown('<div style="font-size:0.8em;color:#d4a017;margin-bottom:4px;">📌 固定されたお知らせ</div>', unsafe_allow_html=True)
-        h1, h2 = st.columns([5, 2])
-        with h1:
-            name_label = f"{board_avatar_text(icons.get(author))} {author}{mark}{mine}"
-            if st.button(name_label, key=f"prof_{pid}", use_container_width=True):
+        a_col, n_col, c_col = st.columns([1, 4, 2])
+        with a_col:
+            st.markdown(board_avatar_html(icons.get(author), 34), unsafe_allow_html=True)
+        with n_col:
+            if st.button(f"{author}{mark}{mine}", key=f"namebtn_{pid}", use_container_width=True):
                 st.session_state.board_view_user = author
                 st.session_state.board_id = ""
                 go("board"); st.rerun()
             st.caption(when)
-        with h2:
+        with c_col:
             st.markdown(board_category_badge(p.get("category")), unsafe_allow_html=True)
         body = str(p.get("body") or "")
         if p.get("short"):
@@ -659,18 +660,18 @@ def render_feed_card(p, icons, my_name, pinned=False, show_mine=True):
         else:                                   # 以前の「スレッド」形式の投稿: タイトルを太字で、本文は先頭だけ
             title = html_lib.escape(str(p.get("title") or "無題"))
             text = f'<b>{title}</b>' + (('<br>' + _board_text_html(body, 120)) if body.strip() else "")
-        st.markdown(f'<div style="word-break:break-word;line-height:1.55;margin-bottom:4px;">{text}</div>', unsafe_allow_html=True)
-        c1, c2 = st.columns(2)
+        st.markdown(f'<div style="word-break:break-word;line-height:1.55;margin:2px 0 6px;">{text}</div>', unsafe_allow_html=True)
+        c1, c2, c3 = st.columns([1, 1, 4])
         with c1:
             if st.session_state.get("logged_in"):
                 liked = st.session_state.get("username") in likes
-                if st.button(("♥ " if liked else "♡ ") + str(len(likes)), key=f"flike_{pid}", use_container_width=True):
+                if st.button(("♥ " if liked else "♡ ") + str(len(likes)), key=f"flike_{pid}"):
                     board_toggle_like(pid, st.session_state.get("username") or "")
                     st.rerun()
             else:
                 st.caption(f"♡ {len(likes)}")
         with c2:
-            if st.button(f"💬 {n_comments}", key=f"freply_{pid}", use_container_width=True):
+            if st.button(f"💬 {n_comments}", key=f"freply_{pid}"):
                 st.session_state.board_id = pid
                 go("board"); st.rerun()
 
@@ -3669,11 +3670,72 @@ div[data-testid="stButton"] > button[kind="primary"] {
   border: 2px solid #111111 !important;
   box-shadow: none !important;
 }
-section.main div[data-testid="stHorizontalBlock"]:first-of-type div[data-testid="column"]:first-child div[data-testid="stButton"] > button {
+div.st-key-home_signup_cta button {
   background: linear-gradient(180deg,#ffc1dc,#ff6ea8) !important;
   color: #ffffff !important;
   border: 3px solid #ffffff !important;
   box-shadow: 0 5px 0 #ff4d88 !important;
+}
+
+/* --- コミュニティのカード・入力欄などを、サイト全体の可愛い雰囲気に合わせる --- */
+div[data-testid="stVerticalBlockBorderWrapper"]:has(> div > [data-testid="stVerticalBlock"]) {
+  border-radius: 18px !important;
+}
+.stTextArea textarea, .stTextInput input,
+div[data-baseweb="select"] > div, div[data-baseweb="base-input"] {
+  border-radius: 14px !important;
+  border-color: #ffd0e2 !important;
+}
+.stTextArea textarea:focus, .stTextInput input:focus {
+  border-color: #ff6ea8 !important;
+  box-shadow: 0 0 0 1px #ff6ea8 !important;
+}
+button[data-baseweb="tab"] { border-radius: 12px 12px 0 0 !important; }
+button[data-baseweb="tab"][aria-selected="true"] {
+  color: #ff4d88 !important;
+}
+div[data-baseweb="tab-highlight"] { background-color: #ff6ea8 !important; }
+div[data-testid="stExpander"] {
+  border-radius: 16px !important;
+  border-color: #ffd0e2 !important;
+}
+label[data-baseweb="radio"] { border-radius: 999px !important; }
+
+/* つぶやきカードの、名前(プロフィールへのリンク)。ボタンの見た目を消して、ただの太字の文字のように見せる */
+[class*="st-key-namebtn_"] button {
+  background: transparent !important;
+  border: none !important;
+  box-shadow: none !important;
+  color: #111111 !important;
+  font-weight: 700 !important;
+  font-size: 0.95rem !important;
+  text-align: left !important;
+  justify-content: flex-start !important;
+  padding: 2px 0 !important;
+  min-height: auto !important;
+  height: auto !important;
+  width: auto !important;
+}
+[class*="st-key-namebtn_"] button:hover { color: #ff6ea8 !important; text-decoration: underline; }
+[class*="st-key-namebtn_"] button p { font-weight: 700 !important; }
+
+/* いいね・返信ボタンを、Twitterのアイコンのように小さく・控えめにする */
+[class*="st-key-flike_"] button, [class*="st-key-freply_"] button {
+  background: transparent !important;
+  border: none !important;
+  box-shadow: none !important;
+  color: #9a7685 !important;
+  font-weight: 600 !important;
+  font-size: 0.82rem !important;
+  padding: 2px 10px !important;
+  min-height: 1.7rem !important;
+  height: auto !important;
+  width: auto !important;
+  border-radius: 999px !important;
+}
+[class*="st-key-flike_"] button:hover, [class*="st-key-freply_"] button:hover {
+  background: #fff0f6 !important;
+  color: #ff4d88 !important;
 }
 </style>
 """, unsafe_allow_html=True)
@@ -4717,9 +4779,13 @@ elif st.session_state.page == "board":
                 safe_title = html_lib.escape(str(post.get("title") or "無題"))
                 st.markdown(f"## {safe_title}")
             author = post.get("user") or "名無し"
-            if st.button(f"👤 {author}" + (" 👑管理者" if post.get("is_owner") else ""), key=f"prof_detail_{view_id}"):
-                st.session_state.board_view_user = author
-                st.rerun()
+            icon_col, name_col = st.columns([1, 6])
+            with icon_col:
+                st.markdown(board_avatar_html((load_json(USERS_FILE, {}).get(author) or {}).get("icon") if author else "", 34), unsafe_allow_html=True)
+            with name_col:
+                if st.button(f"{author}" + (" 👑管理者" if post.get("is_owner") else ""), key=f"namebtn_detail_{view_id}", use_container_width=True):
+                    st.session_state.board_view_user = author
+                    st.rerun()
             st.caption(post.get("time", ""))
 
             likes = post.get("likes") or []
