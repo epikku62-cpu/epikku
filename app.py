@@ -1520,18 +1520,23 @@ def _safe_local_path(path):
     return ""
 
 def store_image_uri(uri, folder, name_hint="img"):
+    """履歴・保存庫に、作ったときの画質のまま保存する。
+    (以前は1536px・quality85に縮小・圧縮していたため、保存庫の画像が劣化し、
+    再利用や再投稿でもその劣化した画像しか使えなくなっていた。
+    生成できる最大サイズ(壁紙1920×1088)より十分大きい2048px・高画質なら、
+    実質縮小されず、見た目の劣化もほぼ無くなる。)"""
     if not uri:
         return ""
     local = _safe_local_path(uri)
     if local:
         return local
-    img = uri_to_image(uri, max_side=1536)
+    img = uri_to_image(uri, max_side=2048)
     if img is None:
         return ""
-    img.thumbnail((1536, 1536))
+    img.thumbnail((2048, 2048))
     os.makedirs(folder, exist_ok=True)
     path = os.path.join(folder, f"{name_hint}_{uuid.uuid4().hex}.jpg")
-    img.save(path, format="JPEG", quality=85)
+    img.save(path, format="JPEG", quality=95)
     return path
 
 def media_src(uri_or_path):
@@ -2106,10 +2111,11 @@ def board_image_path(pid):
     return os.path.join(BOARD_DIR, f"{pid}.jpg")
 
 def save_board_image(uri, pid):
+    # コミュニティ投稿も、保存庫と同じく作ったときの画質に近い状態で保存する。
     img = uri_to_image(uri).convert("RGB")
-    img.thumbnail((1280, 1280))
+    img.thumbnail((2048, 2048))
     path = board_image_path(pid)
-    img.save(path, format="JPEG", quality=82)
+    img.save(path, format="JPEG", quality=92)
     return path
 
 def board_image_uri(post):
@@ -3849,7 +3855,16 @@ elif st.session_state.page == "lib":
         st.write("まだありません。")
     lib_limit = int(st.session_state.get("lib_limit", 12) or 12)
     for i, item in enumerate(list(reversed(st.session_state.library))[:lib_limit]):
-        st.image(thumb_path(item["url"]), width=160)
+        if st.session_state.get(f"lib_full_{i}"):
+            st.image(item["url"], use_container_width=True)
+            if st.button("🔽 小さい表示に戻す", key=f"lib_unfull_{i}"):
+                st.session_state[f"lib_full_{i}"] = False
+                st.rerun()
+        else:
+            st.image(thumb_path(item["url"]), width=160)
+            if st.button("🔍 元の画質で見る", key=f"lib_full_btn_{i}"):
+                st.session_state[f"lib_full_{i}"] = True
+                st.rerun()
         st.caption(f"{item.get('label','')} {item.get('time','')}")
         has_settings = item.get("kind") in ("simple", "set")
         cols = st.columns(3 if has_settings else 2)
@@ -4647,6 +4662,8 @@ elif st.session_state.page == "simple":
         pick = st.session_state.get("hist_pick")
         if pick:
             st.markdown("### 履歴の内容")
+            if pick.get("url"):
+                st.image(pick.get("url"), use_container_width=True)
             st.caption(pick.get("time") or "日時不明")
             st.write("画質: " + (pick.get("quality") or "なし"))
             st.write("背景: " + (pick.get("background") or "なし"))
@@ -4681,12 +4698,17 @@ elif st.session_state.page == "simple":
             if not st.session_state.simple_history:
                 st.write("履歴はまだありません")
             else:
-                st.caption("生成した日時を押すと、そのときの設定を確認できます")
+                st.caption("画像を見て、時刻を押すとそのときの設定を確認できます")
                 for hi, item in enumerate(reversed(st.session_state.simple_history)):
                     hist_time = item.get("time") or "日時不明"
-                    if st.button(hist_time, key=f"hpick_{hi}", use_container_width=True):
-                        st.session_state.hist_pick = item
-                        st.rerun()
+                    himg_col, hbtn_col = st.columns([1, 3])
+                    with himg_col:
+                        if item.get("url"):
+                            st.image(thumb_path(item["url"], 160), use_container_width=True)
+                    with hbtn_col:
+                        if st.button(hist_time, key=f"hpick_{hi}", use_container_width=True):
+                            st.session_state.hist_pick = item
+                            st.rerun()
         st.stop()
     st.text_area("画質プロンプト", key="sq")
     st.text_area("背景プロンプト", key="sb")
