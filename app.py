@@ -572,7 +572,8 @@ def _board_feed_more():
 
 
 def render_feed_composer():
-    """タイムラインの投稿フォーム(最初は閉じている)。お知らせは管理者だけが選べる。"""
+    """タイムラインの投稿フォーム(最初は閉じている)。お知らせは管理者だけが選べる。
+    文章だけでも、保存庫の画像を添えても投稿できる(Twitterのツイートのように)。"""
     if not st.session_state.get("logged_in"):
         st.caption("投稿・いいね・返信にはログインが必要です")
         return
@@ -582,11 +583,36 @@ def render_feed_composer():
         cat = st.radio("カテゴリ", cats, horizontal=True, key="feed_cat")
         body = st.text_area("内容", key=f"feed_body_{n}", max_chars=BOARD_FEED_MAX_CHARS, height=110,
                             placeholder="気軽に書いてみましょう")
+
+        chosen = None
+        show_p = "非表示"
+        attach = st.checkbox("📷 保存庫から画像を添える", key=f"feed_attach_{n}")
+        if attach:
+            choices = []
+            for item in reversed(st.session_state.get("library") or []):
+                if item.get("url"):
+                    kind = site_work_kind(item) or item.get("kind") or "library"
+                    choices.append({
+                        "label": f"{item.get('time','')}　{item.get('label','') or '保存画像'}",
+                        "url": item["url"],
+                        "kind": kind,
+                        "meta": item,
+                    })
+            if not choices:
+                st.caption("保存庫に作品がありません。先に作品を保存庫へ入れてください。")
+            else:
+                names = [c["label"] for c in choices]
+                pick = st.selectbox("保存庫から画像を選択", names, key=f"feed_pick_{n}")
+                chosen = choices[names.index(pick)]
+                st.image(thumb_path(chosen["url"], 320), width=160)
+                if chosen["kind"] == "simple":
+                    show_p = st.radio("プロンプト", ["表示する", "非表示"], horizontal=True, key=f"feed_show_prompt_{n}")
+
         if st.button("投稿する", type="primary", key=f"feed_post_{n}", use_container_width=True):
             text = (body or "").strip()
             wait = BOARD_FEED_COOLDOWN_SEC - (time.time() - float(st.session_state.get("_feed_last_post") or 0))
-            if not text:
-                st.error("内容を入力してください")
+            if not text and not chosen:
+                st.error("内容を入力するか、画像を選んでください")
             elif cat == "お知らせ" and not is_owner():
                 st.error("お知らせは、管理者だけが投稿できます")
             elif wait > 0 and not is_owner():
@@ -595,17 +621,36 @@ def render_feed_composer():
                 now = time.time()
                 posted = False
                 try:
+                    pid = uuid.uuid4().hex[:10]
+                    img_path = ""
+                    meta = {}
+                    kind = "thread"
+                    if chosen:
+                        img_path = save_board_image(chosen["url"], pid)
+                        meta = chosen.get("meta") or {}
+                        kind = chosen["kind"]
                     board_add_post({
-                        "id": uuid.uuid4().hex[:10],
+                        "id": pid,
                         "user": st.session_state.get("username") or "名無し",
                         "is_owner": bool(is_owner()),
-                        "title": board_short_title(text),
+                        "title": board_short_title(text) if text else "無題",
                         "short": True,
                         "category": cat,
                         "body": text[:BOARD_FEED_MAX_CHARS],
-                        "image": "",
-                        "kind": "thread",
-                        "show_prompt": False,
+                        "image": img_path,
+                        "kind": kind,
+                        "show_prompt": bool(chosen) and kind == "simple" and show_p == "表示する",
+                        "quality": meta.get("quality", "") if kind == "simple" else "",
+                        "background": meta.get("background", "") if kind == "simple" else "",
+                        "bubbles": list(meta.get("bubbles") or []) if kind == "simple" else [],
+                        "other": meta.get("other", "") if kind == "simple" else "",
+                        "negative": meta.get("negative", "") if kind == "simple" else "",
+                        "size": meta.get("size", "") if kind == "simple" else "",
+                        "steps": meta.get("steps", 20) if kind == "simple" else 20,
+                        "sampler": meta.get("sampler", "Euler Ancestral") if kind == "simple" else "Euler Ancestral",
+                        "seed": meta.get("seed") if kind == "simple" else None,
+                        "scale": meta.get("scale", 5.0) if kind == "simple" else 5.0,
+                        "chars": list(meta.get("chars") or [])[:3] if kind == "simple" else [],
                         "comments": [],
                         "likes": [],
                         "time": datetime.now().strftime("%Y/%m/%d %H:%M"),
@@ -661,6 +706,9 @@ def render_feed_card(p, icons, my_name, pinned=False, show_mine=True):
             title = html_lib.escape(str(p.get("title") or "無題"))
             text = f'<b>{title}</b>' + (('<br>' + _board_text_html(body, 120)) if body.strip() else "")
         st.markdown(f'<div style="word-break:break-word;line-height:1.55;margin:2px 0 6px;">{text}</div>', unsafe_allow_html=True)
+        img = board_image_uri(p)
+        if img:
+            st.image(img, use_container_width=True)
         c1, c2, c3 = st.columns([1, 1, 4])
         with c1:
             if st.session_state.get("logged_in"):
@@ -685,7 +733,7 @@ def render_profile_page(target_user, posts_all):
     users = load_json(USERS_FILE, {})
     record = users.get(target_user) if isinstance(users, dict) else None
     my_posts = [p for p in posts_all if p.get("user") == target_user]
-    feed_posts = [p for p in my_posts if not p.get("image")]
+    feed_posts = my_posts
     work_posts = [p for p in my_posts if p.get("image")]
     total_likes = sum(len(p.get("likes") or []) for p in my_posts)
     is_admin_user = target_user in OWNER_ACCOUNTS_RAW or norm_mail((record or {}).get("email")) in OWNER_ACCOUNTS
@@ -706,7 +754,7 @@ def render_profile_page(target_user, posts_all):
             if not (st.session_state.logged_in and st.session_state.get("username") == target_user) and joined:
                 st.caption(f"{joined} から利用")
         m1, m2, m3 = st.columns(3)
-        m1.metric("つぶやき", len(feed_posts))
+        m1.metric("投稿", len(feed_posts))
         m2.metric("作品", len(work_posts))
         m3.metric("もらったいいね", total_likes)
 
@@ -716,7 +764,7 @@ def render_profile_page(target_user, posts_all):
     if st.session_state.logged_in and st.session_state.get("username") == target_user:
         render_feed_composer()
 
-    tab_feed, tab_work = st.tabs(["💬 つぶやき", "🖼️ 作品"])
+    tab_feed, tab_work = st.tabs(["💬 投稿", "🖼️ 作品"])
     with tab_feed:
         if not feed_posts:
             st.caption("まだ投稿がありません")
@@ -745,7 +793,7 @@ def render_timeline(posts_all):
     cat_filter = st.radio("表示", ["すべて"] + THREAD_CATEGORIES, horizontal=True, key="board_feed_cat", label_visibility="collapsed")
     with st.expander("🔍 検索", expanded=False):
         q = st.text_input("検索", key="board_feed_q", placeholder="内容・名前", label_visibility="collapsed")
-    feed = [p for p in posts_all if not (p.get("image") or p.get("category") == "作品")]
+    feed = list(posts_all)
     if cat_filter != "すべて":
         feed = [p for p in feed if board_category_group(p.get("category")) == cat_filter]
     searching = bool(q and q.strip())
@@ -4037,6 +4085,9 @@ elif st.session_state.page == "shop":
     elif stripe is None or not STRIPE_SECRET_KEY:
         st.error("決済設定がまだです。")
     else:
+        if st.button("🔄 購入が反映されない場合は、こちらを押してください", key="shop_force_check"):
+            credit_pending_checkouts(force=True)
+            st.rerun()
         for pack in POINT_PACKS:
             c1, c2 = st.columns([3, 2])
             with c1:
@@ -4051,7 +4102,13 @@ elif st.session_state.page == "shop":
                             None,
                             {"kind": "points", "points": pack["points"], "user": st.session_state.get("username") or ""},
                         )
-                        st.markdown(f"[決済ページへ進む]({session.url})")
+                        st.markdown(
+                            f'<a href="{session.url}" target="_blank" rel="noopener" '
+                            f'style="display:inline-block;padding:0.5em 1.2em;background:#ff4081;color:#fff;'
+                            f'border-radius:8px;text-decoration:none;font-weight:bold;">決済ページへ進む（別タブで開きます）</a>',
+                            unsafe_allow_html=True,
+                        )
+                        st.caption("支払いが終わったら、Stripeのタブを閉じて、この画面に戻ってきてください。")
                     except Exception as e:
                         st.error(str(e))
 
@@ -4170,6 +4227,10 @@ elif st.session_state.page == "plan":
         # 画面を開いたときだけStripeの状態を確認する。
         credit_pending_checkouts()
         sync_subscription(force=True)
+        if st.button("🔄 登録が反映されない場合は、こちらを押してください", key="plan_force_check"):
+            credit_pending_checkouts(force=True)
+            sync_subscription(force=True)
+            st.rerun()
         if is_premium():
             st.success("現在VIPです。")
             until = st.session_state.get("premium_until") or ""
@@ -4204,7 +4265,13 @@ elif st.session_state.page == "plan":
                         None,
                         {"kind": "plan", "user": st.session_state.get("username") or "", "email": st.session_state.get("email") or ""},
                     )
-                    st.markdown(f"[決済ページへ進む]({session.url})")
+                    st.markdown(
+                        f'<a href="{session.url}" target="_blank" rel="noopener" '
+                        f'style="display:inline-block;padding:0.5em 1.2em;background:#ff4081;color:#fff;'
+                        f'border-radius:8px;text-decoration:none;font-weight:bold;">決済ページへ進む（別タブで開きます）</a>',
+                        unsafe_allow_html=True,
+                    )
+                    st.caption("支払いが終わったら、Stripeのタブを閉じて、この画面に戻ってきてください。")
                 except Exception as e:
                     st.error(str(e))
 
@@ -4879,96 +4946,28 @@ elif st.session_state.page == "board":
         st.markdown(gallery_css(), unsafe_allow_html=True)
         render_profile_page(str(st.session_state.get("board_view_user")), posts_all)
     else:
-        # コミュニティを「タイムライン」と「作品投稿」に分離。
+        # タイムラインに、つぶやきも作品つき投稿も、1つの流れでまとめて表示する(Twitterのように)。
         st.markdown(gallery_css(), unsafe_allow_html=True)
         if st.session_state.logged_in:
             if st.button(f"🙋 マイページ（{st.session_state.get('username')}）", key="board_mypage", use_container_width=True):
                 st.session_state.board_view_user = st.session_state.get("username") or ""
                 st.rerun()
-        tab_thread, tab_work = st.tabs(["💬 タイムライン", "🖼️ 作品投稿"])
 
-        with tab_thread:
-            render_timeline(posts_all)
+        render_timeline(posts_all)
 
-        with tab_work:
-            if st.session_state.logged_in:
-                with st.expander("🖼️ 作品を投稿する", expanded=False):
-                    title = st.text_input("タイトル", max_chars=40, key="board_work_title")
-                    # 作品投稿は「保存庫」に入っている作品だけを選択できます。
-                    # 履歴や現在表示中の画像は投稿候補に含めません。
-                    choices = []
-                    for item in reversed(st.session_state.get("library") or []):
-                        if item.get("url"):
-                            kind = site_work_kind(item) or item.get("kind") or "library"
-                            choices.append({
-                                "label": f"{item.get('time','')}　{item.get('label','') or '保存画像'}",
-                                "url": item["url"],
-                                "kind": kind,
-                                "meta": item,
-                            })
-                    if not choices:
-                        st.write("保存庫に作品がありません。先に作品を保存庫へ入れてください。")
-                    else:
-                        names = [c["label"] for c in choices]
-                        pick = st.selectbox("保存庫から作品を選択", names, key="board_work_pick")
-                        chosen = choices[names.index(pick)]
-                        st.image(thumb_path(chosen["url"], 440), width=220)
-                        show_p = "非表示"
-                        if chosen["kind"] == "simple":
-                            show_p = st.radio("プロンプト", ["表示する", "非表示"], horizontal=True, key="board_show_prompt")
-                        else:
-                            st.caption("この作品には画像生成モードのプロンプト情報がありません")
-                        if st.button("作品を投稿する", type="primary", use_container_width=True):
-                            pid = uuid.uuid4().hex[:10]
-                            meta = chosen.get("meta") or {}
-                            try:
-                                path = save_board_image(chosen["url"], pid)
-                                board_add_post({
-                                    "id": pid,
-                                    "user": st.session_state.get("username") or "名無し",
-                                    "is_owner": bool(is_owner()),
-                                    "title": (title or "無題").strip()[:40],
-                                    "category": "作品",
-                                    "body": "",
-                                    "image": path,
-                                    "kind": chosen["kind"],
-                                    "show_prompt": chosen["kind"] == "simple" and show_p == "表示する",
-                                    "quality": meta.get("quality", "") if chosen["kind"] == "simple" else "",
-                                    "background": meta.get("background", "") if chosen["kind"] == "simple" else "",
-                                    "bubbles": list(meta.get("bubbles") or []) if chosen["kind"] == "simple" else [],
-                                    "other": meta.get("other", "") if chosen["kind"] == "simple" else "",
-                                    "negative": meta.get("negative", "") if chosen["kind"] == "simple" else "",
-                                    "size": meta.get("size", "") if chosen["kind"] == "simple" else "",
-                                    "steps": meta.get("steps", 20) if chosen["kind"] == "simple" else 20,
-                                    "sampler": meta.get("sampler", "Euler Ancestral") if chosen["kind"] == "simple" else "Euler Ancestral",
-                                    "seed": meta.get("seed") if chosen["kind"] == "simple" else None,
-                                    "scale": meta.get("scale", 5.0) if chosen["kind"] == "simple" else 5.0,
-                                    "chars": list(meta.get("chars") or [])[:3] if chosen["kind"] == "simple" else [],
-                                    "comments": [],
-                                    "time": datetime.now().strftime("%Y/%m/%d %H:%M"),
-                                    "ts": time.time(),
-                                    "updated_at": time.time(),
-                                })
-                                st.session_state.error = ""
-                                st.session_state.board_id = pid
-                            except Exception as e:
-                                st.session_state.error = str(e)
-                            go("board"); st.rerun()
-            else:
-                st.caption("作品投稿にはログインが必要です")
-
+        with st.expander("🖼️ みんなの作品だけを見る", expanded=False):
             f1, f2 = st.columns([1, 2])
             with f1:
                 w_sort = st.selectbox("並び順", ["新着順", "人気順"], key="board_work_sort")
             with f2:
                 q = st.text_input("作品を検索", key="board_work_q", placeholder="タイトル・名前")
-            work_posts = [p for p in posts_all if p.get("image") or p.get("category") == "作品"]
+            work_posts = [p for p in posts_all if p.get("image")]
             if q and q.strip():
                 w = q.strip().lower()
                 work_posts = [p for p in work_posts if w in str(p.get("title") or "").lower() or w in str(p.get("user") or "").lower()]
             if w_sort == "人気順":
                 work_posts = sorted(work_posts, key=lambda p: len(p.get("likes") or []), reverse=True)
-            render_work_gallery(work_posts, "board_work_limit", "board_work_more", "まだ作品投稿はありません")
+            render_work_gallery(work_posts, "board_work_limit", "board_work_more", "まだ作品つき投稿はありません")
 
     # コミュニティを開いた時点までを既読にする。
     mark_community_seen()
