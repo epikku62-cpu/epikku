@@ -585,7 +585,6 @@ def render_feed_composer():
                             placeholder="気軽に書いてみましょう")
 
         chosen = None
-        show_p = "非表示"
         attach = st.checkbox("📷 保存庫から画像を添える", key=f"feed_attach_{n}")
         if attach:
             choices = []
@@ -605,8 +604,7 @@ def render_feed_composer():
                 pick = st.selectbox("保存庫から画像を選択", names, key=f"feed_pick_{n}")
                 chosen = choices[names.index(pick)]
                 st.image(thumb_path(chosen["url"], 320), width=160)
-                if chosen["kind"] == "simple":
-                    show_p = st.radio("プロンプト", ["表示する", "非表示"], horizontal=True, key=f"feed_show_prompt_{n}")
+                st.caption("※ ここで添える画像にはプロンプト・設定は付きません。設定込みで作品を投稿したい場合は、下の「🖼️ 作品を投稿する」を使ってください。")
 
         if st.button("投稿する", type="primary", key=f"feed_post_{n}", use_container_width=True):
             text = (body or "").strip()
@@ -639,18 +637,12 @@ def render_feed_composer():
                         "body": text[:BOARD_FEED_MAX_CHARS],
                         "image": img_path,
                         "kind": kind,
-                        "show_prompt": bool(chosen) and kind == "simple" and show_p == "表示する",
-                        "quality": meta.get("quality", "") if kind == "simple" else "",
-                        "background": meta.get("background", "") if kind == "simple" else "",
-                        "bubbles": list(meta.get("bubbles") or []) if kind == "simple" else [],
-                        "other": meta.get("other", "") if kind == "simple" else "",
-                        "negative": meta.get("negative", "") if kind == "simple" else "",
-                        "size": meta.get("size", "") if kind == "simple" else "",
-                        "steps": meta.get("steps", 20) if kind == "simple" else 20,
-                        "sampler": meta.get("sampler", "Euler Ancestral") if kind == "simple" else "Euler Ancestral",
-                        "seed": meta.get("seed") if kind == "simple" else None,
-                        "scale": meta.get("scale", 5.0) if kind == "simple" else 5.0,
-                        "chars": list(meta.get("chars") or [])[:3] if kind == "simple" else [],
+                        # つぶやき投稿は、画像を添えても常にプロンプト・設定を非公開にする。
+                        # (設定・シード値まで載せたい場合は、別の「作品投稿」を使ってもらう)
+                        "show_prompt": False,
+                        "quality": "", "background": "", "bubbles": [], "other": "",
+                        "negative": "", "size": "", "steps": 20, "sampler": "Euler Ancestral",
+                        "seed": None, "scale": 5.0, "chars": [],
                         "comments": [],
                         "likes": [],
                         "time": datetime.now().strftime("%Y/%m/%d %H:%M"),
@@ -665,6 +657,76 @@ def render_feed_composer():
                     st.error(str(e))
                 if posted:
                     st.rerun()
+
+
+def render_work_composer():
+    """「作品投稿」専用のフォーム(つぶやきとは別)。ここで投稿したときだけ、
+    プロンプト・画質・シード値などの設定をその作品に載せて、あとから見られるようにできる。"""
+    if not st.session_state.get("logged_in"):
+        return
+    with st.expander("🖼️ 作品を投稿する", expanded=False):
+        st.caption("保存庫にある作品だけを投稿できます。ここで投稿したものだけ、プロンプトや設定・シード値を載せられます。")
+        title = st.text_input("タイトル", max_chars=40, key="board_work_title")
+        choices = []
+        for item in reversed(st.session_state.get("library") or []):
+            if item.get("url"):
+                kind = site_work_kind(item) or item.get("kind") or "library"
+                choices.append({
+                    "label": f"{item.get('time','')}　{item.get('label','') or '保存画像'}",
+                    "url": item["url"],
+                    "kind": kind,
+                    "meta": item,
+                })
+        if not choices:
+            st.write("保存庫に作品がありません。先に作品を保存庫へ入れてください。")
+            return
+        names = [c["label"] for c in choices]
+        pick = st.selectbox("保存庫から作品を選択", names, key="board_work_pick")
+        chosen = choices[names.index(pick)]
+        st.image(thumb_path(chosen["url"], 440), width=220)
+        show_p = "非表示"
+        if chosen["kind"] == "simple":
+            show_p = st.radio("プロンプト・設定・シード値", ["表示する", "非表示"], horizontal=True, key="board_show_prompt")
+        else:
+            st.caption("この作品には画像生成モードのプロンプト情報がありません")
+        if st.button("作品を投稿する", type="primary", use_container_width=True, key="board_work_submit"):
+            pid = uuid.uuid4().hex[:10]
+            meta = chosen.get("meta") or {}
+            try:
+                path = save_board_image(chosen["url"], pid)
+                board_add_post({
+                    "id": pid,
+                    "user": st.session_state.get("username") or "名無し",
+                    "is_owner": bool(is_owner()),
+                    "title": (title or "無題").strip()[:40],
+                    "category": "作品",
+                    "body": "",
+                    "image": path,
+                    "kind": chosen["kind"],
+                    "show_prompt": chosen["kind"] == "simple" and show_p == "表示する",
+                    "quality": meta.get("quality", "") if chosen["kind"] == "simple" else "",
+                    "background": meta.get("background", "") if chosen["kind"] == "simple" else "",
+                    "bubbles": list(meta.get("bubbles") or []) if chosen["kind"] == "simple" else [],
+                    "other": meta.get("other", "") if chosen["kind"] == "simple" else "",
+                    "negative": meta.get("negative", "") if chosen["kind"] == "simple" else "",
+                    "size": meta.get("size", "") if chosen["kind"] == "simple" else "",
+                    "steps": meta.get("steps", 20) if chosen["kind"] == "simple" else 20,
+                    "sampler": meta.get("sampler", "Euler Ancestral") if chosen["kind"] == "simple" else "Euler Ancestral",
+                    "seed": meta.get("seed") if chosen["kind"] == "simple" else None,
+                    "scale": meta.get("scale", 5.0) if chosen["kind"] == "simple" else 5.0,
+                    "chars": list(meta.get("chars") or [])[:3] if chosen["kind"] == "simple" else [],
+                    "comments": [],
+                    "likes": [],
+                    "short": False,
+                    "time": datetime.now().strftime("%Y/%m/%d %H:%M"),
+                    "ts": time.time(),
+                    "updated_at": time.time(),
+                })
+                st.session_state.error = ""
+                st.session_state.board_id = pid
+            except Exception as e:
+                st.session_state.error = str(e)
+            go("board"); st.rerun()
 
 
 def board_avatar_text(icon):
@@ -734,7 +796,7 @@ def render_profile_page(target_user, posts_all):
     record = users.get(target_user) if isinstance(users, dict) else None
     my_posts = [p for p in posts_all if p.get("user") == target_user]
     feed_posts = my_posts
-    work_posts = [p for p in my_posts if p.get("image")]
+    work_posts = [p for p in my_posts if p.get("image") and p.get("category") == "作品"]
     total_likes = sum(len(p.get("likes") or []) for p in my_posts)
     is_admin_user = target_user in OWNER_ACCOUNTS_RAW or norm_mail((record or {}).get("email")) in OWNER_ACCOUNTS
 
@@ -790,6 +852,7 @@ def render_timeline(posts_all):
     if notice:
         st.success(notice)
     render_feed_composer()
+    render_work_composer()
     cat_filter = st.radio("表示", ["すべて"] + THREAD_CATEGORIES, horizontal=True, key="board_feed_cat", label_visibility="collapsed")
     with st.expander("🔍 検索", expanded=False):
         q = st.text_input("検索", key="board_feed_q", placeholder="内容・名前", label_visibility="collapsed")
@@ -4983,7 +5046,7 @@ elif st.session_state.page == "board":
                 w_sort = st.selectbox("並び順", ["新着順", "人気順"], key="board_work_sort")
             with f2:
                 q = st.text_input("作品を検索", key="board_work_q", placeholder="タイトル・名前")
-            work_posts = [p for p in posts_all if p.get("image")]
+            work_posts = [p for p in posts_all if p.get("image") and p.get("category") == "作品"]
             if q and q.strip():
                 w = q.strip().lower()
                 work_posts = [p for p in work_posts if w in str(p.get("title") or "").lower() or w in str(p.get("user") or "").lower()]
