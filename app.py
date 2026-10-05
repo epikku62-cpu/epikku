@@ -5038,8 +5038,6 @@ elif st.session_state.page == "board":
                 st.session_state.board_view_user = st.session_state.get("username") or ""
                 st.rerun()
 
-        render_timeline(posts_all)
-
         with st.expander("🖼️ みんなの作品だけを見る", expanded=False):
             f1, f2 = st.columns([1, 2])
             with f1:
@@ -5053,6 +5051,8 @@ elif st.session_state.page == "board":
             if w_sort == "人気順":
                 work_posts = sorted(work_posts, key=lambda p: len(p.get("likes") or []), reverse=True)
             render_work_gallery(work_posts, "board_work_limit", "board_work_more", "まだ作品つき投稿はありません")
+
+        render_timeline(posts_all)
 
     # コミュニティを開いた時点までを既読にする。
     mark_community_seen()
