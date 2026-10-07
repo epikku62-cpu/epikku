@@ -4051,6 +4051,7 @@ elif st.session_state.page == "video":
         st.video(st.session_state.video_out)
         with open(st.session_state.video_out, "rb") as f:
             st.download_button("動画を保存", data=f.read(), file_name="video.mp4", mime="video/mp4")
+    release_memory()
 
 elif st.session_state.page == "vmove":
     st.subheader("動画を移す")
@@ -4130,6 +4131,7 @@ elif st.session_state.page == "vmove":
         st.video(st.session_state.vmove_out)
         with open(st.session_state.vmove_out, "rb") as f:
             st.download_button("動画を保存", data=f.read(), file_name="move.mp4", mime="video/mp4")
+    release_memory()
 
 elif st.session_state.page == "icon":
     st.subheader("アイコン変更")
