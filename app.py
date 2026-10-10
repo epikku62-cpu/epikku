@@ -453,6 +453,7 @@ CHAT_FILE = os.path.join(DATA_DIR, "chat_messages.json")
 CHAT_MAX_MESSAGES = 200   # 保持するチャットの件数。超えたら古いものから消える(軽さを優先)
 CHAT_MAX_CHARS = 200
 CHAT_COOLDOWN_SEC = 2     # 連続送信の間隔(自動更新で見えるぶん、タイムラインより短くしている)
+CHAT_REFRESH_SEC = 7      # 自動更新の間隔(秒)。長くするほどサーバーの負荷が下がる
 MIN_PASSWORD_LEN = 8
 MAX_NAME_LEN = 30
 # --- セット(NovelAI「精密画像参照」)の設定 ---
@@ -2394,18 +2395,10 @@ def chat_add_message(user, text, owner=False):
     update_json_file(CHAT_FILE, {"messages": []}, mut, backup=False)
 
 
-def render_chat():
-    """作品投稿・タイムラインとは別の、気軽な一言チャット。自動更新に対応している環境では、
-    数秒ごとに自動で新しいメッセージを拾いに行く(それ以外の環境では手動更新ボタンを出す)。"""
+def _render_chat_body():
+    """チャットの中身そのもの(メッセージ一覧+送信欄)。render_chatから、
+    画面全体を描き直さずに済む形(フラグメント)で呼び出される。"""
     st.caption("ここは気軽な一言チャットです。プロフィールやいいね、設定の反映はありません。")
-    try:
-        from streamlit_autorefresh import st_autorefresh
-        st_autorefresh(interval=7000, key="chat_autorefresh")
-    except ImportError:
-        if st.button("🔄 更新", key="chat_manual_refresh", use_container_width=True):
-            st.rerun()
-        st.caption("※ 自動更新を有効にするには、サーバー側に streamlit-autorefresh を追加してください。")
-
     chat = load_chat()
     msgs = (chat.get("messages") or [])[-80:]
     if not msgs:
@@ -2444,6 +2437,29 @@ def render_chat():
             except Exception as e:
                 st.error(str(e))
             st.rerun()
+
+
+if hasattr(st, "fragment"):
+    # Streamlitの「フラグメント」機能が使える場合: チャット部分だけを定期的に
+    # 描き直す。画面全体はもう一度読み込まれないので、更新のたびに画面全体が
+    # 一瞬暗く点滅するのを防げて、サーバーの負荷もぐっと軽くなる。
+    try:
+        render_chat = st.fragment(run_every=CHAT_REFRESH_SEC)(_render_chat_body)
+    except TypeError:
+        render_chat = st.fragment(_render_chat_body)
+else:
+    # 古いバージョンのStreamlitで、フラグメント機能がない場合の予備手段
+    # (画面全体を描き直すので、更新のたびに一瞬ちらつく)。
+    def render_chat():
+        try:
+            from streamlit_autorefresh import st_autorefresh
+            st_autorefresh(interval=CHAT_REFRESH_SEC * 1000, key="chat_autorefresh")
+        except ImportError:
+            if st.button("🔄 更新", key="chat_manual_refresh", use_container_width=True):
+                st.rerun()
+            st.caption("※ 自動更新を有効にするには、サーバー側に streamlit-autorefresh を追加してください。")
+        _render_chat_body()
+
 
 def render_work_gallery(work_posts, limit_key, more_key, empty_msg="まだ作品はありません"):
     """作品(サムネイル)を3列のギャラリーで表示する。プロフィールページと作品タブの両方で使う。"""
