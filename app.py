@@ -802,8 +802,8 @@ def render_profile_page(target_user, posts_all):
     users = load_json(USERS_FILE, {})
     record = users.get(target_user) if isinstance(users, dict) else None
     my_posts = [p for p in posts_all if p.get("user") == target_user]
-    feed_posts = my_posts
     work_posts = [p for p in my_posts if p.get("image") and p.get("category") == "作品"]
+    feed_posts = [p for p in my_posts if p.get("category") != "作品"]
     total_likes = sum(len(p.get("likes") or []) for p in my_posts)
     is_admin_user = target_user in OWNER_ACCOUNTS_RAW or norm_mail((record or {}).get("email")) in OWNER_ACCOUNTS
 
@@ -833,7 +833,7 @@ def render_profile_page(target_user, posts_all):
     if st.session_state.logged_in and st.session_state.get("username") == target_user:
         render_feed_composer()
 
-    tab_feed, tab_work = st.tabs(["💬 投稿", "🖼️ 作品"])
+    tab_feed, tab_work = st.tabs(["投稿", "作品"])
     with tab_feed:
         if not feed_posts:
             st.caption("まだ投稿がありません")
@@ -862,7 +862,7 @@ def render_timeline(posts_all):
     cat_filter = st.radio("表示", ["すべて"] + THREAD_CATEGORIES, horizontal=True, key="board_feed_cat", label_visibility="collapsed")
     with st.expander("🔍 検索", expanded=False):
         q = st.text_input("検索", key="board_feed_q", placeholder="内容・名前", label_visibility="collapsed")
-    feed = list(posts_all)
+    feed = [p for p in posts_all if p.get("category") != "作品"]
     if cat_filter != "すべて":
         feed = [p for p in feed if board_category_group(p.get("category")) == cat_filter]
     searching = bool(q and q.strip())
@@ -5126,7 +5126,13 @@ elif st.session_state.page == "board":
                 st.session_state.board_view_user = st.session_state.get("username") or ""
                 st.rerun()
 
-        tab_work, tab_feed, tab_chat = st.tabs(["🖼️ 作品投稿", "💬 タイムライン", "⚡ チャット"])
+        tab_feed, tab_chat, tab_work = st.tabs(["タイムライン", "チャット", "作品投稿"])
+
+        with tab_feed:
+            render_timeline(posts_all)
+
+        with tab_chat:
+            render_chat()
 
         with tab_work:
             render_work_composer()
@@ -5142,12 +5148,6 @@ elif st.session_state.page == "board":
             if w_sort == "人気順":
                 work_posts = sorted(work_posts, key=lambda p: len(p.get("likes") or []), reverse=True)
             render_work_gallery(work_posts, "board_work_limit", "board_work_more", "まだ作品つき投稿はありません")
-
-        with tab_feed:
-            render_timeline(posts_all)
-
-        with tab_chat:
-            render_chat()
 
     # コミュニティを開いた時点までを既読にする。
     mark_community_seen()
