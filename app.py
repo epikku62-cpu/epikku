@@ -449,6 +449,10 @@ BOARD_FEED_COOLDOWN_SEC = 15   # 連続投稿の間隔
 BOARD_FEED_MAX_CHARS = 300     # タイムライン1件の最大文字数
 BOARD_MAX_COMMENTS = 40
 BOARD_MAX_POSTS_PER_USER = 10   # 1人が掲示板を埋めないための上限(管理者は対象外)
+CHAT_FILE = os.path.join(DATA_DIR, "chat_messages.json")
+CHAT_MAX_MESSAGES = 200   # 保持するチャットの件数。超えたら古いものから消える(軽さを優先)
+CHAT_MAX_CHARS = 200
+CHAT_COOLDOWN_SEC = 2     # 連続送信の間隔(自動更新で見えるぶん、タイムラインより短くしている)
 MIN_PASSWORD_LEN = 8
 MAX_NAME_LEN = 30
 # --- セット(NovelAI「精密画像参照」)の設定 ---
@@ -584,32 +588,39 @@ def render_feed_composer():
         body = st.text_area("内容", key=f"feed_body_{n}", max_chars=BOARD_FEED_MAX_CHARS, height=110,
                             placeholder="気軽に書いてみましょう")
 
-        chosen = None
-        attach = st.checkbox("📷 保存庫から画像を添える", key=f"feed_attach_{n}")
-        if attach:
+        chosen_url = None
+        attach_mode = st.radio("画像を添える", ["添えない", "保存庫から選ぶ", "端末からアップロード"],
+                               horizontal=True, key=f"feed_attach_mode_{n}")
+        if attach_mode == "保存庫から選ぶ":
             choices = []
             for item in reversed(st.session_state.get("library") or []):
                 if item.get("url"):
-                    kind = site_work_kind(item) or item.get("kind") or "library"
                     choices.append({
                         "label": f"{item.get('time','')}　{item.get('label','') or '保存画像'}",
                         "url": item["url"],
-                        "kind": kind,
-                        "meta": item,
                     })
             if not choices:
                 st.caption("保存庫に作品がありません。先に作品を保存庫へ入れてください。")
             else:
                 names = [c["label"] for c in choices]
                 pick = st.selectbox("保存庫から画像を選択", names, key=f"feed_pick_{n}")
-                chosen = choices[names.index(pick)]
-                st.image(thumb_path(chosen["url"], 320), width=160)
-                st.caption("※ ここで添える画像にはプロンプト・設定は付きません。設定込みで作品を投稿したい場合は、下の「🖼️ 作品を投稿する」を使ってください。")
+                chosen_url = choices[names.index(pick)]["url"]
+                st.image(thumb_path(chosen_url, 320), width=160)
+        elif attach_mode == "端末からアップロード":
+            up = st.file_uploader("画像ファイル", type=["png", "jpg", "jpeg", "webp"], key=f"feed_upload_{n}")
+            if up is not None:
+                try:
+                    chosen_url = uploaded_to_uri(up)
+                    st.image(thumb_path(chosen_url, 320), width=160)
+                except Exception as e:
+                    st.error(str(e))
+        if attach_mode != "添えない":
+            st.caption("※ ここで添える画像にはプロンプト・設定は付きません。panel AIで作った作品に設定込みで投稿したい場合は、下の「🖼️ 作品を投稿する」を使ってください。")
 
         if st.button("投稿する", type="primary", key=f"feed_post_{n}", use_container_width=True):
             text = (body or "").strip()
             wait = BOARD_FEED_COOLDOWN_SEC - (time.time() - float(st.session_state.get("_feed_last_post") or 0))
-            if not text and not chosen:
+            if not text and not chosen_url:
                 st.error("内容を入力するか、画像を選んでください")
             elif cat == "お知らせ" and not is_owner():
                 st.error("お知らせは、管理者だけが投稿できます")
@@ -621,12 +632,10 @@ def render_feed_composer():
                 try:
                     pid = uuid.uuid4().hex[:10]
                     img_path = ""
-                    meta = {}
                     kind = "thread"
-                    if chosen:
-                        img_path = save_board_image(chosen["url"], pid)
-                        meta = chosen.get("meta") or {}
-                        kind = chosen["kind"]
+                    if chosen_url:
+                        img_path = save_board_image(chosen_url, pid)
+                        kind = "upload"
                     board_add_post({
                         "id": pid,
                         "user": st.session_state.get("username") or "名無し",
@@ -750,9 +759,7 @@ def render_feed_card(p, icons, my_name, pinned=False, show_mine=True):
     with st.container(border=True):
         if pinned:
             st.markdown('<div style="font-size:0.8em;color:#d4a017;margin-bottom:4px;">📌 固定されたお知らせ</div>', unsafe_allow_html=True)
-        a_col, n_col, c_col = st.columns([1, 4, 2])
-        with a_col:
-            st.markdown(board_avatar_html(icons.get(author), 34), unsafe_allow_html=True)
+        n_col, c_col = st.columns([5, 2])
         with n_col:
             if st.button(f"{author}{mark}{mine}", key=f"namebtn_{pid}", use_container_width=True):
                 st.session_state.board_view_user = author
@@ -852,7 +859,6 @@ def render_timeline(posts_all):
     if notice:
         st.success(notice)
     render_feed_composer()
-    render_work_composer()
     cat_filter = st.radio("表示", ["すべて"] + THREAD_CATEGORIES, horizontal=True, key="board_feed_cat", label_visibility="collapsed")
     with st.expander("🔍 検索", expanded=False):
         q = st.text_input("検索", key="board_feed_q", placeholder="内容・名前", label_visibility="collapsed")
@@ -2354,6 +2360,90 @@ def _save_history_safely(item):
         add_history_item(item)
     except Exception as e:
         print(f"[warn] add_history_item failed: {e}")
+
+
+def load_chat():
+    """軽い「今すぐ」のチャットのメッセージ一覧。壊れていたら空として扱う。"""
+    data = load_json(CHAT_FILE, {"messages": []})
+    if not isinstance(data, dict) or not isinstance(data.get("messages"), list):
+        return {"messages": []}
+    return data
+
+
+def chat_add_message(user, text, owner=False):
+    text = (text or "").strip()[:CHAT_MAX_CHARS]
+    if not text:
+        raise Exception("メッセージを入力してください")
+
+    def mut(current):
+        if not isinstance(current, dict):
+            current = {"messages": []}
+        msgs = current.get("messages") if isinstance(current.get("messages"), list) else []
+        msgs.append({
+            "id": uuid.uuid4().hex[:8],
+            "user": user or "名無し",
+            "is_owner": bool(owner),
+            "text": text,
+            "time": datetime.now().strftime("%H:%M"),
+            "ts": time.time(),
+        })
+        current["messages"] = msgs[-CHAT_MAX_MESSAGES:]
+        return current
+
+    # チャットは残しておく価値が薄い一言のやり取りなので、.bakは作らず書き込みを軽くする。
+    update_json_file(CHAT_FILE, {"messages": []}, mut, backup=False)
+
+
+def render_chat():
+    """作品投稿・タイムラインとは別の、気軽な一言チャット。自動更新に対応している環境では、
+    数秒ごとに自動で新しいメッセージを拾いに行く(それ以外の環境では手動更新ボタンを出す)。"""
+    st.caption("ここは気軽な一言チャットです。プロフィールやいいね、設定の反映はありません。")
+    try:
+        from streamlit_autorefresh import st_autorefresh
+        st_autorefresh(interval=7000, key="chat_autorefresh")
+    except ImportError:
+        if st.button("🔄 更新", key="chat_manual_refresh", use_container_width=True):
+            st.rerun()
+        st.caption("※ 自動更新を有効にするには、サーバー側に streamlit-autorefresh を追加してください。")
+
+    chat = load_chat()
+    msgs = (chat.get("messages") or [])[-80:]
+    if not msgs:
+        st.caption("まだメッセージがありません。最初の一言をどうぞ。")
+    else:
+        for m in msgs:
+            author = html_lib.escape(str(m.get("user") or "名無し"))
+            mark = " 👑" if m.get("is_owner") else ""
+            text = _board_text_html(str(m.get("text") or ""))
+            st.markdown(
+                f'<div style="margin:3px 0;line-height:1.4;">'
+                f'<b>{author}{mark}</b> '
+                f'<span style="color:#8a8f98;font-size:0.78em;">{m.get("time","")}</span><br>'
+                f'{text}</div>',
+                unsafe_allow_html=True,
+            )
+
+    if not st.session_state.get("logged_in"):
+        st.caption("送信にはログインが必要です")
+        return
+    n = int(st.session_state.get("chat_n") or 0)
+    c1, c2 = st.columns([5, 1])
+    with c1:
+        msg = st.text_input("メッセージ", key=f"chat_input_{n}", label_visibility="collapsed", placeholder="ひとこと…")
+    with c2:
+        send = st.button("送信", key=f"chat_send_{n}", use_container_width=True)
+    if send:
+        wait = CHAT_COOLDOWN_SEC - (time.time() - float(st.session_state.get("_chat_last_post") or 0))
+        if wait > 0 and not is_owner():
+            st.error(f"あと{int(wait) + 1}秒お待ちください")
+        else:
+            try:
+                chat_add_message(st.session_state.get("username") or "名無し", msg, owner=bool(is_owner()))
+                st.session_state._chat_last_post = time.time()
+                st.session_state.chat_n = n + 1
+            except Exception as e:
+                st.error(str(e))
+            st.rerun()
 
 def render_work_gallery(work_posts, limit_key, more_key, empty_msg="まだ作品はありません"):
     """作品(サムネイル)を3列のギャラリーで表示する。プロフィールページと作品タブの両方で使う。"""
@@ -4933,13 +5023,9 @@ elif st.session_state.page == "board":
                 safe_title = html_lib.escape(str(post.get("title") or "無題"))
                 st.markdown(f"## {safe_title}")
             author = post.get("user") or "名無し"
-            icon_col, name_col = st.columns([1, 6])
-            with icon_col:
-                st.markdown(board_avatar_html((load_json(USERS_FILE, {}).get(author) or {}).get("icon") if author else "", 34), unsafe_allow_html=True)
-            with name_col:
-                if st.button(f"{author}" + (" 👑管理者" if post.get("is_owner") else ""), key=f"namebtn_detail_{view_id}", use_container_width=True):
-                    st.session_state.board_view_user = author
-                    st.rerun()
+            if st.button(f"{author}" + (" 👑管理者" if post.get("is_owner") else ""), key=f"namebtn_detail_{view_id}", use_container_width=True):
+                st.session_state.board_view_user = author
+                st.rerun()
             st.caption(post.get("time", ""))
 
             likes = post.get("likes") or []
@@ -5033,14 +5119,17 @@ elif st.session_state.page == "board":
         st.markdown(gallery_css(), unsafe_allow_html=True)
         render_profile_page(str(st.session_state.get("board_view_user")), posts_all)
     else:
-        # タイムラインに、つぶやきも作品つき投稿も、1つの流れでまとめて表示する(Twitterのように)。
+        # 「作品投稿」「タイムライン」「チャット」を、はっきり別の場所として分ける。
         st.markdown(gallery_css(), unsafe_allow_html=True)
         if st.session_state.logged_in:
             if st.button(f"🙋 マイページ（{st.session_state.get('username')}）", key="board_mypage", use_container_width=True):
                 st.session_state.board_view_user = st.session_state.get("username") or ""
                 st.rerun()
 
-        with st.expander("🖼️ みんなの作品だけを見る", expanded=False):
+        tab_work, tab_feed, tab_chat = st.tabs(["🖼️ 作品投稿", "💬 タイムライン", "⚡ チャット"])
+
+        with tab_work:
+            render_work_composer()
             f1, f2 = st.columns([1, 2])
             with f1:
                 w_sort = st.selectbox("並び順", ["新着順", "人気順"], key="board_work_sort")
@@ -5054,7 +5143,11 @@ elif st.session_state.page == "board":
                 work_posts = sorted(work_posts, key=lambda p: len(p.get("likes") or []), reverse=True)
             render_work_gallery(work_posts, "board_work_limit", "board_work_more", "まだ作品つき投稿はありません")
 
-        render_timeline(posts_all)
+        with tab_feed:
+            render_timeline(posts_all)
+
+        with tab_chat:
+            render_chat()
 
     # コミュニティを開いた時点までを既読にする。
     mark_community_seen()
