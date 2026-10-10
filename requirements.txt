@@ -3,3 +3,4 @@ openai
 pillow
 requests
 stripe
+streamlit-autorefresh
