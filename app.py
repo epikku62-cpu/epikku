@@ -4563,6 +4563,7 @@ elif st.session_state.page == "plan":
             st.caption(f"月額{MONTHLY_PRICE:,}円(税込)・毎月自動更新です。解約はこの画面からいつでもできます。"
                        "解約と同時にVIPが終了し、日割りの返金はありません。詳しくは " + legal_link_md("tokushoho") + " をご確認ください。")
             st.write(f"登録するとVIP機能が開放され、毎月 {MONTHLY_POINTS}ポイントが支給されます。")
+            st.warning("⚠️ 登録アドレスと、月額決済時にStripeへ入力するアドレスは、同じものを使ってください。違うアドレスを使うと、VIPが反映されません。")
             if not STRIPE_PRICE_ID:
                 st.error("STRIPE_PRICE_ID が設定されていません。")
             elif st.button(f"月額 {MONTHLY_PRICE}円で登録", type="primary", use_container_width=True):
@@ -4880,6 +4881,34 @@ elif st.session_state.page == "stats":
                     st.session_state.points = result["points"]
                 log_point_event(grant_name, int(grant_pts), "管理者付与", result["points"])
                 st.success(f"{grant_name} に {int(grant_pts)} ポイント足しました")
+
+        st.markdown("### 月額VIP手動付与")
+        st.caption("Stripe決済時のメールアドレスが、登録アドレスと違うなどの理由で自動反映されない場合に使います。")
+        vip_name = st.text_input("VIPを付与する相手", key="adm_vip_name")
+        vip_days = st.number_input("付与する日数", min_value=1, max_value=365, value=30, step=1, key="adm_vip_days")
+        vip_grant_points = st.checkbox(f"{MONTHLY_POINTS}ポイントも一緒に付与する", value=True, key="adm_vip_pts")
+        if st.button("VIPを手動で付与する", key="adm_vip_grant"):
+            result = {"ok": False, "until": None}
+            def _grant_vip(current):
+                if not isinstance(current, dict) or vip_name not in current or not isinstance(current[vip_name], dict):
+                    return current
+                until = datetime.now() + timedelta(days=int(vip_days))
+                current[vip_name]["premium_until"] = until.isoformat()
+                if vip_grant_points:
+                    current[vip_name]["points"] = int(current[vip_name].get("points") or 0) + MONTHLY_POINTS
+                    current[vip_name]["points_gained"] = int(current[vip_name].get("points_gained") or 0) + MONTHLY_POINTS
+                result["ok"] = True
+                result["until"] = until
+                return current
+            update_json_file(USERS_FILE, {}, _grant_vip, backup=True)
+            if not result["ok"]:
+                st.error("そのユーザーはいません")
+            else:
+                if vip_name == st.session_state.get("username"):
+                    st.session_state.premium_until = result["until"].isoformat()
+                if vip_grant_points:
+                    log_point_event(vip_name, MONTHLY_POINTS, "管理者によるVIP手動付与", 0)
+                st.success(f"{vip_name} に {int(vip_days)}日分のVIPを付与しました(期限: {result['until'].strftime('%Y/%m/%d')})")
 
     with tab_usage:
         registered = len(valid_users)
