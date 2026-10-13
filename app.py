@@ -458,6 +458,8 @@ DM_FILE = os.path.join(DATA_DIR, "dm_messages.json")
 DM_MAX_MESSAGES_PER_THREAD = 300   # 1対1の会話ごとに保持する件数
 DM_MAX_CHARS = 500
 DM_COOLDOWN_SEC = 2
+PENDING_CHARGES_FILE = os.path.join(DATA_DIR, "pending_charges.json")
+PENDING_CHARGE_TIMEOUT_SEC = 300  # この秒数を過ぎても残っている課金記録は、サーバー異常とみなして自動返却する
 MIN_PASSWORD_LEN = 8
 MAX_NAME_LEN = 30
 # --- セット(NovelAI「精密画像参照」)の設定 ---
@@ -2359,6 +2361,104 @@ def refund_points(cost, reason="生成失敗の返却"):
     except Exception as e:
         print(f"[warn] refund failed: {e}")
 
+
+def start_pending_charge(cost, reason, timeout=None):
+    """生成を始める直前(課金の直後)に「まだ完了していない課金」として記録しておく。
+    生成が成功/失敗として決着したら必ず end_pending_charge() でこの記録を消すこと。
+
+    これは、サーバーがメモリ不足などで生成の途中に強制終了してしまい、
+    try/exceptのrefund_points()すら実行されずに「ポイントだけ減って画像ができない」
+    状態になるのを防ぐための仕組み。一定時間(timeout、省略時はPENDING_CHARGE_TIMEOUT_SEC)
+    が過ぎてもこの記録が残っていたら、reconcile_pending_charges()が自動で返却する。
+    動画生成のように完了までに時間がかかるものは、timeoutを長めに指定すること。
+    """
+    cost = int(cost)
+    name = str(st.session_state.get("username") or "").strip()
+    if cost <= 0 or not name:
+        return None
+    pid = uuid.uuid4().hex[:12]
+    def mut(current):
+        if not isinstance(current, dict):
+            current = {}
+        current[pid] = {
+            "user": name, "cost": cost, "reason": str(reason or "生成"), "ts": time.time(),
+            "timeout": int(timeout) if timeout else PENDING_CHARGE_TIMEOUT_SEC,
+        }
+        return current
+    try:
+        update_json_file(PENDING_CHARGES_FILE, {}, mut, backup=False)
+    except Exception as e:
+        print(f"[warn] start_pending_charge failed: {e}")
+        return None
+    return pid
+
+
+def end_pending_charge(pid):
+    """生成が成功または失敗(refund_points済み)として決着したら、保留記録を消す。"""
+    if not pid:
+        return
+    def mut(current):
+        if isinstance(current, dict):
+            current.pop(pid, None)
+        return current
+    try:
+        update_json_file(PENDING_CHARGES_FILE, {}, mut, backup=False)
+    except Exception as e:
+        print(f"[warn] end_pending_charge failed: {e}")
+
+
+_last_pending_sweep = {"t": 0.0}
+
+def reconcile_pending_charges():
+    """サーバー異常などで宙に浮いたままの課金記録を、自動で持ち主に返却する。
+    呼び出し過多でJSONの読み書きが増えないよう、全セッション共通で間引く。"""
+    now = time.time()
+    if now - _last_pending_sweep["t"] < 60:
+        return
+    _last_pending_sweep["t"] = now
+
+    stale = {}
+    def mut(current):
+        if not isinstance(current, dict):
+            return {}
+        keep = {}
+        for pid, row in current.items():
+            if not isinstance(row, dict):
+                continue
+            limit = float(row.get("timeout") or PENDING_CHARGE_TIMEOUT_SEC)
+            if now - float(row.get("ts") or 0) > limit:
+                stale[pid] = row
+            else:
+                keep[pid] = row
+        return keep
+    try:
+        update_json_file(PENDING_CHARGES_FILE, {}, mut, backup=False)
+    except Exception as e:
+        print(f"[warn] reconcile sweep failed: {e}")
+        return
+
+    for row in stale.values():
+        name = str(row.get("user") or "").strip()
+        cost = int(row.get("cost") or 0)
+        reason = str(row.get("reason") or "生成")
+        if not name or cost <= 0:
+            continue
+        result = {"balance": 0}
+        def _mut_users(users, name=name, cost=cost, result=result):
+            if not isinstance(users, dict) or name not in users or not isinstance(users[name], dict):
+                return users
+            users[name]["points"] = int(users[name].get("points") or 0) + cost
+            users[name]["points_used"] = max(0, int(users[name].get("points_used") or 0) - cost)
+            result["balance"] = int(users[name]["points"])
+            return users
+        try:
+            update_json_file(USERS_FILE, {}, _mut_users, backup=True)
+            log_point_event(name, cost, f"{reason}: サーバー異常のため自動返却", result["balance"])
+            if name == st.session_state.get("username"):
+                st.session_state.points = result["balance"]
+        except Exception as e:
+            print(f"[warn] reconcile refund failed for {name}: {e}")
+
 def _refund_job(job):
     """動画ジョブが失敗で終わった時に、開始時に消費したポイントを戻す。"""
     try:
@@ -3886,11 +3986,14 @@ def render_set_generation_page():
     if st.session_state.get("set_busy"):
         st.session_state.set_busy = False   # 先に下ろす(途中で中断されても、次に開いた時に自動で再課金・再生成されない)
         charged = False
+        pending_id = None
         try:
             with st.spinner("生成中…"):
                 if spec["paid"] and not is_premium() and not is_owner():
                     raise Exception("このサイズはVIPだけです")
                 charged = take_points(total_cost, reason="セット画像生成") if total_cost > 0 else False
+                if charged:
+                    pending_id = start_pending_charge(total_cost, "セット画像生成")
                 used_seed = seed_value if seed_value is not None else secrets.randbelow(4294967296)
                 refs = picked_refs
                 prompt_parts = [x.strip() for x in [st.session_state.set_sq, st.session_state.set_sb, st.session_state.set_sc, st.session_state.set_so] if x.strip()]
@@ -3907,6 +4010,8 @@ def render_set_generation_page():
             if charged:
                 refund_points(total_cost)
             st.session_state.set_error = str(e)
+        finally:
+            end_pending_charge(pending_id)
         release_memory()
         go("chars")
         st.rerun()
@@ -3968,6 +4073,7 @@ if not st.session_state._booted:
 qs = st.query_params
 restore_login()
 mark_visit()
+reconcile_pending_charges()  # 生成中のサーバー異常で宙に浮いたポイントを自動で戻す(内部で間引き済み)
 if st.session_state.logged_in and stripe is not None and st.session_state.get("stripe_sub"):
     try:
         _until = datetime.fromisoformat(str(st.session_state.get("premium_until") or ""))
@@ -4228,9 +4334,11 @@ elif st.session_state.page == "video":
             try:
                 state, val = grok_wait_video(job["id"])
                 if state == "done":
+                    end_pending_charge(job.get("pending_id"))
                     st.session_state.video_out = val; st.session_state.vjob = None
                 elif state == "error":
                     _refund_job(job)
+                    end_pending_charge(job.get("pending_id"))
                     st.session_state.error = val; st.session_state.vjob = None
                 else:
                     st.session_state.error = "まだ生成中です。確認をもう一度押してください"
@@ -4264,14 +4372,19 @@ elif st.session_state.page == "video":
         else:
             st.session_state.video_starting = True
             charged = False
+            pending_id = None
             try:
                 charged = take_points(video_cost(dur), reason="動画生成")
+                if charged:
+                    # 動画生成は完了まで10分以上かかることがあるため、長めのタイムアウトにする。
+                    pending_id = start_pending_charge(video_cost(dur), "動画生成", timeout=1800)
                 task_id = grok_start_video(st.session_state.video_src, motion, dur)
-                st.session_state.vjob = {"kind": "video", "id": task_id, "cost": video_cost(dur) if charged else 0}
+                st.session_state.vjob = {"kind": "video", "id": task_id, "cost": video_cost(dur) if charged else 0, "pending_id": pending_id}
                 start_wait(); st.session_state.error = ""
             except Exception as e:
                 if charged and not isinstance(e, NoRefundError):
                     refund_points(video_cost(dur))
+                    end_pending_charge(pending_id)
                 st.session_state.error = str(e)
             finally:
                 st.session_state.video_starting = False
@@ -4322,9 +4435,11 @@ elif st.session_state.page == "vmove":
             try:
                 state, val = grok_wait_video(job["id"])
                 if state == "done":
+                    end_pending_charge(job.get("pending_id"))
                     st.session_state.vmove_out = val; st.session_state.vjob = None
                 elif state == "error":
                     _refund_job(job)
+                    end_pending_charge(job.get("pending_id"))
                     st.session_state.error = val; st.session_state.vjob = None
                 else:
                     time.sleep(5)
@@ -4344,14 +4459,19 @@ elif st.session_state.page == "vmove":
         else:
             st.session_state.video_starting = True
             charged = False
+            pending_id = None
             try:
                 charged = take_points(cost, reason="動画を移す")
+                if charged:
+                    # 動画生成は完了まで10分以上かかることがあるため、長めのタイムアウトにする。
+                    pending_id = start_pending_charge(cost, "動画を移す", timeout=1800)
                 task_id = mm_start_move(st.session_state.vmove_img, st.session_state.vmove_vid, motion, dur)
-                st.session_state.vjob = {"kind": "vmove", "id": task_id, "cost": cost if charged else 0}
+                st.session_state.vjob = {"kind": "vmove", "id": task_id, "cost": cost if charged else 0, "pending_id": pending_id}
                 start_wait(); st.session_state.error = ""
             except Exception as e:
                 if charged and not isinstance(e, NoRefundError):
                     refund_points(cost)
+                    end_pending_charge(pending_id)
                 st.session_state.error = str(e)
             finally:
                 st.session_state.video_starting = False
@@ -5196,9 +5316,12 @@ elif st.session_state.page == "simple":
             st.session_state.error = "このサイズはVIPだけです"
         else:
             charged = False
+            pending_id = None
             try:
                 with st.spinner("生成中…"):
                     charged = take_points(spec["cost"], reason="画像生成")
+                    if charged:
+                        pending_id = start_pending_charge(spec["cost"], "画像生成")
                     used_seed = seed_value if seed_value is not None else secrets.randbelow(4294967296)
                     img = nai_request(
                         ", ".join(parts), spec["gen"][0], spec["gen"][1], "nai-diffusion-5-full",
@@ -5212,6 +5335,8 @@ elif st.session_state.page == "simple":
                 if charged:
                     refund_points(spec["cost"])
                 st.session_state.error = str(e)
+            finally:
+                end_pending_charge(pending_id)
         st.session_state.simple_busy = False
         release_memory()
         go("simple"); st.rerun()
