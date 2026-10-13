@@ -1216,8 +1216,13 @@ def restore_login():
     if name and name in users:
         st.session_state.auth_token = token
         _set_auth_cookie(token)
-        # 初期表示時は保存・Stripe確認を行わず、画面表示を優先する。
-        apply_login(name, users[name], persist=False, sync=False, pending=False)
+        # 初期表示時はユーザーデータの再保存はしない(画面表示を優先)。
+        # Stripeの確認(sync/pending)は行う: 月額登録や購入を済ませた人が、
+        # 「月額登録」「ショップ」以外のページに移動してしまうと反映されずに
+        # 残ってしまうバグがあったため、ログイン状態の復元時にも必ず1回確認する。
+        # (sync_subscription/credit_pending_checkoutsはどちらも内部で間引かれるため、
+        # 毎回のページ描画が重くなることはない)
+        apply_login(name, users[name], persist=False, sync=True, pending=True)
 
 def start_wait():
     st.session_state.wait_until = time.time() + WAIT_SEC
