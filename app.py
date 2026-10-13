@@ -4614,7 +4614,7 @@ elif st.session_state.page == "dm":
                     bg = "#ffe3ef" if mine else "#f1f1f4"
                     st.markdown(
                         f'<div style="text-align:{align};margin:4px 0;">'
-                        f'<span style="display:inline-block;max-width:80%;background:{bg};'
+                        f'<span style="display:inline-block;max-width:80%;background:{bg};color:#1a1a1a;'
                         f'border-radius:12px;padding:8px 12px;text-align:left;">'
                         f'<b style="font-size:0.8em;color:#888;">{who}</b><br>{text}'
                         f'<div style="font-size:0.72em;color:#999;margin-top:2px;">{html_lib.escape(str(m.get("time") or ""))}</div>'
