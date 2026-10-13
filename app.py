@@ -454,6 +454,10 @@ CHAT_MAX_MESSAGES = 200   # 保持するチャットの件数。超えたら古�
 CHAT_MAX_CHARS = 200
 CHAT_COOLDOWN_SEC = 2     # 連続送信の間隔(自動更新で見えるぶん、タイムラインより短くしている)
 CHAT_REFRESH_SEC = 7      # 自動更新の間隔(秒)。長くするほどサーバーの負荷が下がる
+DM_FILE = os.path.join(DATA_DIR, "dm_messages.json")
+DM_MAX_MESSAGES_PER_THREAD = 300   # 1対1の会話ごとに保持する件数
+DM_MAX_CHARS = 500
+DM_COOLDOWN_SEC = 2
 MIN_PASSWORD_LEN = 8
 MAX_NAME_LEN = 30
 # --- セット(NovelAI「精密画像参照」)の設定 ---
@@ -833,6 +837,10 @@ def render_profile_page(target_user, posts_all):
 
     if st.session_state.logged_in and st.session_state.get("username") == target_user:
         render_feed_composer()
+    elif st.session_state.logged_in and record:
+        if st.button("✉️ メッセージを送る", key=f"dm_start_{target_user}", use_container_width=True):
+            st.session_state.dm_target = target_user
+            go("dm"); st.rerun()
 
     tab_feed, tab_work = st.tabs(["投稿", "作品"])
     with tab_feed:
@@ -2400,6 +2408,112 @@ def chat_add_message(user, text, owner=False):
     update_json_file(CHAT_FILE, {"messages": []}, mut, backup=False)
 
 
+def dm_thread_id(a, b):
+    """2人のユーザー名から、1対1の会話を表す固定のIDを作る(順番に関わらず同じになる)。"""
+    a = str(a or "").strip()
+    b = str(b or "").strip()
+    return "||".join(sorted([a, b]))
+
+
+def load_dm():
+    """個人メッセージ(DM)の全スレッドを読み込む。壊れていたら空として扱う。"""
+    data = load_json(DM_FILE, {"threads": {}})
+    if not isinstance(data, dict) or not isinstance(data.get("threads"), dict):
+        return {"threads": {}}
+    return data
+
+
+def dm_send(from_user, to_user, text):
+    """from_userからto_userへ1通送る。"""
+    from_user = str(from_user or "").strip()
+    to_user = str(to_user or "").strip()
+    text = (text or "").strip()[:DM_MAX_CHARS]
+    if not from_user or not to_user or from_user == to_user:
+        raise Exception("送信できません")
+    if not text:
+        raise Exception("メッセージを入力してください")
+    tid = dm_thread_id(from_user, to_user)
+
+    def mut(current):
+        if not isinstance(current, dict) or not isinstance(current.get("threads"), dict):
+            current = {"threads": {}}
+        threads = current["threads"]
+        th = threads.get(tid) if isinstance(threads.get(tid), dict) else {}
+        members = th.get("members") if isinstance(th.get("members"), list) and len(th.get("members")) == 2 else [from_user, to_user]
+        msgs = th.get("messages") if isinstance(th.get("messages"), list) else []
+        now = time.time()
+        msgs.append({
+            "id": uuid.uuid4().hex[:8],
+            "from": from_user,
+            "text": text,
+            "time": datetime.now().strftime("%Y/%m/%d %H:%M"),
+            "ts": now,
+        })
+        seen = th.get("seen") if isinstance(th.get("seen"), dict) else {}
+        seen[from_user] = now   # 自分が送った分は、自分にとってはすぐ既読扱い
+        th["members"] = members
+        th["messages"] = msgs[-DM_MAX_MESSAGES_PER_THREAD:]
+        th["updated_at"] = now
+        th["seen"] = seen
+        threads[tid] = th
+        current["threads"] = threads
+        return current
+
+    update_json_file(DM_FILE, {"threads": {}}, mut, backup=True)
+
+
+def dm_mark_seen(username, tid):
+    """そのユーザーが、そのスレッドを今読んだことにする(未読バッジを消す)。"""
+    def mut(current):
+        if not isinstance(current, dict) or not isinstance(current.get("threads"), dict):
+            return current
+        th = current["threads"].get(tid)
+        if isinstance(th, dict):
+            seen = th.get("seen") if isinstance(th.get("seen"), dict) else {}
+            seen[username] = time.time()
+            th["seen"] = seen
+        return current
+    update_json_file(DM_FILE, {"threads": {}}, mut, backup=False)
+
+
+def dm_threads_for(username):
+    """自分が関わっている会話を、新しい順にまとめて返す。"""
+    username = str(username or "").strip()
+    if not username:
+        return []
+    data = load_dm()
+    out = []
+    for tid, th in (data.get("threads") or {}).items():
+        if not isinstance(th, dict):
+            continue
+        members = th.get("members") or []
+        if username not in members:
+            continue
+        other = next((m for m in members if m != username), "")
+        msgs = th.get("messages") or []
+        last = msgs[-1] if msgs else {}
+        seen_at = float((th.get("seen") or {}).get(username) or 0)
+        unread = sum(1 for m in msgs if m.get("from") != username and float(m.get("ts") or 0) > seen_at)
+        out.append({
+            "tid": tid,
+            "other": other,
+            "last_text": str(last.get("text") or ""),
+            "last_time": str(last.get("time") or ""),
+            "updated_at": float(th.get("updated_at") or 0),
+            "unread": unread,
+        })
+    out.sort(key=lambda r: r["updated_at"], reverse=True)
+    return out
+
+
+def dm_unread_total(username):
+    """メニューに出す未読バッジの数。"""
+    try:
+        return sum(r["unread"] for r in dm_threads_for(username))
+    except Exception:
+        return 0
+
+
 def _render_chat_body():
     """チャットの中身そのもの(メッセージ一覧+送信欄)。render_chatから、
     画面全体を描き直さずに済む形(フラグメント)で呼び出される。"""
@@ -3412,6 +3526,10 @@ def render_top_menu():
             )
         community_badge = " 🔴" if community_unread_count() else ""
         menu_items = [(f"👥 コミュニティ{community_badge}", "board"), ("画像生成モード", "simple"), ("セット画像生成", "chars"), ("保存庫", "lib"), ("動画生成", "video"), ("動画を移す", "vmove"), ("ポイント購入", "shop"), ("月額登録", "plan"), ("お問い合わせ", "contact")]
+        if st.session_state.logged_in:
+            dm_unread = dm_unread_total(st.session_state.get("username"))
+            dm_badge = f" 🔴{dm_unread}" if dm_unread else ""
+            menu_items.insert(1, (f"✉️ メッセージ{dm_badge}", "dm"))
         if is_owner():
             menu_items.append(("来場者管理", "stats"))
         for label, page in menu_items:
@@ -4466,23 +4584,100 @@ elif st.session_state.page == "plan":
                 except Exception as e:
                     st.error(str(e))
 
+elif st.session_state.page == "dm":
+    st.subheader("メッセージ")
+    if not st.session_state.logged_in:
+        st.warning("メッセージの送受信にはログインが必要です。")
+        if st.button("ログイン / 登録", type="primary", use_container_width=True):
+            go("register"); st.rerun()
+    else:
+        me = st.session_state.get("username") or ""
+        target = str(st.session_state.get("dm_target") or "")
+        if target:
+            if st.button("← メッセージ一覧へ戻る", key="dm_back", use_container_width=True):
+                st.session_state.dm_target = ""
+                st.rerun()
+            st.markdown(f"### {html_lib.escape(target)} さんとのメッセージ")
+            tid = dm_thread_id(me, target)
+            dm_mark_seen(me, tid)
+            data = load_dm()
+            th = (data.get("threads") or {}).get(tid) or {}
+            msgs = th.get("messages") or []
+            if not msgs:
+                st.caption("まだメッセージがありません。最初のメッセージを送ってみましょう。")
+            else:
+                for m in msgs[-200:]:
+                    mine = m.get("from") == me
+                    who = "あなた" if mine else html_lib.escape(target)
+                    text = _board_text_html(str(m.get("text") or ""))
+                    align = "right" if mine else "left"
+                    bg = "#ffe3ef" if mine else "#f1f1f4"
+                    st.markdown(
+                        f'<div style="text-align:{align};margin:4px 0;">'
+                        f'<span style="display:inline-block;max-width:80%;background:{bg};'
+                        f'border-radius:12px;padding:8px 12px;text-align:left;">'
+                        f'<b style="font-size:0.8em;color:#888;">{who}</b><br>{text}'
+                        f'<div style="font-size:0.72em;color:#999;margin-top:2px;">{html_lib.escape(str(m.get("time") or ""))}</div>'
+                        f'</span></div>',
+                        unsafe_allow_html=True,
+                    )
+            n = int(st.session_state.get("dm_n") or 0)
+            c1, c2 = st.columns([5, 1])
+            with c1:
+                msg = st.text_input("メッセージ", key=f"dm_input_{n}", label_visibility="collapsed", placeholder="メッセージを入力…")
+            with c2:
+                send = st.button("送信", key=f"dm_send_{n}", use_container_width=True)
+            if send:
+                wait = DM_COOLDOWN_SEC - (time.time() - float(st.session_state.get("_dm_last_post") or 0))
+                if wait > 0 and not is_owner():
+                    st.error(f"あと{int(wait) + 1}秒お待ちください")
+                else:
+                    try:
+                        dm_send(me, target, msg)
+                        st.session_state._dm_last_post = time.time()
+                        st.session_state.dm_n = n + 1
+                    except Exception as e:
+                        st.error(str(e))
+                    st.rerun()
+        else:
+            with st.expander("✉️ 新しいメッセージを送る", expanded=False):
+                to_name = st.text_input("相手のユーザー名", key="dm_new_to")
+                if st.button("会話を始める", key="dm_new_start"):
+                    to_clean = (to_name or "").strip()
+                    users = load_json(USERS_FILE, {})
+                    if not to_clean:
+                        st.error("ユーザー名を入力してください")
+                    elif to_clean == me:
+                        st.error("自分には送れません")
+                    elif not (isinstance(users, dict) and to_clean in users):
+                        st.error("そのユーザー名は見つかりません")
+                    else:
+                        st.session_state.dm_target = to_clean
+                        st.rerun()
+            threads = dm_threads_for(me)
+            if not threads:
+                st.caption("まだメッセージはありません。")
+            else:
+                for t in threads:
+                    badge = f" 🔴{t['unread']}" if t["unread"] else ""
+                    if st.button(f"{t['other']}{badge}", key=f"dm_open_{t['tid']}", use_container_width=True):
+                        st.session_state.dm_target = t["other"]
+                        st.rerun()
+                    st.caption(f"{t['last_time']} ・ {t['last_text'][:40]}")
+
 elif st.session_state.page in LEGAL_PAGES:
     render_legal_page(st.session_state.page)
 
 elif st.session_state.page == "contact":
     st.subheader("お問い合わせ")
-    st.write(f"送信先: {CONTACT_TO}")
-    cname = st.text_input("お名前")
-    cmail = st.text_input("返信先メール")
-    cbody = st.text_area("内容")
-    if st.button("メールを送る", type="primary"):
-        if not cname or not cmail or not cbody:
-            st.warning("全部入れてください")
-        elif not valid_mail_format(cmail):
-            st.error("メールの形が正しくありません")
-        else:
-            ok, err = send_mail(CONTACT_TO, f"[panel AI] お問い合わせ {cname}", f"名前: {cname}\n返信先: {cmail}\nユーザー: {st.session_state.get('username','未ログイン')}\n\n{cbody}")
-            st.success("送りました") if ok else st.error(f"送れませんでした: {err}")
+    st.write("お問い合わせは、Twitter(X)のDMで承っております。")
+    st.markdown(
+        '<a href="https://x.com/PanelAi_com" target="_blank" rel="noopener" '
+        'style="display:inline-block;padding:0.6em 1.4em;background:#ff4081;color:#fff;'
+        'border-radius:8px;text-decoration:none;font-weight:bold;">@PanelAi_com</a>',
+        unsafe_allow_html=True,
+    )
+    st.caption("上のリンクからプロフィールを開き、こちらにDMをください。")
 
 elif st.session_state.page == "stats":
     st.subheader("来場者管理")
