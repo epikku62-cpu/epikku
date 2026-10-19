@@ -702,7 +702,7 @@ def render_work_composer():
         st.image(thumb_path(chosen["url"], 440), width=220)
         show_p = "非表示"
         if chosen["kind"] == "simple":
-            show_p = st.radio("プロンプト・設定・シード値", ["表示する", "非表示"], horizontal=True, key="board_show_prompt")
+            show_p = st.radio("プロンプト・設定・シード値", ["非表示", "表示する"], horizontal=True, key="board_show_prompt")
         else:
             st.caption("この作品には画像生成モードのプロンプト情報がありません")
         if st.button("作品を投稿する", type="primary", use_container_width=True, key="board_work_submit"):
@@ -2276,12 +2276,12 @@ def apply_simple_settings(item):
     st.session_state.sb = item.get("background") or ""
     st.session_state.so = item.get("other") or ""
     st.session_state.sn = item.get("negative") or ""
-    st.session_state.schars = chars[:3]
+    st.session_state.schars = chars[:6]
     bubbles = list(item.get("bubbles") or [])
     while len(bubbles) < len(st.session_state.schars):
         bubbles.append("")
     st.session_state.sbubbles = bubbles[:len(st.session_state.schars)]
-    for i in range(3):
+    for i in range(6):
         st.session_state[f"scarea_{i}"] = st.session_state.schars[i] if i < len(st.session_state.schars) else ""
         st.session_state[f"sbb_{i}"] = st.session_state.sbubbles[i] if i < len(st.session_state.sbubbles) else ""
     st.session_state.simple_seed = "" if item.get("seed") is None else str(item.get("seed"))
@@ -5232,7 +5232,7 @@ elif st.session_state.page == "simple":
         st.stop()
     st.text_area("画質プロンプト", key="sq")
     st.text_area("背景プロンプト", key="sb")
-    if st.button("➕ キャラ追加") and len(st.session_state.schars) < 3:
+    if st.button("➕ キャラ追加") and len(st.session_state.schars) < 6:
         st.session_state.schars.append("")
         st.session_state.sbubbles.append("")
         idx = len(st.session_state.schars) - 1
