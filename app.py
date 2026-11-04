@@ -4501,7 +4501,7 @@ elif st.session_state.page == "vmove":
 
 elif st.session_state.page == "lineboil":
     st.subheader("🖍 画像加工")
-    st.caption("画像に、線ゆらぎ・フェード・成仏・粉々・天に滅される(消える/現れる)などの効果を付けて、GIF/MP4で保存できます(VIP限定・ポイント消費なし)。")
+    st.caption("画像を加工できます。揺らす、消す、などの効果を付けて、GIF/MP4で保存できます(VIP限定・ポイント消費なし)。")
     if not st.session_state.logged_in:
         st.warning("この機能を使うにはログインが必要です。")
         if st.button("ログイン / 登録", type="primary"):
